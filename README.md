@@ -1,67 +1,44 @@
-﻿
-# 用强化学习玩合成大西瓜
+# 合成大西瓜 pygame 版
 
-代码地址：[https://github.com/Sharpiless/play-daxigua-using-Reinforcement-Learning](https://github.com/Sharpiless/play-daxigua-using-Reinforcement-Learning)
+这是一个基于 `pygame` 和 `pymunk` 的《合成大西瓜》桌面小游戏。
 
-用强化学习DQN算法，训练AI模型来玩合成大西瓜游戏，提供Keras版本、PARL（paddle）版本和pytorch版本。
+当前项目只保留游戏本体。旧实验代码和旧环境封装已经移除，后续如果需要自动游玩能力，会重新设计相关模块。
 
-> B站：[https://space.bilibili.com/470550823](https://space.bilibili.com/470550823)
+## 运行
 
-> CSDN：[https://blog.csdn.net/weixin_44936889](https://blog.csdn.net/weixin_44936889)
+先安装依赖：
 
-> AI Studio：[https://aistudio.baidu.com/aistudio/personalcenter/thirdview/67156](https://aistudio.baidu.com/aistudio/personalcenter/thirdview/67156)
+```bash
+python -m pip install -r requirements.txt
+```
 
-> Github：[https://github.com/Sharpiless](https://github.com/Sharpiless)
-
-## 1. 打开游戏：
-
-这里使用pygame重写了大西瓜游戏，并封装为适合RL环境的代码。
-
-解压图片素材：
+首次运行前解压图片资源：
 
 ```bash
 unzip res.zip
 ```
 
-运行：
+启动游戏：
 
 ```bash
 python Main.py
 ```
 
-即可开始游戏：
+## 操作
 
-![在这里插入图片描述](https://img-blog.csdnimg.cn/20210212172120818.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3dlaXhpbl80NDkzNjg4OQ==,size_16,color_FFFFFF,t_70)
+- 鼠标移动：调整当前水果的投放位置。
+- 鼠标左键：投放水果。
+- `A` / `Left`：向左调整投放位置。
+- `D` / `Right`：向右调整投放位置。
+- `Space` / `Enter`：投放水果。
+- `R`：重新开始。
+- `Esc`：退出。
+- 拖动窗口边框：改变游戏场地大小。
 
-## 2. 训练RL模型：
+## 项目说明
 
-RL算法采用DQN算法，其中Keras版本使用了简单的卷积神经网络来计算Q值，PRAL版本使用ResNet。
-
-运行：
-
-```bash
-python train_keras.py
-```
-
-或者
-
-```bash
-python train_paddle.py
-```
-
-或者
-
-```bash
-python train_torch.py
-```
-
-开始训练：
-
-![在这里插入图片描述](https://img-blog.csdnimg.cn/20210212172442170.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3dlaXhpbl80NDkzNjg4OQ==,size_16,color_FFFFFF,t_70)
-
-# 关注我的公众号：
-
-感兴趣的同学关注我的公众号——可达鸭的深度学习教程：
-
-![在这里插入图片描述](https://img-blog.csdnimg.cn/20210127153004430.jpg?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3dlaXhpbl80NDkzNjg4OQ==,size_16,color_FFFFFF,t_70)
-
+- `Main.py`: 游戏入口和表现层，负责窗口、输入、渲染、特效和音效。
+- `Game.py`: 游戏公共逻辑，负责物理世界、边界、碰撞合成、计分和失败检测。
+- `Fruit.py`: 水果类型、半径、图片加载和缓存。
+- `res.zip`: 水果图片资源压缩包。
+- `docs/`: 项目文档和 Codex 修改记录。
