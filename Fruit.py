@@ -1,6 +1,17 @@
 import pygame as pg
 
 
+_IMAGE_CACHE = {}
+
+
+def load_fruit_image(path, size):
+    key = (path, size)
+    if key not in _IMAGE_CACHE:
+        image = pg.image.load(path).convert_alpha()
+        _IMAGE_CACHE[key] = pg.transform.smoothscale(image, size)
+    return _IMAGE_CACHE[key]
+
+
 def create_fruit(type, x, y):
     fruit = None
     if type == 1:
@@ -58,8 +69,7 @@ class PT(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/01.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/01.png', self.size)
 
 
 class YT(Fruit):
@@ -70,8 +80,7 @@ class YT(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/02.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/02.png', self.size)
 
 
 class JZ(Fruit):
@@ -82,8 +91,7 @@ class JZ(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/03.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/03.png', self.size)
 
 
 class NM(Fruit):
@@ -94,8 +102,7 @@ class NM(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/04.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/04.png', self.size)
 
 
 class MHT(Fruit):
@@ -106,8 +113,7 @@ class MHT(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/05.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/05.png', self.size)
 
 
 class XHS(Fruit):
@@ -118,8 +124,7 @@ class XHS(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/06.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/06.png', self.size)
 
 
 class TZ(Fruit):
@@ -130,8 +135,7 @@ class TZ(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/07.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/07.png', self.size)
 
 
 class BL(Fruit):
@@ -142,8 +146,7 @@ class BL(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/08.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/08.png', self.size)
 
 
 class YZ(Fruit):
@@ -155,8 +158,7 @@ class YZ(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/09.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/09.png', self.size)
 
 
 class XG(Fruit):
@@ -168,8 +170,7 @@ class XG(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/10.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/10.png', self.size)
 
 
 class DXG(Fruit):
@@ -181,5 +182,4 @@ class DXG(Fruit):
         Fruit.__init__(self, x - self.r, y - self.r)
 
     def load_images(self):
-        self.image = pg.image.load('res/11.png')
-        self.image = pg.transform.smoothscale(self.image, self.size)
+        self.image = load_fruit_image('res/11.png', self.size)

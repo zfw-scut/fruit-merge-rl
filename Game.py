@@ -79,12 +79,17 @@ class GameBoard(object):
                 ball = self.create_ball(
                     self.space, x, y, m=fruit.r//10, r=fruit.r-1, i=i)
                 self.balls.append(ball)
+                score_delta = 0
                 if i < 11:
                     self.last_score = self.score
-                    self.score += i
+                    score_delta = i
+                    self.score += score_delta
                 elif i == 11:
                     self.last_score = self.score
-                    self.score += 100
+                    score_delta = 100
+                    self.score += score_delta
+                if hasattr(self, 'on_fruit_merged'):
+                    self.on_fruit_merged(i, x, y, score_delta)
                 self.lock = False
 
         for i in range(1, 11):
@@ -100,8 +105,8 @@ class GameBoard(object):
         ball_body = pymunk.Body(m, ball_moment)
         ball_body.position = x, y
         ball_shape = pymunk.Circle(ball_body, r)
-        ball_shape.elasticity = 0.3
-        ball_shape.friction = 0.6
+        ball_shape.elasticity = 0.18
+        ball_shape.friction = 0.88
         ball_shape.collision_type = i
         space.add(ball_body, ball_shape)
         return ball_shape
