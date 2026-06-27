@@ -132,6 +132,9 @@ class SoundBank:
 
 class Board(GameBoard):
     def __init__(self):
+        self.min_width = 360
+        self.min_height = 560
+        self.display_flags = pg.RESIZABLE
         self.create_time = 2.0
         self.gravity = (0, 1800)
         GameBoard.__init__(self, self.create_time, self.gravity)
@@ -171,14 +174,14 @@ class Board(GameBoard):
         self._start_round()
 
     def _build_background(self):
-        surface = pg.Surface(self.RES)
+        gradient = pg.Surface((1, self.HEIGHT))
         top = (14, 23, 31)
         bottom = (24, 45, 51)
         for y in range(self.HEIGHT):
             t = y / max(1, self.HEIGHT - 1)
             color = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
-            pg.draw.line(surface, color, (0, y), (self.WIDTH, y))
-        return surface.convert()
+            gradient.set_at((0, y), color)
+        return pg.transform.scale(gradient, self.RES).convert()
 
     def _pick_fruit_type(self):
         return random.randrange(1, 5)
@@ -197,6 +200,39 @@ class Board(GameBoard):
         self.rings.clear()
         self.floating_texts.clear()
         self._start_round()
+
+    def _event_size(self, event):
+        if hasattr(event, 'size'):
+            return event.size
+        width = getattr(event, 'w', getattr(event, 'x', self.WIDTH))
+        height = getattr(event, 'h', getattr(event, 'y', self.HEIGHT))
+        return width, height
+
+    def _resize_window(self, width, height, recreate_display=False):
+        old_width, old_height = self.WIDTH, self.HEIGHT
+        if not self.resize_world(width, height, recreate_display=recreate_display):
+            return
+
+        self.background = self._build_background()
+        self.aim_x = self._clamp_drop_x(self.aim_x)
+        self.mouse_x = self._clamp_drop_x(self.mouse_x)
+        self._keep_balls_in_bounds(old_width, old_height)
+        if self.current_fruit:
+            self.current_fruit.update_position(int(self.mouse_x), int(self._preview_y()))
+
+    def _keep_balls_in_bounds(self, old_width, old_height):
+        if self.WIDTH >= old_width and self.HEIGHT >= old_height:
+            return
+
+        for ball in self.balls:
+            radius = getattr(ball, 'radius', 20)
+            x, y = ball.body.position
+            clamped_x = max(self.wall_width + radius, min(self.WIDTH - self.wall_width - radius, x))
+            clamped_y = min(self.HEIGHT - self.wall_width - radius, y)
+            if clamped_x != x or clamped_y != y:
+                ball.body.position = clamped_x, clamped_y
+                vx, vy = ball.body.velocity
+                ball.body.velocity = vx * 0.45, min(vy, 120)
 
     def _clamp_drop_x(self, x, fruit_type=None):
         fruit_radius = self.current_fruit.r if self.current_fruit else 24
@@ -245,9 +281,16 @@ class Board(GameBoard):
             self.current_fruit = create_fruit(self.i, self.mouse_x, self._preview_y())
 
     def _handle_events(self):
+        pending_resize = None
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 raise SystemExit
+            if event.type in (
+                    pg.VIDEORESIZE,
+                    getattr(pg, 'WINDOWRESIZED', -1),
+                    getattr(pg, 'WINDOWSIZECHANGED', -2)):
+                pending_resize = self._event_size(event)
+                continue
             if event.type == pg.MOUSEMOTION:
                 self.input_mode = 'mouse'
                 self.aim_x = self._clamp_drop_x(event.pos[0])
@@ -262,6 +305,9 @@ class Board(GameBoard):
                     self._restart_game()
                 elif event.key == pg.K_ESCAPE:
                     raise SystemExit
+
+        if pending_resize:
+            self._resize_window(*pending_resize)
 
     def _update_input(self, dt):
         keys = pg.key.get_pressed()
