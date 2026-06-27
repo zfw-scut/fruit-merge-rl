@@ -1,12 +1,14 @@
 import pygame as pg
 import pymunk.pygame_util
-from Fruit import create_fruit
+
+from .fruit import create_fruit
+from ..config import DEFAULT_WINDOW_SIZE, FPS
 
 
 class GameBoard(object):
     def __init__(self, create_time, gravity):
-        self.RES = self.WIDTH, self.HEIGHT = 400, 800
-        self.FPS = 120
+        self.RES = self.WIDTH, self.HEIGHT = DEFAULT_WINDOW_SIZE
+        self.FPS = FPS
         self.balls = []
         self.fruits = []
 
