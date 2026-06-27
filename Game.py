@@ -16,12 +16,14 @@ class GameBoard(object):
         self.init_x = int(self.WIDTH / 2)
 
         pg.init()
-        self.surface = pg.display.set_mode(self.RES)
+        self.display_flags = getattr(self, 'display_flags', 0)
+        self.surface = pg.display.set_mode(self.RES, self.display_flags)
         self.clock = pg.time.Clock()
         self.draw_options = pymunk.pygame_util.DrawOptions(self.surface)
 
         self.space = pymunk.Space()
         self.space.gravity = gravity
+        self.segments = []
         self.create_time = create_time
 
 
@@ -43,11 +45,39 @@ class GameBoard(object):
         self.alive = True
 
     def init_segment(self):
+        for segment in self.segments:
+            try:
+                self.space.remove(segment)
+            except Exception:
+                pass
+        self.segments = []
+
         B1, B2, B3, B4 = (0, 0), (0, self.HEIGHT), (self.WIDTH,
                                                     self.HEIGHT), (self.WIDTH, 0)
         borders = (B1, B2), (B2, B3), (B3, B4)
         for border in borders:
-            self.create_segment(*border, 20, self.space, 'darkslategray')
+            self.segments.append(
+                self.create_segment(*border, 20, self.space, 'darkslategray'))
+
+    def resize_world(self, width, height, recreate_display=False):
+        min_width = getattr(self, 'min_width', 320)
+        min_height = getattr(self, 'min_height', 520)
+        width = max(min_width, int(width))
+        height = max(min_height, int(height))
+
+        if width == self.WIDTH and height == self.HEIGHT:
+            return False
+
+        self.RES = self.WIDTH, self.HEIGHT = width, height
+        self.init_y = int(0.15 * self.HEIGHT)
+        self.init_x = int(self.WIDTH / 2)
+        if recreate_display:
+            self.surface = pg.display.set_mode(self.RES, self.display_flags)
+        else:
+            self.surface = pg.display.get_surface() or self.surface
+        self.draw_options = pymunk.pygame_util.DrawOptions(self.surface)
+        self.init_segment()
+        return True
 
     def setup_collision_handler(self):
         def post_solve_bird_line(arbiter, space, data):
@@ -117,6 +147,7 @@ class GameBoard(object):
         segment_shape.color = pg.color.THECOLORS[color]
         segment_shape.friction = 0.6
         space.add(segment_shape)
+        return segment_shape
 
     def show_score(self):
         score_font = pg.font.Font(None, 36)
