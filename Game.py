@@ -6,7 +6,7 @@ from Fruit import create_fruit
 class GameBoard(object):
     def __init__(self, create_time, gravity):
         self.RES = self.WIDTH, self.HEIGHT = 400, 800
-        self.FPS = 50
+        self.FPS = 120
         self.balls = []
         self.fruits = []
 
@@ -88,8 +88,12 @@ class GameBoard(object):
                 self.lock = False
 
         for i in range(1, 11):
-            self.space.add_collision_handler(
-                i, i).post_solve = post_solve_bird_line
+            if hasattr(self.space, 'add_collision_handler'):
+                self.space.add_collision_handler(
+                    i, i).post_solve = post_solve_bird_line
+            else:
+                self.space.on_collision(
+                    i, i, post_solve=post_solve_bird_line)
 
     def create_ball(self, space, x, y, m=1, r=7, i=1):
         ball_moment = pymunk.moment_for_circle(m, 0, r)
