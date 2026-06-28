@@ -1,2 +1,5 @@
-"""Presentation layer package reserved for renderer, input, effects, and audio."""
+"""表现层预留包。
 
+当前渲染、输入、特效和音频仍主要集中在 `daxigua.app` 中。后续继续重构时，
+可以把 pygame 绘制、HUD、粒子、声音等模块逐步迁入这里。
+"""
