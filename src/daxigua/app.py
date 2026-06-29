@@ -21,10 +21,8 @@ import pygame as pg
 
 from .core.board import GameBoard
 from .core.fruit import create_fruit
+from .core.rules import FRUIT_QUEUE_LENGTH, random_spawn_level
 
-
-# 顶部可视化队列长度。后续 RL 设计参考文档中也按 q0 到 q3 组织水果序列。
-FRUIT_QUEUE_LENGTH = 4
 
 # 顶部独立信息层。分数和待投放队列都绘制在这条区域内，
 # 当前悬浮水果会出现在它下方，避免两者视野冲突。
@@ -354,7 +352,7 @@ class Board(GameBoard):
         """随机选择可投放水果类型。"""
 
         # 初始投放只出现 1 到 4 级水果，避免一开始就生成过大的水果。
-        return random.randrange(1, 5)
+        return random_spawn_level(random)
 
     def _fill_fruit_queue(self):
         """把待投放水果队列补足到固定长度。"""

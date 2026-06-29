@@ -13,6 +13,7 @@
 import pygame as pg
 
 from ..config import FRUIT_ASSET_DIR
+from .rules import fruit_radius
 
 
 # 图片缓存，key 是 `(图片路径, 缩放尺寸)`。
@@ -154,7 +155,7 @@ class PT(Fruit):
 
     def __init__(self, x, y):
         # 原始资源半径按 `2 * 基础值` 放大，保持和旧版本手感一致。
-        self.r = 2 * 10
+        self.r = fruit_radius(1)
         self.type = 1
 
         # 贴图是正方形，宽高都是直径。
@@ -172,7 +173,7 @@ class YT(Fruit):
     """2 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 15
+        self.r = fruit_radius(2)
         self.type = 2
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -185,7 +186,7 @@ class JZ(Fruit):
     """3 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 21
+        self.r = fruit_radius(3)
         self.type = 3
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -198,7 +199,7 @@ class NM(Fruit):
     """4 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 23
+        self.r = fruit_radius(4)
         self.type = 4
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -211,7 +212,7 @@ class MHT(Fruit):
     """5 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 29
+        self.r = fruit_radius(5)
         self.type = 5
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -224,7 +225,7 @@ class XHS(Fruit):
     """6 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 35
+        self.r = fruit_radius(6)
         self.type = 6
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -237,7 +238,7 @@ class TZ(Fruit):
     """7 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 37
+        self.r = fruit_radius(7)
         self.type = 7
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -250,7 +251,7 @@ class BL(Fruit):
     """8 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 50
+        self.r = fruit_radius(8)
         self.type = 8
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -263,7 +264,7 @@ class YZ(Fruit):
     """9 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 59
+        self.r = fruit_radius(9)
         self.type = 9
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -276,7 +277,7 @@ class XG(Fruit):
     """10 级水果。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 60
+        self.r = fruit_radius(10)
         self.type = 10
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)
@@ -289,7 +290,7 @@ class DXG(Fruit):
     """11 级水果，也就是最终的大西瓜。"""
 
     def __init__(self, x, y):
-        self.r = 2 * 78
+        self.r = fruit_radius(11)
         self.type = 11
         self.size = (self.r * 2, self.r * 2)
         Fruit.__init__(self, x - self.r, y - self.r)

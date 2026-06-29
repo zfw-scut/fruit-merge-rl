@@ -14,10 +14,14 @@
 | `src/daxigua/app.py` | 游戏应用入口和当前表现层实现。负责固定窗口、输入、正式渲染、鼠标跟随投放、预览线、顶部独立信息层、待投放水果队列、HUD、粒子、飘字、震动和音效反馈。 | `Board.next_frame()`、`Board.run()`、`main()` |
 | `src/daxigua/config.py` | 项目路径和基础配置。 | `PROJECT_ROOT`、`FRUIT_ASSET_DIR`、`DEFAULT_WINDOW_SIZE`、`SPAWN_LINE_Y`、`FPS` |
 | `src/daxigua/core/board.py` | 游戏公共逻辑。负责 pygame 画布、pymunk 物理世界、动态墙体、碰撞合成、计分、失败检测，并向表现层暴露合成事件钩子。 | `GameBoard`、`resize_world()`、`create_ball()`、`setup_collision_handler()`、`check_fail()` |
+| `src/daxigua/core/engine.py` | 无渲染游戏引擎。负责 headless 物理世界、投放、队列推进、动作候选、状态快照和稳定推进，供训练环境调用。 | `HeadlessGame` |
 | `src/daxigua/core/fruit.py` | 水果类型和贴图定义。维护 1 到 11 级水果的半径、类型编号和图片加载缓存。 | `create_fruit(type, x, y)`、`fruit_image_path()`、`load_fruit_image()`、各水果类 |
+| `src/daxigua/core/rules.py` | 纯规则常量和辅助函数。集中维护水果半径、队列长度、随机生成范围、合成分数和物理半径。 | `FRUIT_RADII`、`FRUIT_QUEUE_LENGTH`、`fruit_radius()`、`merge_score()` |
+| `src/daxigua/core/state.py` | 训练友好的纯数据状态结构。 | `GameState`、`FruitState`、`ActionCandidate`、`DropResult`、`PhysicsResult` |
 | `src/daxigua/presentation/` | 表现层拆分预留包。后续可迁入渲染、输入、特效、音频模块。 | 暂无独立实现 |
 | `src/daxigua/utils/` | 通用工具预留包。 | 暂无独立实现 |
-| `src/daxigua_rl/` | 后续自动游玩/RL 相关代码预留包。游戏本体不得 import 它。 | `README.md` 中记录边界规则 |
+| `src/daxigua_rl/` | 自动游玩/RL 相关代码。游戏本体不得 import 它。当前通过 `HeadlessGame` 访问游戏。 | `DaxiguaEnv`、`DaxiguaEnvConfig`、`README.md` 中记录边界规则 |
+| `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 `step(action_index)` 表示一次投放和无渲染物理稳定。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step()`、`action_candidates()` |
 
 ## 资源和说明
 
@@ -39,6 +43,7 @@
 | `docs/project_map/` | 项目文件职责索引。 | 结构变化后需要同步更新。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
+| `docs/rl/INTERFACE_V0.md` | RL v0 接口说明。 | 记录 `HeadlessGame`、`DaxiguaEnv`、状态数据和边界规则。 |
 
 ## 学习练习目录
 
@@ -63,6 +68,8 @@
 - `load_fruit_image(path, size)`：缓存水果贴图加载和缩放结果，避免重复磁盘读取。
 - `create_ball(space, x, y, m, r, i)`：统一创建 pymunk 圆形刚体。
 - `Board.fruit_queue`：手动游戏的待投放水果队列，q0 是当前水果，q1 到 q3 是后续水果。
+- `HeadlessGame`：后续训练环境优先使用的无渲染游戏接口，不依赖 pygame 窗口。
+- `DaxiguaEnv`：隔离在 `daxigua_rl` 中的 RL 环境壳层，只通过 `HeadlessGame` 访问游戏。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
@@ -71,5 +78,6 @@
 - 游戏运行时直接读取 `assets/fruits/`，不再需要手动解压资源。
 - 当前手动游戏窗口固定为 `400x800`，不再通过拖动窗口边框改变场地大小。
 - 顶部信息层和当前悬浮水果层已经分开；生成线固定为 `180px`，用于避免待投放队列与当前水果视野冲突。
+- `daxigua` 游戏本体不得 import `daxigua_rl`；RL 代码只通过稳定游戏接口访问游戏。
 - 当前 `src/daxigua/core/board.py` 已为 `pymunk 7.3.0` 做兼容处理。
 - 当前 `src/daxigua/app.py` 仍包含部分表现层细节，后续可继续拆到 `src/daxigua/presentation/`。
