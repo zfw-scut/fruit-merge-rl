@@ -2,7 +2,7 @@
 
 这个文件目前承担“可玩游戏”的大部分外层工作：
 - 读取键盘和鼠标输入。
-- 管理当前待投放水果、下一个水果和冷却时间。
+- 管理当前待投放水果、待投放水果队列和冷却时间。
 - 驱动 pymunk 物理世界每帧前进。
 - 把核心层的水果刚体同步到 pygame 贴图位置。
 - 绘制背景、场地、HUD、水果、预览线和各种反馈特效。
@@ -19,9 +19,17 @@ from dataclasses import dataclass
 
 import pygame as pg
 
-from .config import MIN_WINDOW_SIZE
 from .core.board import GameBoard
 from .core.fruit import create_fruit
+
+
+# 顶部可视化队列长度。后续 RL 设计参考文档中也按 q0 到 q3 组织水果序列。
+FRUIT_QUEUE_LENGTH = 4
+
+# 顶部独立信息层。分数和待投放队列都绘制在这条区域内，
+# 当前悬浮水果会出现在它下方，避免两者视野冲突。
+TOP_INFO_LAYER_TOP = 4
+TOP_INFO_LAYER_HEIGHT = 68
 
 
 # 每一级水果对应一组主色，用于粒子、冲击波、飘字等效果。
@@ -242,15 +250,12 @@ class Board(GameBoard):
     """当前可玩的 pygame 游戏应用。
 
     `GameBoard` 管核心规则；这个子类补齐用户实际玩游戏所需的内容：
-    输入、窗口缩放、渲染、特效、音效和主循环。
+    输入、固定窗口渲染、特效、音效和主循环。
     """
 
     def __init__(self):
-        # 可缩放窗口的最小尺寸，防止场地太小。
-        self.min_width, self.min_height = MIN_WINDOW_SIZE
-
-        # 告诉 pygame 创建可拖拽改变尺寸的窗口。
-        self.display_flags = pg.RESIZABLE
+        # 当前手动游戏使用固定窗口，避免人工体验和后续训练观察受窗口尺寸变化影响。
+        self.display_flags = 0
 
         # 失败判定的持续时间，传给核心层使用。
         self.create_time = 2.0
@@ -287,8 +292,10 @@ class Board(GameBoard):
         # 当前输入来源：mouse 或 keyboard。用于决定是否继续跟随鼠标。
         self.input_mode = 'mouse'
 
-        # 下一个水果类型，用于 HUD 右上角预览。
-        self.next_i = None
+        # 待投放水果队列。q0 是当前即将投放的水果，q1 到 q3 是后续水果。
+        # 这个字段目前只服务手动游戏的视觉预览；后续训练环境也可以复用同样概念。
+        self.queue_length = FRUIT_QUEUE_LENGTH
+        self.fruit_queue = []
 
         # 本次程序运行期间的最高分。
         self.best_score = 0
@@ -310,7 +317,7 @@ class Board(GameBoard):
 
         # 字体对象创建成本不高但也没必要每帧创建，所以初始化时统一准备。
         self.font_title = pg.font.Font(None, 30)
-        self.font_score = pg.font.Font(None, 52)
+        self.font_score = pg.font.Font(None, 44)
         self.font_label = pg.font.Font(None, 22)
         self.font_popup = pg.font.Font(None, 34)
         self.font_big_popup = pg.font.Font(None, 46)
@@ -349,12 +356,29 @@ class Board(GameBoard):
         # 初始投放只出现 1 到 4 级水果，避免一开始就生成过大的水果。
         return random.randrange(1, 5)
 
+    def _fill_fruit_queue(self):
+        """把待投放水果队列补足到固定长度。"""
+
+        # 队列长度固定后，HUD 可以稳定绘制 q0 到 q3，也方便后续训练接口取状态。
+        while len(self.fruit_queue) < self.queue_length:
+            self.fruit_queue.append(self._pick_fruit_type())
+
+    def _advance_fruit_queue(self):
+        """成功投放一颗水果后推进队列。"""
+
+        # q0 对应刚刚被投放的水果；投放完成后移除它。
+        if self.fruit_queue:
+            self.fruit_queue.pop(0)
+
+        # 末尾补一颗新的随机水果，让用户始终能看到固定长度的未来序列。
+        self._fill_fruit_queue()
+
     def _start_round(self, ready_delay=180):
         """准备一轮新的可投放水果。"""
 
-        # 当前水果和下一个水果都在这里确定。
-        self.i = self._pick_fruit_type()
-        self.next_i = self._pick_fruit_type()
+        # 确保队列存在；q0 就是当前要投放的水果。
+        self._fill_fruit_queue()
+        self.i = self.fruit_queue[0]
 
         # waiting=True 表示有水果悬在顶部，等待玩家选择 x 坐标并投放。
         self.waiting = True
@@ -373,6 +397,7 @@ class Board(GameBoard):
 
         # 清空核心状态和表现层特效。
         self.reset()
+        self.fruit_queue.clear()
         self.particles.clear()
         self.rings.clear()
         self.floating_texts.clear()
@@ -381,7 +406,10 @@ class Board(GameBoard):
         self._start_round()
 
     def _event_size(self, event):
-        """从不同 pygame resize 事件中提取窗口尺寸。"""
+        """从不同 pygame resize 事件中提取窗口尺寸。
+
+        当前正式游戏窗口已经固定，这个方法只作为内部兼容工具保留。
+        """
 
         # VIDEORESIZE 通常带有 size 属性。
         if hasattr(event, 'size'):
@@ -393,7 +421,11 @@ class Board(GameBoard):
         return width, height
 
     def _resize_window(self, width, height, recreate_display=False):
-        """处理窗口缩放后的游戏世界和表现层同步。"""
+        """处理窗口尺寸变化后的游戏世界和表现层同步。
+
+        当前手动游戏不再响应拖拽窗口边框；这个方法保留给内部测试、
+        未来调试工具或可能的训练环境尺寸实验。
+        """
 
         # 保存旧尺寸，用来判断已有水果是否需要夹回新边界。
         old_width, old_height = self.WIDTH, self.HEIGHT
@@ -508,6 +540,9 @@ class Board(GameBoard):
         self.i = None
         self.waiting = False
 
+        # 队列左移：q1 变成新的 q0，末尾补一颗新的随机水果。
+        self._advance_fruit_queue()
+
         # 设置下一次生成水果的时间点。
         self.drop_ready_at = pg.time.get_ticks() + self.cooldown_ms
 
@@ -516,11 +551,9 @@ class Board(GameBoard):
 
         # i 为 None 表示当前没有等待投放的水果。
         if self.i is None and pg.time.get_ticks() >= self.drop_ready_at:
-            # 上一轮 HUD 里的 next_i 成为当前水果。
-            self.i = self.next_i or self._pick_fruit_type()
-
-            # 再随机一个新的 next_i 供 HUD 预览。
-            self.next_i = self._pick_fruit_type()
+            # 队列当前 q0 成为顶部待投放水果。
+            self._fill_fruit_queue()
+            self.i = self.fruit_queue[0]
 
             # 创建新的顶部预览水果。
             self.waiting = True
@@ -529,20 +562,15 @@ class Board(GameBoard):
     def _handle_events(self):
         """处理 pygame 事件队列。"""
 
-        # resize 事件可能在一次拖动中连续到来。
-        # 这里先只记录最后一个尺寸，循环结束后统一处理，减少频繁重建背景和边界。
-        pending_resize = None
-
         for event in pg.event.get():
             if event.type == pg.QUIT:
                 raise SystemExit
 
-            # 兼容 pygame 不同版本和平台的窗口尺寸变化事件。
+            # 当前窗口固定；如果某些平台仍发送尺寸变化事件，直接忽略。
             if event.type in (
                     pg.VIDEORESIZE,
                     getattr(pg, 'WINDOWRESIZED', -1),
                     getattr(pg, 'WINDOWSIZECHANGED', -2)):
-                pending_resize = self._event_size(event)
                 continue
 
             if event.type == pg.MOUSEMOTION:
@@ -564,10 +592,6 @@ class Board(GameBoard):
                 elif event.key == pg.K_ESCAPE:
                     # ESC 退出。
                     raise SystemExit
-
-        if pending_resize:
-            # 只处理本帧最后一次 resize，降低拖动窗口时的抖动感。
-            self._resize_window(*pending_resize)
 
     def _update_input(self, dt):
         """根据键盘/鼠标更新投放位置。"""
@@ -596,7 +620,7 @@ class Board(GameBoard):
         self.mouse_x += (self.aim_x - self.mouse_x) * min(1, dt * 18)
 
         if self.current_fruit:
-            # 每帧都重新夹取，防止 resize 后预览水果跑到墙外。
+            # 每帧都重新夹取，确保预览水果始终留在左右墙内。
             self.mouse_x = self._clamp_drop_x(self.mouse_x)
 
             # 更新顶部预览水果的位置。
@@ -643,6 +667,7 @@ class Board(GameBoard):
 
         # 清空核心游戏状态和特效。
         self.reset()
+        self.fruit_queue.clear()
         self.particles.clear()
         self.rings.clear()
 
@@ -868,26 +893,64 @@ class Board(GameBoard):
             font = self.font_big_popup if text.size >= 40 else self.font_popup
             text.draw(self.surface, font, offset)
 
+    def _draw_fruit_queue(self):
+        """绘制顶部待投放水果队列。"""
+
+        if not self.fruit_queue:
+            return
+
+        # 队列区域使用整条顶部信息层的右半部分。信息层独立于当前悬浮水果高度，
+        # 因此这里不再靠“盖住水果”解决遮挡，而是从布局上错开。
+        queue_rect = pg.Rect(8, TOP_INFO_LAYER_TOP, self.WIDTH - 16, TOP_INFO_LAYER_HEIGHT)
+        pg.draw.rect(self.surface, (26, 42, 52), queue_rect, border_radius=6)
+        pg.draw.rect(self.surface, (42, 66, 73), queue_rect, 1, border_radius=6)
+
+        label = self.font_label.render('QUEUE', True, (167, 202, 194))
+        self.surface.blit(label, (self.WIDTH - 178, queue_rect.top + 7))
+
+        # q0 到 q3 横向排列。q0 是当前即将投放的水果，用克制的槽位高亮标出。
+        start_x = self.WIDTH - 172
+        gap = 44
+        center_y = queue_rect.top + 45
+
+        for index, fruit_type in enumerate(self.fruit_queue[:self.queue_length]):
+            center = (start_x + index * gap, center_y)
+
+            if index == 0:
+                # q0 是当前水果。使用同色系底座和短横线提示队首，
+                # 避免亮黄色圆环破坏顶部 HUD 的整体风格。
+                pg.draw.circle(self.surface, (31, 58, 62), center, 18)
+                pg.draw.circle(self.surface, (88, 139, 132), center, 18, 1)
+                pg.draw.line(
+                    self.surface,
+                    (167, 202, 194),
+                    (center[0] - 11, center[1] + 22),
+                    (center[0] + 11, center[1] + 22),
+                    2,
+                )
+            else:
+                # 后续水果用更低调的边框表示顺序。
+                pg.draw.circle(self.surface, (54, 82, 88), center, 16, 1)
+
+            # 为了在 400px 固定宽度内排下 4 个水果，队列缩略图使用较小尺寸。
+            image = self._fruit_preview_image(fruit_type, 29 if index == 0 else 27)
+            rect = image.get_rect(center=center)
+            self.surface.blit(image, rect)
+
     def _draw_hud(self):
-        """绘制分数、最高分和下一个水果预览。"""
+        """绘制分数、最高分和待投放水果队列。"""
+
+        # 先绘制整条顶部信息层，再把左侧分数和右侧队列放进去。
+        self._draw_fruit_queue()
 
         title = self.font_title.render('MERGE MELON', True, (222, 236, 230))
-        self.surface.blit(title, (18, 12))
+        self.surface.blit(title, (18, TOP_INFO_LAYER_TOP + 6))
 
         score_text = self.font_score.render(str(self.score), True, (255, 240, 176))
-        self.surface.blit(score_text, (18, 40))
+        self.surface.blit(score_text, (18, TOP_INFO_LAYER_TOP + 30))
 
         best_text = self.font_label.render('BEST ' + str(max(self.best_score, self.score)), True, (167, 202, 194))
-        self.surface.blit(best_text, (22, 88))
-
-        next_label = self.font_label.render('NEXT', True, (167, 202, 194))
-        self.surface.blit(next_label, (self.WIDTH - 86, 18))
-
-        if self.next_i:
-            # 右上角显示下一颗水果，帮助玩家规划当前投放位置。
-            image = self._fruit_preview_image(self.next_i, 54)
-            rect = image.get_rect(center=(self.WIDTH - 58, 64))
-            self.surface.blit(image, rect)
+        self.surface.blit(best_text, (64, TOP_INFO_LAYER_TOP + 45))
 
         if self.flash > 0:
             # 失败时短暂红色闪屏。

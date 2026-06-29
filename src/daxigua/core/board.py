@@ -14,7 +14,7 @@ import pygame as pg
 import pymunk.pygame_util
 
 from .fruit import create_fruit
-from ..config import DEFAULT_WINDOW_SIZE, FPS
+from ..config import DEFAULT_WINDOW_SIZE, FPS, SPAWN_LINE_Y
 
 
 class GameBoard(object):
@@ -40,8 +40,8 @@ class GameBoard(object):
         # 注意：此时 `self.space` 还没创建，但 `self.balls` 是空列表，所以 reset 不会移除物体。
         self.reset()
 
-        # 水果生成线的 y 坐标。窗口高度变化时会重新计算。
-        self.init_y = int(0.15 * self.HEIGHT)
+        # 水果生成线的 y 坐标。当前手动游戏窗口固定，顶部预留独立信息层和悬浮水果层。
+        self.init_y = SPAWN_LINE_Y
 
         # 默认投放 x 坐标在窗口中间。
         self.init_x = int(self.WIDTH / 2)
@@ -49,7 +49,7 @@ class GameBoard(object):
         # 初始化 pygame 基础模块。表现层会继续设置标题、字体、音效等。
         pg.init()
 
-        # 子类可以在调用基类前设置 display_flags，例如 `pg.RESIZABLE`。
+        # 子类可以在调用基类前设置 display_flags。当前手动游戏使用固定窗口，所以通常为 0。
         self.display_flags = getattr(self, 'display_flags', 0)
 
         # 创建主窗口 Surface。后续所有绘制都会 blit 到这个 surface 上。
@@ -139,8 +139,8 @@ class GameBoard(object):
 
         参数：
         - width, height: 新的窗口尺寸。
-        - recreate_display: 是否重新创建 pygame display。拖动窗口边框时通常不需要，
-          因为 pygame 已经维护了窗口；特殊平台兼容场景可显式重建。
+        - recreate_display: 是否重新创建 pygame display。当前手动游戏不走窗口拖拽缩放，
+          这个参数主要留给内部调试或未来实验场景。
 
         返回：
         - True 表示尺寸确实发生变化。
@@ -161,7 +161,7 @@ class GameBoard(object):
 
         # 更新尺寸字段，后续渲染、边界、生成线都依赖这些值。
         self.RES = self.WIDTH, self.HEIGHT = width, height
-        self.init_y = int(0.15 * self.HEIGHT)
+        self.init_y = SPAWN_LINE_Y
         self.init_x = int(self.WIDTH / 2)
 
         if recreate_display:
