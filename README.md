@@ -38,7 +38,8 @@ python Main.py
 - `src/daxigua/`: 游戏本体包。
 - `src/daxigua/app.py`: 游戏应用入口和当前表现层实现。
 - `src/daxigua/core/`: 游戏核心逻辑，负责物理世界、边界、碰撞合成、计分和水果定义。
-- `src/daxigua_rl/`: 后续自动游玩/RL 相关代码预留包，不会被游戏本体反向依赖。
+- `src/daxigua/core/engine.py`: 无渲染游戏引擎，供后续训练环境调用。
+- `src/daxigua_rl/`: 自动游玩/RL 相关代码，当前包含隔离的 `DaxiguaEnv` 环境壳层，不会被游戏本体反向依赖。
 - `assets/fruits/`: 水果图片资源。
 - `assets/fruits.zip`: 原始水果图片压缩包归档。
 - `docs/`: 项目文档和 Codex 修改记录。
