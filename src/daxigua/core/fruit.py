@@ -1,13 +1,13 @@
 """水果显示对象和水果资源加载。
 
-这个模块只关心水果本身：
-- 每一级水果对应哪个类型编号。
-- 每一级水果的半径是多少。
-- 每一级水果使用哪张贴图。
-- 水果在 pygame 画布上的矩形位置如何随物理刚体同步。
+这个模块只负责 pygame 表现层需要的水果精灵：
+- 根据水果等级加载对应图片。
+- 缓存缩放后的图片。
+- 维护图片在画布上的 rect。
+- 把 pymunk 圆心坐标同步成 pygame 左上角坐标。
 
-注意：真正的碰撞、重力、合成和计分逻辑不在这里，而在 `core.board`。
-这里的对象更接近“显示层用的水果精灵数据”。
+水果半径、等级范围、合成分数等规则不在这里定义，而在 `core.rules`。
+无渲染训练环境也不依赖这个模块。
 """
 
 import pygame as pg
@@ -23,15 +23,7 @@ _IMAGE_CACHE = {}
 
 
 def load_fruit_image(path, size):
-    """加载并缩放水果贴图。
-
-    参数：
-    - path: 图片文件路径。
-    - size: 目标显示尺寸，例如 `(40, 40)`。
-
-    返回：
-    - 一个已经带透明通道、并缩放到指定尺寸的 pygame Surface。
-    """
+    """加载并缩放水果贴图。"""
 
     # 使用字符串路径和尺寸组成缓存键，避免 Path 对象实例差异影响查找。
     key = (str(path), size)
@@ -49,251 +41,53 @@ def load_fruit_image(path, size):
 
 
 def fruit_image_path(fruit_type):
-    """根据水果类型编号得到贴图路径。
+    """根据水果类型编号得到贴图路径。"""
 
-    水果资源统一命名为 `01.png` 到 `11.png`，所以这里用 `:02d` 补齐两位。
-    """
-
+    # 水果资源统一命名为 `01.png` 到 `11.png`，所以这里用 `:02d` 补齐两位。
     return FRUIT_ASSET_DIR / f'{fruit_type:02d}.png'
 
 
-def create_fruit(type, x, y):
-    """按类型编号创建具体水果对象。
+def create_fruit(level, x, y):
+    """按水果等级创建显示精灵。
 
-    当前项目保留了原始实现里的具体水果类命名，例如 `PT`、`YT`。
-    后续如果要把水果配置表化，可以先从这个工厂函数入手，因为外部代码
-    基本都通过它创建水果，不需要直接知道每个具体类。
-
-    参数：
-    - type: 水果等级，1 到 11。数字越大，水果越大。
-    - x, y: 水果圆心坐标。具体类会把圆心转换成 pygame rect 的左上角。
+    外部仍然通过这个工厂函数创建水果，避免调用方关心图片路径、半径和 rect 细节。
     """
 
-    fruit = None
-
-    # 这里保持显式分支，是为了让学习者能直观看到“类型编号 -> 具体类”的关系。
-    # 游戏中相同类型碰撞后会合成 `type + 1` 的水果。
-    if type == 1:
-        fruit = PT(x, y)
-    elif type == 2:
-        fruit = YT(x, y)
-    elif type == 3:
-        fruit = JZ(x, y)
-    elif type == 4:
-        fruit = NM(x, y)
-    elif type == 5:
-        fruit = MHT(x, y)
-    elif type == 6:
-        fruit = XHS(x, y)
-    elif type == 7:
-        fruit = TZ(x, y)
-    elif type == 8:
-        fruit = BL(x, y)
-    elif type == 9:
-        fruit = YZ(x, y)
-    elif type == 10:
-        fruit = XG(x, y)
-    elif type == 11:
-        fruit = DXG(x, y)
-
-    return fruit
+    return Fruit(level, x, y)
 
 
 class Fruit:
-    """所有水果显示对象的基类。
+    """单个水果的 pygame 显示精灵。"""
 
-    每个水果都有：
-    - `r`: 半径，单位是像素。
-    - `type`: 水果类型编号。
-    - `size`: 贴图尺寸，通常是直径乘直径。
-    - `image`: 已加载并缩放好的 pygame Surface。
-    - `rect`: pygame 用来定位贴图的矩形。
-    """
+    def __init__(self, level, x, y):
+        # type 是旧代码沿用字段，表现层和物理层仍会用它表示水果等级。
+        self.type = level
 
-    def __init__(self, x, y):
-        # 子类会在进入基类前设置好 `r`、`type`、`size`。
-        # 基类调用 `load_images()` 时，会执行子类重写后的版本。
-        self.load_images()
+        # 半径统一来自 rules.py，避免显示层和 headless 训练环境各维护一份半径表。
+        self.r = fruit_radius(level)
+        self.size = (self.r * 2, self.r * 2)
 
-        # pygame 的 blit 使用 rect 左上角定位，不直接使用圆心定位。
+        # 加载等级对应贴图，并创建 pygame rect。
+        self.image = load_fruit_image(fruit_image_path(level), self.size)
         self.rect = self.image.get_rect()
-        self.rect.x = x
-        self.rect.y = y
 
         # 当前图片没有实际旋转绘制，但保留角度字段，方便和 pymunk body.angle 同步。
         self.angle_degree = 0
 
-    def load_images(self):
-        """由子类实现：根据水果等级加载对应贴图。"""
-
-        pass
+        # 调用方传入的是圆心坐标，这里统一转换成 pygame rect 左上角。
+        self.update_position(x, y)
 
     def update_position(self, x, y, angle_degree=0):
-        """把水果显示位置更新到指定圆心。
+        """把水果显示位置更新到指定圆心。"""
 
-        pymunk 中圆形刚体的位置是圆心；pygame 贴图矩形使用左上角。
-        因此这里需要减去半径，把圆心坐标转换成 rect 坐标。
-        """
-
-        # 圆心 x/y -> 贴图左上角 x/y。
+        # pymunk 中圆形刚体的位置是圆心；pygame 贴图矩形使用左上角。
         self.rect.x = x - self.r
         self.rect.y = y - self.r
 
         # 记录物理角度。当前没有旋转贴图，避免圆形水果贴图在运动时产生额外模糊。
         self.angle_degree = angle_degree
-        # 如果后续想显示旋转，可以在这里基于原图生成旋转后的 image。
-        # self.image = pg.transform.rotate(self.image, self.angle_degree)
 
     def draw(self, surface):
         """把水果贴图绘制到目标画布。"""
 
         surface.blit(self.image, self.rect)
-
-
-class PT(Fruit):
-    """1 级水果。"""
-
-    def __init__(self, x, y):
-        # 原始资源半径按 `2 * 基础值` 放大，保持和旧版本手感一致。
-        self.r = fruit_radius(1)
-        self.type = 1
-
-        # 贴图是正方形，宽高都是直径。
-        self.size = (self.r * 2, self.r * 2)
-
-        # 调用基类时传入左上角，所以从圆心坐标减去半径。
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        # 1 级水果读取 `assets/fruits/01.png`。
-        self.image = load_fruit_image(fruit_image_path(1), self.size)
-
-
-class YT(Fruit):
-    """2 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(2)
-        self.type = 2
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(2), self.size)
-
-
-class JZ(Fruit):
-    """3 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(3)
-        self.type = 3
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(3), self.size)
-
-
-class NM(Fruit):
-    """4 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(4)
-        self.type = 4
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(4), self.size)
-
-
-class MHT(Fruit):
-    """5 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(5)
-        self.type = 5
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(5), self.size)
-
-
-class XHS(Fruit):
-    """6 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(6)
-        self.type = 6
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(6), self.size)
-
-
-class TZ(Fruit):
-    """7 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(7)
-        self.type = 7
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(7), self.size)
-
-
-class BL(Fruit):
-    """8 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(8)
-        self.type = 8
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(8), self.size)
-
-
-class YZ(Fruit):
-    """9 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(9)
-        self.type = 9
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(9), self.size)
-
-
-class XG(Fruit):
-    """10 级水果。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(10)
-        self.type = 10
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(10), self.size)
-
-
-class DXG(Fruit):
-    """11 级水果，也就是最终的大西瓜。"""
-
-    def __init__(self, x, y):
-        self.r = fruit_radius(11)
-        self.type = 11
-        self.size = (self.r * 2, self.r * 2)
-        Fruit.__init__(self, x - self.r, y - self.r)
-
-    def load_images(self):
-        self.image = load_fruit_image(fruit_image_path(11), self.size)

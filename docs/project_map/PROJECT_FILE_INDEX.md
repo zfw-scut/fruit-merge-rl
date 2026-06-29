@@ -15,11 +15,9 @@
 | `src/daxigua/config.py` | 项目路径和基础配置。 | `PROJECT_ROOT`、`FRUIT_ASSET_DIR`、`DEFAULT_WINDOW_SIZE`、`SPAWN_LINE_Y`、`FPS` |
 | `src/daxigua/core/board.py` | 游戏公共逻辑。负责 pygame 画布、pymunk 物理世界、动态墙体、碰撞合成、计分、失败检测，并向表现层暴露合成事件钩子。 | `GameBoard`、`resize_world()`、`create_ball()`、`setup_collision_handler()`、`check_fail()` |
 | `src/daxigua/core/engine.py` | 无渲染游戏引擎。负责 headless 物理世界、投放、队列推进、动作候选、状态快照和稳定推进，供训练环境调用。 | `HeadlessGame` |
-| `src/daxigua/core/fruit.py` | 水果类型和贴图定义。维护 1 到 11 级水果的半径、类型编号和图片加载缓存。 | `create_fruit(type, x, y)`、`fruit_image_path()`、`load_fruit_image()`、各水果类 |
+| `src/daxigua/core/fruit.py` | 水果显示精灵和贴图加载。根据等级创建单一 `Fruit` 显示对象，并复用 `rules.py` 中的半径规则。 | `create_fruit(level, x, y)`、`Fruit`、`fruit_image_path()`、`load_fruit_image()` |
 | `src/daxigua/core/rules.py` | 纯规则常量和辅助函数。集中维护水果半径、队列长度、随机生成范围、合成分数和物理半径。 | `FRUIT_RADII`、`FRUIT_QUEUE_LENGTH`、`fruit_radius()`、`merge_score()` |
 | `src/daxigua/core/state.py` | 训练友好的纯数据状态结构。 | `GameState`、`FruitState`、`ActionCandidate`、`DropResult`、`PhysicsResult` |
-| `src/daxigua/presentation/` | 表现层拆分预留包。后续可迁入渲染、输入、特效、音频模块。 | 暂无独立实现 |
-| `src/daxigua/utils/` | 通用工具预留包。 | 暂无独立实现 |
 | `src/daxigua_rl/` | 自动游玩/RL 相关代码。游戏本体不得 import 它。当前通过 `HeadlessGame` 访问游戏。 | `DaxiguaEnv`、`DaxiguaEnvConfig`、`README.md` 中记录边界规则 |
 | `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 `step(action_index)` 表示一次投放和无渲染物理稳定。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step()`、`action_candidates()` |
 
@@ -64,7 +62,7 @@
 ## 可复用组件
 
 - `GameBoard`：后续优化游戏时可复用的物理和合成基类。
-- `create_fruit(type, x, y)`：统一创建水果对象，避免外部直接依赖具体水果类。
+- `create_fruit(level, x, y)`：统一创建 pygame 水果显示对象，避免外部关心贴图路径和 rect 同步细节。
 - `load_fruit_image(path, size)`：缓存水果贴图加载和缩放结果，避免重复磁盘读取。
 - `create_ball(space, x, y, m, r, i)`：统一创建 pymunk 圆形刚体。
 - `Board.fruit_queue`：手动游戏的待投放水果队列，q0 是当前水果，q1 到 q3 是后续水果。
@@ -80,4 +78,4 @@
 - 顶部信息层和当前悬浮水果层已经分开；生成线固定为 `180px`，用于避免待投放队列与当前水果视野冲突。
 - `daxigua` 游戏本体不得 import `daxigua_rl`；RL 代码只通过稳定游戏接口访问游戏。
 - 当前 `src/daxigua/core/board.py` 已为 `pymunk 7.3.0` 做兼容处理。
-- 当前 `src/daxigua/app.py` 仍包含部分表现层细节，后续可继续拆到 `src/daxigua/presentation/`。
+- 当前 `src/daxigua/app.py` 仍集中承载表现层细节；后续如确实需要拆分，再创建对应表现层模块。

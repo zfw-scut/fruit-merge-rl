@@ -11,7 +11,7 @@
 """
 
 import pygame as pg
-import pymunk.pygame_util
+import pymunk
 
 from .fruit import create_fruit
 from ..config import DEFAULT_WINDOW_SIZE, FPS, SPAWN_LINE_Y
@@ -57,9 +57,6 @@ class GameBoard(object):
 
         # pygame Clock 用于限制帧率，并计算每帧耗时。
         self.clock = pg.time.Clock()
-
-        # pymunk 的调试绘制选项。当前正式渲染不直接使用，但保留给调试物理世界。
-        self.draw_options = pymunk.pygame_util.DrawOptions(self.surface)
 
         # 创建 pymunk 物理空间，并设置重力。
         self.space = pymunk.Space()
@@ -170,9 +167,6 @@ class GameBoard(object):
         else:
             # 正常拖拽 resize 时优先复用 pygame 当前窗口 Surface，减少闪烁和重开窗口。
             self.surface = pg.display.get_surface() or self.surface
-
-        # Surface 变化后，pymunk 调试绘制选项也要指向新的 surface。
-        self.draw_options = pymunk.pygame_util.DrawOptions(self.surface)
 
         # 重新创建物理边界，使水果能在新的场地大小中滚动和碰撞。
         self.init_segment()
@@ -305,20 +299,6 @@ class GameBoard(object):
         space.add(segment_shape)
         return segment_shape
 
-    def show_score(self):
-        """旧版简易分数绘制函数。
-
-        当前正式 HUD 在 `daxigua.app.Board._draw_hud()` 中绘制。
-        这个函数保留给调试或后续简化版本复用。
-        """
-
-        score_font = pg.font.Font(None, 36)
-        score_text = score_font.render(
-            'score: {}'.format(str(self.score)), True, (255, 165, 0))
-        text_rect = score_text.get_rect()
-        text_rect.topleft = [10, 10]
-        self.surface.blit(score_text, text_rect)
-
     def check_fail(self):
         """检测游戏是否失败。
 
@@ -352,8 +332,3 @@ class GameBoard(object):
         # 没有水果越线时清空累计计数。
         self.fail_count = 0
         return False
-
-    def run(self):
-        """由子类实现完整游戏循环。"""
-
-        pass
