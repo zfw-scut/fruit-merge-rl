@@ -444,13 +444,16 @@ class Board(GameBoard):
         # 投放位置取当前平滑后的 mouse_x，并再次夹到合法范围。
         x = int(self._clamp_drop_x(self.mouse_x))
 
+        # y 坐标沿用当前预览水果的视觉圆心，避免按下投放时从预览位置跳到限高线。
+        drop_y = int(self.current_fruit.rect.centery) if self.current_fruit else int(self._preview_y())
+
         # 创建显示水果并加入显示列表。
-        fruit = create_fruit(self.i, x, self.init_y)
+        fruit = create_fruit(self.i, x, drop_y)
         self.fruits.append(fruit)
 
         # 创建对应物理刚体。半径取接近显示半径的值，质量随水果尺寸增加。
         ball = self.create_ball(
-            self.space, x, self.init_y, m=max(1, fruit.r // 10),
+            self.space, x, drop_y, m=max(1, fruit.r // 10),
             r=fruit.r - fruit.r % 5, i=self.i)
 
         # 给一个很小的初速度，让水果刚投放时更自然地下落。
@@ -459,8 +462,8 @@ class Board(GameBoard):
 
         # 投放反馈：粒子、圆环、震动和音效。
         color = FRUIT_COLORS.get(self.i, (255, 255, 255))
-        self._burst(x, self.init_y, color, 7, speed=120)
-        self.rings.append(ImpactRing(x, self.init_y, color, 0.28, 0.28, fruit.r * 0.4, fruit.r * 1.25))
+        self._burst(x, drop_y, color, 7, speed=120)
+        self.rings.append(ImpactRing(x, drop_y, color, 0.28, 0.28, fruit.r * 0.4, fruit.r * 1.25))
         self.shake = max(self.shake, 0.08)
         self.sound.play('drop')
 
