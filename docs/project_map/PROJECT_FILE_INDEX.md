@@ -1,6 +1,6 @@
 # 项目文件索引
 
-最后更新：2026-06-28
+最后更新：2026-06-30
 
 ## 项目定位
 
@@ -11,8 +11,8 @@
 | 路径 | 作用 | 主要入口或可复用点 |
 | --- | --- | --- |
 | `Main.py` | 兼容旧启动方式的薄入口，将 `src/` 加入 import 路径后调用 `daxigua.app.main()`。 | `main()` |
-| `src/daxigua/app.py` | 游戏应用入口和当前表现层实现。负责窗口、输入、正式渲染、鼠标跟随投放、预览线、可缩放窗口、下一个水果、HUD、粒子、飘字、震动和音效反馈。 | `Board.next_frame()`、`Board.run()`、`main()` |
-| `src/daxigua/config.py` | 项目路径和基础配置。 | `PROJECT_ROOT`、`FRUIT_ASSET_DIR`、`DEFAULT_WINDOW_SIZE`、`FPS` |
+| `src/daxigua/app.py` | 游戏应用入口和当前表现层实现。负责固定窗口、输入、正式渲染、鼠标跟随投放、预览线、顶部独立信息层、待投放水果队列、HUD、粒子、飘字、震动和音效反馈。 | `Board.next_frame()`、`Board.run()`、`main()` |
+| `src/daxigua/config.py` | 项目路径和基础配置。 | `PROJECT_ROOT`、`FRUIT_ASSET_DIR`、`DEFAULT_WINDOW_SIZE`、`SPAWN_LINE_Y`、`FPS` |
 | `src/daxigua/core/board.py` | 游戏公共逻辑。负责 pygame 画布、pymunk 物理世界、动态墙体、碰撞合成、计分、失败检测，并向表现层暴露合成事件钩子。 | `GameBoard`、`resize_world()`、`create_ball()`、`setup_collision_handler()`、`check_fail()` |
 | `src/daxigua/core/fruit.py` | 水果类型和贴图定义。维护 1 到 11 级水果的半径、类型编号和图片加载缓存。 | `create_fruit(type, x, y)`、`fruit_image_path()`、`load_fruit_image()`、各水果类 |
 | `src/daxigua/presentation/` | 表现层拆分预留包。后续可迁入渲染、输入、特效、音频模块。 | 暂无独立实现 |
@@ -38,6 +38,7 @@
 | `docs/codex/` | Codex 较大修改记录。 | 每次较大修改按编号追加记录。 |
 | `docs/project_map/` | 项目文件职责索引。 | 结构变化后需要同步更新。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
+| `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
 
 ## 学习练习目录
 
@@ -61,11 +62,14 @@
 - `create_fruit(type, x, y)`：统一创建水果对象，避免外部直接依赖具体水果类。
 - `load_fruit_image(path, size)`：缓存水果贴图加载和缩放结果，避免重复磁盘读取。
 - `create_ball(space, x, y, m, r, i)`：统一创建 pymunk 圆形刚体。
-- `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界，手动游戏 resize 功能依赖它。
+- `Board.fruit_queue`：手动游戏的待投放水果队列，q0 是当前水果，q1 到 q3 是后续水果。
+- `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
 ## 已知注意事项
 
 - 游戏运行时直接读取 `assets/fruits/`，不再需要手动解压资源。
+- 当前手动游戏窗口固定为 `400x800`，不再通过拖动窗口边框改变场地大小。
+- 顶部信息层和当前悬浮水果层已经分开；生成线固定为 `180px`，用于避免待投放队列与当前水果视野冲突。
 - 当前 `src/daxigua/core/board.py` 已为 `pymunk 7.3.0` 做兼容处理。
 - 当前 `src/daxigua/app.py` 仍包含部分表现层细节，后续可继续拆到 `src/daxigua/presentation/`。
