@@ -9,7 +9,7 @@
 - 播放简单的合成、投放、失败音效。
 
 核心规则在 `daxigua.core.board.GameBoard`，而这里更像“游戏壳”和“表现层”。
-未来继续重构时，可以把本文件里的渲染、输入、音频、特效拆进 `presentation/`。
+后续如果继续拆分表现层，再按真实需要新增模块，避免提前创建空包占位。
 """
 
 import math
@@ -21,7 +21,7 @@ import pygame as pg
 
 from .core.board import GameBoard
 from .core.fruit import create_fruit
-from .core.rules import FRUIT_QUEUE_LENGTH, random_spawn_level
+from .core.rules import FRUIT_QUEUE_LENGTH, fruit_radius as radius_for_level, random_spawn_level
 
 
 # 顶部独立信息层。分数和待投放队列都绘制在这条区域内，
@@ -403,84 +403,15 @@ class Board(GameBoard):
         # 开始新一轮投放。
         self._start_round()
 
-    def _event_size(self, event):
-        """从不同 pygame resize 事件中提取窗口尺寸。
-
-        当前正式游戏窗口已经固定，这个方法只作为内部兼容工具保留。
-        """
-
-        # VIDEORESIZE 通常带有 size 属性。
-        if hasattr(event, 'size'):
-            return event.size
-
-        # 不同平台/pygame 版本的窗口事件字段可能叫 w/h 或 x/y。
-        width = getattr(event, 'w', getattr(event, 'x', self.WIDTH))
-        height = getattr(event, 'h', getattr(event, 'y', self.HEIGHT))
-        return width, height
-
-    def _resize_window(self, width, height, recreate_display=False):
-        """处理窗口尺寸变化后的游戏世界和表现层同步。
-
-        当前手动游戏不再响应拖拽窗口边框；这个方法保留给内部测试、
-        未来调试工具或可能的训练环境尺寸实验。
-        """
-
-        # 保存旧尺寸，用来判断已有水果是否需要夹回新边界。
-        old_width, old_height = self.WIDTH, self.HEIGHT
-
-        # 核心层负责更新 pygame surface、pymunk 边界、生成线等。
-        if not self.resize_world(width, height, recreate_display=recreate_display):
-            return
-
-        # 背景尺寸依赖窗口，所以需要重建。
-        self.background = self._build_background()
-
-        # 投放目标位置和显示位置都必须落在新边界内。
-        self.aim_x = self._clamp_drop_x(self.aim_x)
-        self.mouse_x = self._clamp_drop_x(self.mouse_x)
-
-        # 如果窗口变小，已有水果可能在新墙外，需要夹回场地内。
-        self._keep_balls_in_bounds(old_width, old_height)
-
-        # 当前预览水果也要移动到新的合法投放位置。
-        if self.current_fruit:
-            self.current_fruit.update_position(int(self.mouse_x), int(self._preview_y()))
-
-    def _keep_balls_in_bounds(self, old_width, old_height):
-        """窗口缩小时，把已有物理水果夹回新场地边界内。"""
-
-        # 窗口只变大时，水果自然可以在扩大的空间内滚动，不需要干预。
-        if self.WIDTH >= old_width and self.HEIGHT >= old_height:
-            return
-
-        for ball in self.balls:
-            # pymunk Circle 有 radius 属性；没有时使用一个保守默认值。
-            radius = getattr(ball, 'radius', 20)
-            x, y = ball.body.position
-
-            # x 同时受左右墙和水果半径限制。
-            clamped_x = max(self.wall_width + radius, min(self.WIDTH - self.wall_width - radius, x))
-
-            # y 主要限制不要穿出底板；向上越线仍由失败检测处理。
-            clamped_y = min(self.HEIGHT - self.wall_width - radius, y)
-
-            if clamped_x != x or clamped_y != y:
-                # 直接修正刚体位置。
-                ball.body.position = clamped_x, clamped_y
-
-                # 缩小后如果水果被夹回边界，降低速度，避免猛烈抖动。
-                vx, vy = ball.body.velocity
-                ball.body.velocity = vx * 0.45, min(vy, 120)
-
     def _clamp_drop_x(self, x, fruit_type=None):
         """把投放 x 坐标限制在左右墙之间。"""
 
         # 默认使用当前预览水果半径；没有预览水果时给一个保守值。
         fruit_radius = self.current_fruit.r if self.current_fruit else 24
 
-        # 如果调用者明确传入 fruit_type，就临时创建对应水果以获取半径。
+        # 如果调用者明确传入 fruit_type，就直接读取规则表中的半径。
         if fruit_type:
-            fruit_radius = create_fruit(fruit_type, 0, 0).r
+            fruit_radius = radius_for_level(fruit_type)
 
         # 左右都留出墙体宽度、半径和少量安全间距。
         left = self.wall_width + fruit_radius + 2
