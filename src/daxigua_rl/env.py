@@ -7,9 +7,11 @@
 模型、GNN 图构建和 replay buffer 后续再独立添加。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from daxigua.core.engine import HeadlessGame
+
+from .reward import RewardConfig, compute_reward
 
 
 @dataclass
@@ -19,7 +21,7 @@ class DaxiguaEnvConfig:
     action_count: int = 15
     max_physics_frames: int = 720
     stable_frames: int = 15
-    terminal_penalty: float = -100.0
+    reward_config: RewardConfig = field(default_factory=RewardConfig)
 
 
 class DaxiguaEnv:
@@ -60,6 +62,7 @@ class DaxiguaEnv:
         if action_index < 0 or action_index >= len(candidates):
             raise IndexError('action_index out of range')
 
+        previous_obs = self.game.get_state()
         action = candidates[action_index]
         drop_result = self.game.drop_at(action.drop_x)
         physics_result = self.game.advance_physics(
@@ -72,13 +75,17 @@ class DaxiguaEnv:
         terminated = physics_result.done
         truncated = physics_result.truncated
 
-        reward = float(physics_result.score_delta)
-        if terminated:
-            reward += self.config.terminal_penalty
+        reward, reward_breakdown = compute_reward(
+            previous_state=previous_obs,
+            next_state=obs,
+            physics_result=physics_result,
+            config=self.config.reward_config,
+        )
 
         info = {
             'action': action,
             'drop_result': drop_result,
+            'reward_breakdown': reward_breakdown,
             'score_delta': physics_result.score_delta,
             'merge_events': physics_result.merge_events,
             'frames_simulated': physics_result.frames_simulated,
