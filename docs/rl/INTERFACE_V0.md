@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施和最小 GNN-Q 前向模型；暂不包含 replay buffer 或训练循环。
+当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型和 `Transition` 经验记录；暂不包含 replay buffer 或训练循环。
 
 ## 边界
 
@@ -116,8 +116,38 @@ DaxiguaEnv.reset()
 
 当前模型只验证前向链路和反向传播是否可运行；Q 值在训练前没有策略意义。
 
+## 训练经验结构
+
+当前 `daxigua_rl.training` 包提供：
+
+- `Transition`: 一条 DQN 经验记录。
+
+字段含义：
+
+- `graph`: 当前状态图，也就是状态 `s`。
+- `action_offset`: 被选择动作在 `q_values` 中的下标，也就是训练 loss 读取 `q_values[action_offset]` 的位置。
+- `reward`: 执行动作后的即时奖励。
+- `next_graph`: 下一状态图，也就是状态 `s'`；terminal transition 可以为 `None`。
+- `terminated`: 游戏规则导致的结束。
+- `truncated`: 环境流程导致的截断，例如物理推进达到上限仍未稳定。
+
+派生属性：
+
+- `action_index`: 从当前图里读取的环境动作编号，主要用于日志和动作映射检查。
+- `action_node_index`: 被选择 action 节点在 `graph.node_features` 中的行号。
+- `done`: `terminated or truncated`。
+- `can_bootstrap`: 是否可以使用 `next_graph` 计算下一状态 Q 值。
+
+当前约定：
+
+```text
+q_value = q_values[transition.action_offset]
+target = reward + gamma * max_next_q   # 仅当 transition.can_bootstrap 为 True
+target = reward                        # terminal/truncated transition
+```
+
 ## 后续扩展
 
-- replay buffer 和训练循环应继续放在 `daxigua_rl`，读取 `GraphData` 或其 tensor 形式。
+- replay buffer 和训练循环应继续放在 `daxigua_rl`，读取 `Transition` 中保存的 `GraphData` 或其 tensor 形式。
 - 多进程采样、replay buffer、模型训练也应在 `daxigua_rl` 内部实现。
 - 如果未来需要性能优化，优先 profile `HeadlessGame`，再决定是否替换底层实现。

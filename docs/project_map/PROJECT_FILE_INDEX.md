@@ -1,6 +1,6 @@
 # 项目文件索引
 
-最后更新：2026-06-30
+最后更新：2026-07-01
 
 ## 项目定位
 
@@ -27,6 +27,8 @@
 | `src/daxigua_rl/graph/tensor.py` | PyTorch 张量转换层。把框架无关 `GraphData` 转成模型可直接使用的 `GraphTensor`。 | `graph_to_tensor()`、`GraphTensor` |
 | `src/daxigua_rl/models/` | 强化学习模型代码。当前只包含最小 GNN-Q 前向模型，不包含训练循环。 | `GNNQNetwork` |
 | `src/daxigua_rl/models/gnn_q.py` | 统一图 message passing Q 网络。输入 `GraphData` 或 `GraphTensor`，输出每个候选动作的 Q 值。 | `GNNQNetwork.forward()`、`MessagePassingLayer` |
+| `src/daxigua_rl/training/` | 强化学习训练侧数据结构和后续训练组件目录。当前只包含经验记录结构。 | `Transition` |
+| `src/daxigua_rl/training/transition.py` | DQN 经验记录。保存当前图、动作下标、奖励、下一状态图和终止标记。 | `Transition` |
 
 ## 资源和说明
 
@@ -37,6 +39,12 @@
 | `README.md` | 当前项目说明，包含游戏运行方式和操作说明。 | 已更新为游戏本体说明。 |
 | `requirements.txt` | 当前游戏依赖文件。 | 只保留 `pygame` 和 `pymunk`。 |
 | `LICENSE` | 开源许可证。 | Apache 2.0。 |
+
+## 临时工具
+
+| 路径 | 作用 | 备注 |
+| --- | --- | --- |
+| `tools/temporary_rollout_smoke_test.py` | 临时 GNN rollout 验证脚本。用于检查 `DaxiguaEnv -> GraphBuilder -> GNNQNetwork -> step()` 链路是否闭合。 | 不是正式训练入口；验证完成或正式训练脚本落地后可删除或改造。 |
 
 ## 文档目录
 
@@ -79,6 +87,7 @@
 - `GraphAblator`：训练实验用的图特征消融层，通过置零特征对比不同信息组对模型的影响。
 - `graph_to_tensor()`：把 `GraphData` 转成 PyTorch 张量，形成 `node_features`、`edge_index`、`edge_features` 和 `action_node_indices`。
 - `GNNQNetwork`：当前最小 GNN-Q 前向模型，输入一张状态图，输出 `[action_count]` 个动作 Q 值。
+- `Transition`：DQN 训练使用的一条经验记录，保存 `graph`、`action_offset`、`reward`、`next_graph`、`terminated` 和 `truncated`。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
@@ -88,6 +97,8 @@
 - 当前手动游戏窗口固定为 `400x800`，不再通过拖动窗口边框改变场地大小。
 - 顶部信息层和当前悬浮水果层已经分开；生成线固定为 `180px`，用于避免待投放队列与当前水果视野冲突。
 - `daxigua` 游戏本体不得 import `daxigua_rl`；RL 代码只通过稳定游戏接口访问游戏。
+- `Transition` 不依赖 PyTorch，保存的是框架无关 `GraphData`；真正训练采样 batch 时再转换为 tensor。
 - `daxigua_rl.graph.tensor` 和 `daxigua_rl.models` 依赖 PyTorch；它们不会在 `daxigua_rl` 顶层自动导入，避免非训练环境被强制要求安装 torch。
+- `tools/temporary_rollout_smoke_test.py` 依赖 PyTorch，建议在 `python-torch` conda 环境中运行；它只做临时链路验证，不训练模型。
 - 当前 `src/daxigua/core/board.py` 已为 `pymunk 7.3.0` 做兼容处理。
 - 当前 `src/daxigua/app.py` 仍集中承载表现层细节；后续如确实需要拆分，再创建对应表现层模块。
