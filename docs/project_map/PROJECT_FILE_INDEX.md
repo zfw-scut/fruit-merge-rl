@@ -27,10 +27,11 @@
 | `src/daxigua_rl/graph/tensor.py` | PyTorch 张量转换层。把框架无关 `GraphData` 转成模型可直接使用的 `GraphTensor`。 | `graph_to_tensor()`、`GraphTensor` |
 | `src/daxigua_rl/models/` | 强化学习模型代码。当前只包含最小 GNN-Q 前向模型，不包含训练循环。 | `GNNQNetwork` |
 | `src/daxigua_rl/models/gnn_q.py` | 统一图 message passing Q 网络。输入 `GraphData` 或 `GraphTensor`，输出每个候选动作的 Q 值。 | `GNNQNetwork.forward()`、`MessagePassingLayer` |
-| `src/daxigua_rl/training/` | 强化学习训练侧数据结构和后续训练组件目录。当前包含经验记录、回放池和单进程采集器。 | `Transition`、`ReplayBuffer`、`RolloutCollector` |
+| `src/daxigua_rl/training/` | 强化学习训练侧数据结构和后续训练组件目录。当前包含经验记录、回放池、单进程采集器和 DQN 更新器。 | `Transition`、`ReplayBuffer`、`RolloutCollector`、`DQNTrainer` |
 | `src/daxigua_rl/training/transition.py` | DQN 经验记录。保存当前图、动作下标、奖励、下一状态图和终止标记。 | `Transition` |
 | `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。保存 `Transition`，容量满后覆盖最旧经验，并支持均匀随机采样。 | `ReplayBuffer` |
 | `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。使用 epsilon-greedy 动作选择让模型或随机策略游玩无渲染环境，并把经验写入 `ReplayBuffer`。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
+| `src/daxigua_rl/training/dqn.py` | 标准 DQN 单步更新器。从 `ReplayBuffer` 采样，计算 TD target 和 SmoothL1Loss，更新 online Q 网络，并定期同步 target network。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
 
 ## 资源和说明
 
@@ -92,6 +93,7 @@
 - `Transition`：DQN 训练使用的一条经验记录，保存 `graph`、`action_offset`、`reward`、`next_graph`、`terminated` 和 `truncated`。
 - `ReplayBuffer`：固定容量经验回放池，默认保存十万条 `Transition`，采样时返回 `tuple[Transition, ...]`。
 - `RolloutCollector`：单进程经验采集器，串联 `DaxiguaEnv`、`GraphBuilder`、Q 网络和 `ReplayBuffer`，用于收集训练经验。
+- `DQNTrainer`：标准 DQN 单步更新器，使用 online/target 双网络、SmoothL1Loss 和梯度裁剪更新 Q 网络。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
@@ -103,7 +105,7 @@
 - `daxigua` 游戏本体不得 import `daxigua_rl`；RL 代码只通过稳定游戏接口访问游戏。
 - `Transition` 不依赖 PyTorch，保存的是框架无关 `GraphData`；真正训练采样 batch 时再转换为 tensor。
 - `daxigua_rl.graph.tensor` 和 `daxigua_rl.models` 依赖 PyTorch；它们不会在 `daxigua_rl` 顶层自动导入，避免非训练环境被强制要求安装 torch。
-- `RolloutCollector` 依赖 PyTorch 模型前向；它通过 `daxigua_rl.training` 懒加载导入，不放进 `daxigua_rl` 顶层导出。
+- `RolloutCollector` 和 `DQNTrainer` 依赖 PyTorch 模型前向；它们通过 `daxigua_rl.training` 懒加载导入，不放进 `daxigua_rl` 顶层导出。
 - `tools/temporary_rollout_smoke_test.py` 依赖 PyTorch，建议在 `python-torch` conda 环境中运行；它只做临时链路验证，不训练模型。
 - 当前 `src/daxigua/core/board.py` 已为 `pymunk 7.3.0` 做兼容处理。
 - 当前 `src/daxigua/app.py` 仍集中承载表现层细节；后续如确实需要拆分，再创建对应表现层模块。
