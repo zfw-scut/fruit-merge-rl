@@ -50,15 +50,38 @@ get_state()
 
 这里的 `step(action_index)` 表示一次完整投放，不是一帧游戏画面。
 
-默认 reward：
+默认 reward 已从单一 `score_delta` 扩展为可配置 reward shaping：
 
 ```text
-reward = score_delta
-if terminated:
-    reward += terminal_penalty
+reward =
+    score_reward
+    + survival_bonus
+    + height_delta_reward
+    + danger_penalty
+    + terminal_penalty
 ```
 
-后续复杂奖励设计应放在 `daxigua_rl`，不要写回游戏规则层。
+当前默认配置：
+
+```python
+RewardConfig(
+    score_scale=1.0,
+    survival_bonus=0.05,
+    height_delta_weight=0.02,
+    danger_height_weight=1.0,
+    terminal_penalty=-100.0,
+)
+```
+
+各项含义：
+
+- `score_reward = score_delta * score_scale`: 保留真实合成分数作为主奖励。
+- `survival_bonus`: 没有死亡时给一个很小的存活奖励。
+- `height_delta_reward`: 堆叠高度降低时为正，堆叠升高时为负。
+- `danger_penalty`: 堆叠越接近顶部危险线，持续惩罚越大。
+- `terminal_penalty`: 游戏失败时的终局惩罚。
+
+`DaxiguaEnv.step()` 会在 `info["reward_breakdown"]` 中返回 `RewardBreakdown`，用于查看本次 reward 的组成。复杂奖励设计应继续放在 `daxigua_rl`，不要写回游戏规则层。
 
 ## 状态数据
 
