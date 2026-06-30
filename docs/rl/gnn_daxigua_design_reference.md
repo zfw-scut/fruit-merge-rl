@@ -292,7 +292,62 @@ argmax Q(s,ai)
 
 ---
 
-## 7. 经验状态记录
+## 7. 当前最小 GNN-Q 模型
+
+当前模型位于：
+
+```text
+src/daxigua_rl/models/gnn_q.py
+```
+
+模型输入：
+
+```text
+node_features        [num_nodes, 28]
+edge_index           [2, num_edges]
+edge_features        [num_edges, 26]
+action_node_indices  [action_count]
+```
+
+模型结构：
+
+```text
+node_features -> node_encoder -> node_hidden
+edge_features -> edge_encoder -> edge_hidden
+
+message passing x 3:
+    message = MLP([source_node, target_node, edge])
+    aggregate = mean(messages_to_target)
+    node = LayerNorm(node + update_mlp([node, aggregate]))
+
+action_hidden = node_hidden[action_node_indices]
+q_values = q_head(action_hidden)
+```
+
+默认参数：
+
+```text
+hidden_dim = 128
+message_layers = 3
+aggregation = mean
+activation = SiLU
+```
+
+输出：
+
+```text
+q_values.shape = [action_count]
+```
+
+说明：
+
+- 当前是统一图 message passing，不使用真正的异构图算子。
+- 节点类型和边类型通过 one-hot 特征提供给模型。
+- 当前模型只用于跑通前向链路，尚未接入 replay buffer、target network 或训练循环。
+
+---
+
+## 8. 经验状态记录
 
 单条经验状态包含：
 

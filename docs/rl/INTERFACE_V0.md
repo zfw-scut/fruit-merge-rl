@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层和 GNN 图构建基础设施；暂不包含模型、replay buffer 或训练循环。
+当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施和最小 GNN-Q 前向模型；暂不包含 replay buffer 或训练循环。
 
 ## 边界
 
@@ -91,8 +91,33 @@ edge_feature_dim = 26
 
 详细节点和边特征以 `docs/rl/gnn_daxigua_design_reference.md` 为准。
 
+## 模型前向接口
+
+当前 `daxigua_rl.models` 包提供：
+
+- `GNNQNetwork`: 统一图 message passing Q 网络。
+- `MessagePassingLayer`: 基于 mean aggregation 的单层消息传递。
+
+当前 `daxigua_rl.graph.tensor` 提供：
+
+- `graph_to_tensor(graph) -> GraphTensor`
+- `GraphTensor.to(device=None, dtype=None)`
+
+最小前向链路：
+
+```text
+DaxiguaEnv.reset()
+    -> GameState + ActionCandidate
+    -> GraphBuilder.build(...)
+    -> graph_to_tensor(...)
+    -> GNNQNetwork(...)
+    -> q_values[action_count]
+```
+
+当前模型只验证前向链路和反向传播是否可运行；Q 值在训练前没有策略意义。
+
 ## 后续扩展
 
-- 模型、replay buffer 和训练循环应继续放在 `daxigua_rl`，读取 `GraphData` 或其 tensor 形式。
+- replay buffer 和训练循环应继续放在 `daxigua_rl`，读取 `GraphData` 或其 tensor 形式。
 - 多进程采样、replay buffer、模型训练也应在 `daxigua_rl` 内部实现。
 - 如果未来需要性能优化，优先 profile `HeadlessGame`，再决定是否替换底层实现。
