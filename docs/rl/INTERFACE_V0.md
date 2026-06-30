@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前只提供无渲染游戏接口和 RL 环境壳层，不包含模型、GNN 图构建、replay buffer 或训练循环。
+当前提供无渲染游戏接口、RL 环境壳层和 GNN 图构建基础设施；暂不包含模型、replay buffer 或训练循环。
 
 ## 边界
 
@@ -75,8 +75,24 @@ if terminated:
 
 `FruitState` 包含位置、速度、等级、半径、年龄、稳定状态和到边界/危险线的距离。
 
+## 图构建接口
+
+当前 `daxigua_rl.graph` 包提供：
+
+- `GraphBuilder`: 将 `GameState` 和 `ActionCandidate` 转换成框架无关的 `GraphData`。
+- `GraphAblator`: 在不改变图维度的前提下按配置置零部分节点或边特征，用于消融研究。
+
+当前优化后的图特征维度：
+
+```text
+node_feature_dim = 28
+edge_feature_dim = 26
+```
+
+详细节点和边特征以 `docs/rl/gnn_daxigua_design_reference.md` 为准。
+
 ## 后续扩展
 
-- GNN 图构建器应单独放在 `daxigua_rl`，读取 `GameState` 和 `ActionCandidate`。
+- 模型、replay buffer 和训练循环应继续放在 `daxigua_rl`，读取 `GraphData` 或其 tensor 形式。
 - 多进程采样、replay buffer、模型训练也应在 `daxigua_rl` 内部实现。
 - 如果未来需要性能优化，优先 profile `HeadlessGame`，再决定是否替换底层实现。

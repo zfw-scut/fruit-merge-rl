@@ -40,6 +40,18 @@ state = {
 
 ## 4. 节点状态量
 
+当前实现使用统一节点特征矩阵。所有节点都会带节点类型 one-hot：
+
+```text
+is_board_fruit_node
+is_queue_fruit_node
+is_action_node
+is_global_node
+is_boundary_node
+```
+
+下表只列出各类节点实际填充的业务特征。未使用的通用字段保持为 `0`。
+
 ### 4.1 board_fruit_node
 
 表示地图中真实存在的水果。
@@ -52,12 +64,20 @@ state = {
 | vy | 垂直速度 |
 | level | 水果等级 |
 | radius | 水果半径 |
-| age | 水果存在时间 |
-| stable_flag | 是否稳定 |
+| stable | 是否基本稳定 |
 | distance_to_left_wall | 到左墙距离 |
 | distance_to_right_wall | 到右墙距离 |
 | distance_to_floor | 到底部距离 |
 | distance_to_danger_line | 到死亡线距离 |
+
+已移除的弱特征：
+
+```text
+angle_sin
+angle_cos
+angular_velocity
+age
+```
 
 ---
 
@@ -83,7 +103,7 @@ fruit_queue = [q0, q1, q2, q3]
 | level | 水果等级 |
 | radius | 水果半径 |
 | queue_index | 队列位置 |
-| is_current | 是否为 q0 |
+| is_current_queue_fruit | 是否为 q0 |
 
 说明：queue_fruit_node 没有真实空间位置，不作为地图内物理水果处理。
 
@@ -95,10 +115,10 @@ fruit_queue = [q0, q1, q2, q3]
 
 | 状态量 | 含义 |
 |---|---|
-| drop_x | 投放横坐标 |
+| x | 候选投放横坐标 |
 | action_index | 动作编号 |
-| current_level | q0 的水果等级 |
-| current_radius | q0 的水果半径 |
+| level | q0 的水果等级 |
+| radius | q0 的水果半径 |
 
 ---
 
@@ -108,13 +128,10 @@ fruit_queue = [q0, q1, q2, q3]
 
 | 状态量 | 含义 |
 |---|---|
-| score | 当前分数 |
 | max_height | 当前最高堆叠高度 |
 | fruit_count | 地图内水果数量 |
 | max_level | 地图内最高水果等级 |
-| danger_height | 危险高度 / 死亡线高度 |
 | empty_space_ratio | 剩余空间比例 |
-| step_count | 当前步数 |
 
 ---
 
@@ -133,12 +150,31 @@ fruit_queue = [q0, q1, q2, q3]
 
 | 状态量 | 含义 |
 |---|---|
-| boundary_type | 边界类型 |
-| position | 边界位置 |
+| is_left_wall | 是否为左墙 |
+| is_right_wall | 是否为右墙 |
+| is_floor | 是否为底部地板 |
+| is_danger_line | 是否为死亡线 |
+| x | 边界参考横坐标 |
+| y | 边界参考纵坐标 |
+| boundary_position | 边界在线性方向上的位置 |
 
 ---
 
 ## 5. 边类型与边状态量
+
+当前实现使用统一边特征矩阵。所有边都会带边类型 one-hot：
+
+```text
+is_board_fruit_pair_edge
+is_action_board_fruit_edge
+is_queue_fruit_order_edge
+is_queue_board_fruit_edge
+is_action_queue_fruit_edge
+is_board_boundary_edge
+is_global_edge
+```
+
+下表只列出各类边实际填充的业务特征。未使用的通用字段保持为 `0`。
 
 ### 5.1 board_fruit ↔ board_fruit
 
@@ -149,6 +185,8 @@ fruit_queue = [q0, q1, q2, q3]
 | dx | 横向相对距离 |
 | dy | 纵向相对距离 |
 | distance | 中心距离 |
+| horizontal_distance | 横向距离绝对值 |
+| vertical_distance | 纵向距离绝对值 |
 | radius_sum | 半径和 |
 | overlap_margin | 半径和与中心距离之差 |
 | level_diff | 等级差 |
@@ -156,7 +194,6 @@ fruit_queue = [q0, q1, q2, q3]
 | same_level | 是否同等级 |
 | relative_vx | 相对水平速度 |
 | relative_vy | 相对垂直速度 |
-| approaching_speed | 相互接近速度 |
 
 ---
 
@@ -166,14 +203,15 @@ fruit_queue = [q0, q1, q2, q3]
 
 | 状态量 | 含义 |
 |---|---|
-| drop_x_minus_fruit_x | 投放横坐标与水果横坐标之差 |
+| dx | 场上水果相对候选落点的横向有符号距离 |
+| dy | 场上水果相对生成线的纵向有符号距离 |
 | horizontal_distance | 横向距离 |
 | vertical_distance | 纵向距离 |
-| distance | 假想投放水果与已有水果距离 |
+| radius_sum | q0 与已有水果半径和 |
+| path_overlap_margin | 投放路径和场上水果横向范围的重叠余量 |
 | level_diff | q0 与已有水果等级差 |
 | abs_level_diff | 等级差绝对值 |
 | same_level | 是否同等级 |
-| radius_sum | q0 与已有水果半径和 |
 | is_under_drop_path | 已有水果是否接近投放路径 |
 
 ---
@@ -187,6 +225,7 @@ fruit_queue = [q0, q1, q2, q3]
 | order_gap | 队列顺序间隔 |
 | is_next | 是否为相邻下一个水果 |
 | level_diff | 等级差 |
+| abs_level_diff | 等级差绝对值 |
 | same_level | 是否同等级 |
 
 ---
@@ -201,8 +240,6 @@ fruit_queue = [q0, q1, q2, q3]
 | level_diff | 队列水果与地图水果等级差 |
 | abs_level_diff | 等级差绝对值 |
 | same_level | 是否同等级 |
-| board_fruit_x | 地图水果横坐标 |
-| board_fruit_y | 地图水果纵坐标 |
 
 ---
 
@@ -212,11 +249,7 @@ fruit_queue = [q0, q1, q2, q3]
 
 | 状态量 | 含义 |
 |---|---|
-| action_index | 动作编号 |
 | queue_index | 队列位置 |
-| is_current | 是否为 q0 |
-| level_diff_to_current | 与 q0 的等级差 |
-| same_as_current | 是否与 q0 同等级 |
 
 ---
 
@@ -226,7 +259,6 @@ fruit_queue = [q0, q1, q2, q3]
 
 | 状态量 | 含义 |
 |---|---|
-| boundary_type | 边界类型 |
 | distance_to_boundary | 水果到边界距离 |
 | is_near_boundary | 是否接近边界 |
 
@@ -236,9 +268,7 @@ fruit_queue = [q0, q1, q2, q3]
 
 表示全局状态与其他节点之间的信息关系。
 
-| 状态量 | 含义 |
-|---|---|
-| node_type | 被连接节点类型 |
+当前 `global ↔ all` 边只使用边类型 one-hot，不额外填充业务特征。
 
 ---
 
