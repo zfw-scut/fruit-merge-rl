@@ -67,8 +67,6 @@ class GraphBuilderConfig:
     """
 
     velocity_scale: float = 2000.0                 # 线速度归一化比例，用于 vx、vy、relative_vx、relative_vy 等特征。
-    angular_velocity_scale: float = 20.0           # 角速度归一化比例，用于水果自身旋转速度。
-    age_scale: float = 1000.0                      # 水果存在帧数归一化比例，用于表达“这个水果已经在场上多久”。
     score_scale: float = 10000.0                   # 分数归一化比例，避免 score 这类累计值数值过大。
     step_scale: float = 1000.0                     # 投放步数归一化比例，用于 step_count。
     fruit_count_scale: float = 64.0                # 场上水果数量归一化比例，用于 fruit_count。
@@ -292,15 +290,8 @@ class GraphBuilder:
             'y': self._signed(fruit.y, geometry.height),
             'vx': self._signed(fruit.vx, self.config.velocity_scale),
             'vy': self._signed(fruit.vy, self.config.velocity_scale),
-            'angle_sin': math.sin(fruit.angle),
-            'angle_cos': math.cos(fruit.angle),
-            'angular_velocity': self._signed(
-                fruit.angular_velocity,
-                self.config.angular_velocity_scale,
-            ),
             'level': self._level(fruit.level),
             'radius': self._radius(fruit.radius),
-            'age': self._unsigned(fruit.age_frames, self.config.age_scale),
             'stable': self._flag(fruit.stable),
             'distance_to_left_wall': self._signed(fruit.distance_to_left_wall, geometry.width),
             'distance_to_right_wall': self._signed(fruit.distance_to_right_wall, geometry.width),

@@ -45,13 +45,9 @@ NODE_FEATURE_NAMES = (
     'y',
     'vx',
     'vy',
-    'angle_sin',
-    'angle_cos',
-    'angular_velocity',
     # 水果语义。场上水果、队列水果、动作当前水果都会用到这些字段。
     'level',
     'radius',
-    'age',
     'stable',
     'distance_to_left_wall',
     'distance_to_right_wall',
