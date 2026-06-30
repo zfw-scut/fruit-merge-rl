@@ -168,6 +168,8 @@ class GraphBuilder:
 
         # 6. 按设计文档建立不同类型的边。所有空间边都做成有向边，
         # 这样普通 message passing 层不需要额外处理无向图。
+
+        # 场上水果之间的空间/合成关系。
         self._connect_board_fruits(
             fruits,
             board_node_indices,
@@ -176,6 +178,8 @@ class GraphBuilder:
             edge_features,
             edge_refs,
         )
+
+        # 候选动作和场上水果之间的关系，表达每个落点可能影响哪些水果。
         self._connect_actions_to_board(
             actions,
             action_node_indices,
@@ -186,6 +190,8 @@ class GraphBuilder:
             edge_features,
             edge_refs,
         )
+
+        # 队列内水果的顺序关系。
         self._connect_queue_order(
             queue,
             queue_node_indices,
@@ -193,6 +199,8 @@ class GraphBuilder:
             edge_features,
             edge_refs,
         )
+
+        # 队列水果和场上水果之间的等级匹配关系，表达未来合成潜力。
         self._connect_queue_to_board(
             queue,
             queue_node_indices,
@@ -203,6 +211,8 @@ class GraphBuilder:
             edge_features,
             edge_refs,
         )
+
+        # 候选动作和队列水果之间的关系，让动作节点知道当前与未来水果。
         self._connect_actions_to_queue(
             actions,
             action_node_indices,
@@ -212,6 +222,8 @@ class GraphBuilder:
             edge_features,
             edge_refs,
         )
+
+        # 场上水果和边界之间的关系，显式暴露墙体、地板和死亡线风险。
         self._connect_board_to_boundaries(
             fruits,
             board_node_indices,
@@ -439,7 +451,6 @@ class GraphBuilder:
                 features = {
                     'order_gap': self._signed(target_index - source_index, max(1, queue_length - 1)),
                     'is_next_queue_fruit': self._flag(target_index == source_index + 1),
-                    'queue_index': self._queue_index(source_index, queue_length),
                     'level_diff': self._level_diff(target_level - source_level),
                     'abs_level_diff': self._abs_level_diff(target_level - source_level),
                     'same_level': self._flag(target_level == source_level),
@@ -470,8 +481,6 @@ class GraphBuilder:
             for fruit_index, fruit in enumerate(fruits):
                 level_diff = queue_level - fruit.level
                 features = {
-                    'board_fruit_x': self._signed(fruit.x, geometry.width),
-                    'board_fruit_y': self._signed(fruit.y, geometry.height),
                     'queue_index': self._queue_index(queue_index, len(queue)),
                     'level_diff': self._level_diff(level_diff),
                     'abs_level_diff': self._abs_level_diff(level_diff),
@@ -508,16 +517,10 @@ class GraphBuilder:
             edge_refs):
         """连接候选动作和队列水果，让动作节点知道当前与未来水果。"""
 
-        for action_offset, action in enumerate(actions):
-            for queue_index, queue_level in enumerate(queue):
-                level_diff = queue_level - action.current_level
+        for action_offset in range(len(actions)):
+            for queue_index in range(len(queue)):
                 features = {
-                    'action_index': self._queue_index(action_offset, len(actions)),
                     'queue_index': self._queue_index(queue_index, len(queue)),
-                    'is_current_queue_fruit': self._flag(queue_index == 0),
-                    'level_diff': self._level_diff(level_diff),
-                    'abs_level_diff': self._abs_level_diff(level_diff),
-                    'same_level': self._flag(level_diff == 0),
                 }
 
                 self._add_edge(
@@ -612,13 +615,6 @@ class GraphBuilder:
         relative_vx = target.vx - source.vx
         relative_vy = target.vy - source.vy
 
-        # 距离正在缩小时才记为“接近速度”，远离时记 0，避免符号混淆。
-        if distance > 1e-6:
-            distance_change_speed = (dx * relative_vx + dy * relative_vy) / distance
-            approaching_speed = max(0.0, -distance_change_speed)
-        else:
-            approaching_speed = 0.0
-
         return {
             'dx': self._signed(dx, geometry.width),
             'dy': self._signed(dy, geometry.height),
@@ -632,36 +628,33 @@ class GraphBuilder:
             'same_level': self._flag(level_diff == 0),
             'relative_vx': self._signed(relative_vx, self.config.velocity_scale),
             'relative_vy': self._signed(relative_vy, self.config.velocity_scale),
-            'approaching_speed': self._unsigned(approaching_speed, self.config.velocity_scale),
         }
 
     def _action_board_edge_features(self, action, fruit, geometry, reverse=False):
         """计算候选动作和场上水果之间的边特征。"""
 
-        dx = fruit.x - action.drop_x
-        dy = fruit.y - geometry.spawn_y
-        if reverse:
+        dx = fruit.x - action.drop_x        # 带方向的水平差：水果在落点右侧为正，左侧为负。
+        dy = fruit.y - geometry.spawn_y     # 带方向的垂直差：水果在生成线下方通常为正。
+        if reverse:                         # 如果是反向边，则交换方向。
             dx = -dx
             dy = -dy
 
-        horizontal_distance = abs(action.drop_x - fruit.x)
-        vertical_distance = abs(fruit.y - geometry.spawn_y)
-        distance = math.hypot(horizontal_distance, vertical_distance)
-        radius_sum = action.current_radius + fruit.radius
-        level_diff = action.current_level - fruit.level
+        horizontal_distance = abs(action.drop_x - fruit.x)  # 不带方向的水平距离，判断水果是否接近投放路径。
+        vertical_distance = abs(fruit.y - geometry.spawn_y)  # 不带方向的垂直距离，判断水果位于投放起点下方多远。
+        radius_sum = action.current_radius + fruit.radius    # 两个水果横向接触所需的距离阈值。
+        path_overlap_margin = radius_sum - horizontal_distance
+        level_diff = action.current_level - fruit.level      # 当前投放水果和场上水果的等级差。
 
         return {
             'dx': self._signed(dx, geometry.width),
             'dy': self._signed(dy, geometry.height),
-            'distance': self._unsigned(distance, self._diagonal(geometry)),
             'horizontal_distance': self._unsigned(horizontal_distance, geometry.width),
             'vertical_distance': self._unsigned(vertical_distance, geometry.height),
             'radius_sum': self._unsigned(radius_sum, self.max_radius * 2),
-            'overlap_margin': self._signed(radius_sum - distance, self.max_radius * 2),
+            'path_overlap_margin': self._signed(path_overlap_margin, self.max_radius * 2),
             'level_diff': self._level_diff(level_diff),
             'abs_level_diff': self._abs_level_diff(level_diff),
             'same_level': self._flag(level_diff == 0),
-            'drop_x_minus_fruit_x': self._signed(action.drop_x - fruit.x, geometry.width),
             'is_under_drop_path': self._flag(horizontal_distance <= radius_sum),
         }
 
@@ -685,7 +678,6 @@ class GraphBuilder:
             scale = 1.0
 
         return {
-            BOUNDARY_FEATURES[boundary_type]: 1.0,
             'distance_to_boundary': self._signed(distance, scale),
             # `distance` 已经是“水果外缘到边界”的距离，小于半径就说明比较贴近。
             'is_near_boundary': self._flag(distance <= fruit.radius),
