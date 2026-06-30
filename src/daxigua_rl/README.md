@@ -18,3 +18,10 @@ Current v0 interface:
 - `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling `Transition` records.
 - `RolloutCollector`: single-process collector that plays the headless environment with epsilon-greedy actions and writes `Transition` records into `ReplayBuffer`.
 - `DQNTrainer`: minimal standard DQN updater that samples `Transition` records, computes TD loss, and updates the online Q network.
+- `daxigua_rl.scripts.train_dqn`: first full DQN training entrypoint with CSV metrics, checkpoints, greedy evaluation, and matplotlib curves.
+
+Run training from the project root:
+
+```bash
+PYTHONPATH=src conda run -n python-torch python -m daxigua_rl.scripts.train_dqn
+```

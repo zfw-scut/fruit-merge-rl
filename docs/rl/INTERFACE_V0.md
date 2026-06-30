@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录、基础 `ReplayBuffer`、单进程 `RolloutCollector` 和最小标准 `DQNTrainer`；暂不包含完整训练脚本。
+当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录、基础 `ReplayBuffer`、单进程 `RolloutCollector`、最小标准 `DQNTrainer` 和第一版 DQN 训练入口。
 
 ## 边界
 
@@ -294,8 +294,66 @@ else:
 - `grad_norm`: 裁剪前梯度范数。
 - `target_synced`: 本次是否同步 target network。
 
+## 训练入口
+
+第一版正式训练脚本：
+
+```text
+src/daxigua_rl/scripts/train_dqn.py
+```
+
+运行方式：
+
+```bash
+PYTHONPATH=src conda run -n python-torch python -m daxigua_rl.scripts.train_dqn
+```
+
+默认训练流程：
+
+```text
+warmup 随机收集经验
+-> 每轮 collect_per_update 条新经验
+-> DQNTrainer.train_step()
+-> epsilon 线性衰减
+-> 终端日志
+-> metrics.csv
+-> checkpoint
+-> greedy 评估
+-> matplotlib 训练曲线图
+```
+
+默认输出目录：
+
+```text
+runs/dqn_YYYYMMDD_HHMMSS/
+├── config.json
+├── metrics.csv
+├── checkpoints/
+│   ├── latest.pt
+│   └── step_XXXXXXXX.pt
+└── plots/
+    └── training_curves.png
+```
+
+`metrics.csv` 是核心可视化数据源，记录：
+
+- update step、环境步数、epsilon、buffer 大小。
+- loss、mean Q、mean target、mean reward、TD error、grad norm。
+- 采集阶段 episode 统计。
+- greedy 评估均分、平均 reward、平均 episode 长度。
+- 采样和训练速度。
+
+`training_curves.png` 会从 `metrics.csv` 当前内存记录生成，包含：
+
+- loss 曲线。
+- 训练 episode score 和评估 score。
+- epsilon 衰减。
+- TD error。
+- grad norm。
+- mean Q / mean target。
+
 ## 后续扩展
 
-- 完整训练脚本应继续放在 `daxigua_rl`，组合 `RolloutCollector`、`ReplayBuffer` 和 `DQNTrainer`。
+- 后续训练脚本仍应继续放在 `daxigua_rl.scripts`，组合 `RolloutCollector`、`ReplayBuffer` 和 `DQNTrainer`。
 - 多进程采样、replay buffer、模型训练也应在 `daxigua_rl` 内部实现。
 - 如果未来需要性能优化，优先 profile `HeadlessGame`，再决定是否替换底层实现。

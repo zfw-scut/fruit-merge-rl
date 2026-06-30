@@ -33,6 +33,8 @@
 | `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。保存 `Transition`，容量满后覆盖最旧经验，并支持均匀随机采样。 | `ReplayBuffer` |
 | `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。使用 epsilon-greedy 动作选择让模型或随机策略游玩无渲染环境，并把经验写入 `ReplayBuffer`。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
 | `src/daxigua_rl/training/dqn.py` | 标准 DQN 单步更新器。从 `ReplayBuffer` 采样，计算 TD target 和 SmoothL1Loss，更新 online Q 网络，并定期同步 target network。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
+| `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、导出等入口。 | `train_dqn.py` |
+| `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和 matplotlib 曲线图。 | `python -m daxigua_rl.scripts.train_dqn` |
 
 ## 资源和说明
 
@@ -76,6 +78,7 @@
 | `.vscode/` | VS Code 本地配置和缓存。 | 已忽略。 |
 | `__pycache__/` | Python 字节码缓存。 | 已忽略。 |
 | `src/**/__pycache__/` | 包内 Python 字节码缓存。 | 已忽略。 |
+| `runs/` | DQN 训练输出目录，包含 `metrics.csv`、checkpoint 和曲线图。 | 已忽略。 |
 | `.agents/`、`.codex/` | 当前工作环境辅助目录。 | 不属于原项目核心源码。 |
 
 ## 可复用组件
@@ -96,6 +99,7 @@
 - `ReplayBuffer`：固定容量经验回放池，默认保存十万条 `Transition`，采样时返回 `tuple[Transition, ...]`。
 - `RolloutCollector`：单进程经验采集器，串联 `DaxiguaEnv`、`GraphBuilder`、Q 网络和 `ReplayBuffer`，用于收集训练经验。
 - `DQNTrainer`：标准 DQN 单步更新器，使用 online/target 双网络、SmoothL1Loss 和梯度裁剪更新 Q 网络。
+- `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`checkpoints/latest.pt` 和 `plots/training_curves.png`。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
@@ -108,6 +112,7 @@
 - `Transition` 不依赖 PyTorch，保存的是框架无关 `GraphData`；真正训练采样 batch 时再转换为 tensor。
 - `daxigua_rl.graph.tensor` 和 `daxigua_rl.models` 依赖 PyTorch；它们不会在 `daxigua_rl` 顶层自动导入，避免非训练环境被强制要求安装 torch。
 - `RolloutCollector` 和 `DQNTrainer` 依赖 PyTorch 模型前向；它们通过 `daxigua_rl.training` 懒加载导入，不放进 `daxigua_rl` 顶层导出。
+- `train_dqn.py` 依赖 PyTorch 和 matplotlib；matplotlib 使用 `Agg` 后端生成 png，并把缓存目录放到当前 run 目录下。
 - `tools/temporary_rollout_smoke_test.py` 依赖 PyTorch，建议在 `python-torch` conda 环境中运行；它只做临时链路验证，不训练模型。
 - 当前 `src/daxigua/core/board.py` 已为 `pymunk 7.3.0` 做兼容处理。
 - 当前 `src/daxigua/app.py` 仍集中承载表现层细节；后续如确实需要拆分，再创建对应表现层模块。
