@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型和 `Transition` 经验记录；暂不包含 replay buffer 或训练循环。
+当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录和基础 `ReplayBuffer`；暂不包含训练循环。
 
 ## 边界
 
@@ -121,6 +121,7 @@ DaxiguaEnv.reset()
 当前 `daxigua_rl.training` 包提供：
 
 - `Transition`: 一条 DQN 经验记录。
+- `ReplayBuffer`: 固定容量内存回放池。
 
 字段含义：
 
@@ -146,8 +147,27 @@ target = reward + gamma * max_next_q   # 仅当 transition.can_bootstrap 为 Tru
 target = reward                        # terminal/truncated transition
 ```
 
+### `ReplayBuffer`
+
+第一版接口：
+
+- `ReplayBuffer(capacity=100_000, seed=None)`: 创建固定容量回放池。
+- `push(transition)`: 写入一条 `Transition`。
+- `extend(transitions)`: 批量写入。
+- `sample(batch_size) -> tuple[Transition, ...]`: 随机无放回采样。
+- `is_ready(batch_size) -> bool`: 判断是否足够采样一个 batch。
+- `clear()`: 清空。
+- `len(buffer)`: 当前已保存经验数量。
+
+当前约定：
+
+- 默认容量是 `100_000`，也就是十万条经验。
+- 容量满后覆盖最旧经验。
+- `sample()` 返回原始 `Transition` 元组，不在 buffer 层拼 tensor batch。
+- 第一版使用均匀随机采样，不做优先经验回放。
+
 ## 后续扩展
 
-- replay buffer 和训练循环应继续放在 `daxigua_rl`，读取 `Transition` 中保存的 `GraphData` 或其 tensor 形式。
+- 训练循环应继续放在 `daxigua_rl`，读取 `Transition` 中保存的 `GraphData` 或其 tensor 形式。
 - 多进程采样、replay buffer、模型训练也应在 `daxigua_rl` 内部实现。
 - 如果未来需要性能优化，优先 profile `HeadlessGame`，再决定是否替换底层实现。
