@@ -5,13 +5,25 @@ stable interfaces exposed by daxigua, never the other way around.
 """
 
 from .env import DaxiguaEnv, DaxiguaEnvConfig
-from .graph import GraphBuilder, GraphBuilderConfig, GraphData
+from .graph import (
+    FeatureAblationConfig,
+    FeatureMask,
+    GraphAblator,
+    GraphBuilder,
+    GraphBuilderConfig,
+    GraphData,
+    get_ablation_preset,
+)
 
 
 __all__ = [
     'DaxiguaEnv',
     'DaxiguaEnvConfig',
+    'FeatureAblationConfig',
+    'FeatureMask',
+    'GraphAblator',
     'GraphBuilder',
     'GraphBuilderConfig',
     'GraphData',
+    'get_ablation_preset',
 ]
