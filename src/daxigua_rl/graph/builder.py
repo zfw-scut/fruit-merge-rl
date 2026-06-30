@@ -67,8 +67,6 @@ class GraphBuilderConfig:
     """
 
     velocity_scale: float = 2000.0                 # 线速度归一化比例，用于 vx、vy、relative_vx、relative_vy 等特征。
-    score_scale: float = 10000.0                   # 分数归一化比例，避免 score 这类累计值数值过大。
-    step_scale: float = 1000.0                     # 投放步数归一化比例，用于 step_count。
     fruit_count_scale: float = 64.0                # 场上水果数量归一化比例，用于 fruit_count。
     connect_global_node: bool = True               # 是否让 global 节点和其他所有节点双向连接。
 
@@ -316,14 +314,8 @@ class GraphBuilder:
         """生成候选动作节点特征。"""
 
         return {
-            # 动作没有真实 y 坐标，这里用生成线作为“假想投放起点”。
             'x': self._signed(action.drop_x, geometry.width),
-            'y': self._signed(geometry.spawn_y, geometry.height),
-            'drop_x': self._signed(action.drop_x, geometry.width),
-            'normalized_drop_x': self._unit(action.normalized_drop_x),
             'action_index': self._queue_index(action_offset, action_count),
-            'current_level': self._level(action.current_level),
-            'current_radius': self._radius(action.current_radius),
             'level': self._level(action.current_level),
             'radius': self._radius(action.current_radius),
         }
@@ -333,14 +325,10 @@ class GraphBuilder:
 
         geometry = state.geometry
         return {
-            'score': self._unsigned(state.score, self.config.score_scale),
-            'last_score': self._unsigned(state.last_score, self.config.score_scale),
             'max_height': self._unsigned(state.max_height, self._playable_height(geometry)),
             'fruit_count': self._unsigned(state.fruit_count, self.config.fruit_count_scale),
             'max_level': self._level(state.max_level),
             'empty_space_ratio': self._unit(state.empty_space_ratio),
-            'step_count': self._unsigned(state.step_count, self.config.step_scale),
-            'done': self._flag(state.done),
         }
 
     def _boundary_features(self, boundary_type, geometry):
