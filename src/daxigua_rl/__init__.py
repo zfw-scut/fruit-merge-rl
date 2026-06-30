@@ -14,6 +14,7 @@ from .graph import (
     GraphData,
     get_ablation_preset,
 )
+from .training import Transition
 
 
 __all__ = [
@@ -25,5 +26,6 @@ __all__ = [
     'GraphBuilder',
     'GraphBuilderConfig',
     'GraphData',
+    'Transition',
     'get_ablation_preset',
 ]
