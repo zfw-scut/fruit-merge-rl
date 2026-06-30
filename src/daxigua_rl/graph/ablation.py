@@ -81,7 +81,6 @@ EDGE_FEATURE_GROUPS = {
         FeatureMask((
             'relative_vx',
             'relative_vy',
-            'approaching_speed',
         ), target_type='board_fruit_to_board_fruit'),                                    # 屏蔽场上水果之间的相对运动关系。
     ),
     'fruit_pair_level': (
@@ -95,12 +94,10 @@ EDGE_FEATURE_GROUPS = {
         FeatureMask((
             'dx',
             'dy',
-            'distance',
             'horizontal_distance',
             'vertical_distance',
             'radius_sum',
-            'overlap_margin',
-            'drop_x_minus_fruit_x',
+            'path_overlap_margin',
             'is_under_drop_path',
         ), target_type='action_to_board_fruit'),                                         # 屏蔽候选动作与场上水果的空间/投放路径关系。
     ),
@@ -115,7 +112,6 @@ EDGE_FEATURE_GROUPS = {
         FeatureMask((
             'order_gap',
             'is_next_queue_fruit',
-            'queue_index',
         ), target_type='queue_fruit_to_queue_fruit'),                                    # 屏蔽待投放队列内部的顺序边信息。
     ),
     'queue_board_match': (
@@ -124,19 +120,12 @@ EDGE_FEATURE_GROUPS = {
             'level_diff',
             'abs_level_diff',
             'same_level',
-            'board_fruit_x',
-            'board_fruit_y',
         ), target_type='queue_fruit_to_board_fruit'),                                    # 屏蔽未来水果与场上水果的匹配关系。
     ),
     'action_queue_match': (
         FeatureMask((
-            'action_index',
             'queue_index',
-            'is_current_queue_fruit',
-            'level_diff',
-            'abs_level_diff',
-            'same_level',
-        ), target_type='action_to_queue_fruit'),                                         # 屏蔽候选动作与待投放队列的规划关系。
+        ), target_type='action_to_queue_fruit'),                                         # 屏蔽候选动作与待投放队列的顺序连接信息。
     ),
     'boundary_distance': (
         FeatureMask((

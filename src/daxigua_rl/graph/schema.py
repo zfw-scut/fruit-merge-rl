@@ -95,26 +95,16 @@ EDGE_FEATURE_NAMES = (
     # 运动关系。
     'relative_vx',
     'relative_vy',
-    'approaching_speed',
     # 动作和投放路径关系。
-    'action_index',
-    'drop_x_minus_fruit_x',
+    'path_overlap_margin',
     'is_under_drop_path',
     # 队列关系。
     'order_gap',
     'is_next_queue_fruit',
     'queue_index',
-    'is_current_queue_fruit',
     # 边界关系。
-    'is_left_wall',
-    'is_right_wall',
-    'is_floor',
-    'is_danger_line',
     'distance_to_boundary',
     'is_near_boundary',
-    # 队列水果与场上水果关系中保留场上水果的大致位置。
-    'board_fruit_x',
-    'board_fruit_y',
 )
 
 
