@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录、基础 `ReplayBuffer` 和单进程 `RolloutCollector`；暂不包含 DQN 参数更新训练循环。
+当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录、基础 `ReplayBuffer`、单进程 `RolloutCollector` 和最小标准 `DQNTrainer`；暂不包含完整训练脚本。
 
 ## 边界
 
@@ -123,6 +123,7 @@ DaxiguaEnv.reset()
 - `Transition`: 一条 DQN 经验记录。
 - `ReplayBuffer`: 固定容量内存回放池。
 - `RolloutCollector`: 单进程 rollout 采集器。
+- `DQNTrainer`: 标准 DQN 单步更新器。
 
 字段含义：
 
@@ -210,8 +211,68 @@ from daxigua_rl.training import RolloutCollector
 - `random_actions`、`greedy_actions`: 探索/利用动作数量。
 - `buffer_size`: 采集后 replay buffer 大小。
 
+### `DQNTrainer`
+
+导入方式：
+
+```python
+from daxigua_rl.training import DQNTrainer, DQNTrainerConfig
+```
+
+第一版接口：
+
+- `DQNTrainer(online_model, target_model, replay_buffer, optimizer, config=None, loss_fn=None)`
+- `train_step() -> DQNTrainStats`
+- `is_ready() -> bool`
+- `sync_target_model()`
+
+默认配置：
+
+```python
+DQNTrainerConfig(
+    gamma=0.99,
+    batch_size=32,
+    target_update_interval=1000,
+    grad_clip_norm=10.0,
+    sync_target_on_init=True,
+)
+```
+
+当前标准 DQN target：
+
+```text
+current_q = online_model(graph)[action_offset]
+
+if transition.can_bootstrap:
+    target = reward + gamma * max(target_model(next_graph))
+else:
+    target = reward
+```
+
+当前约定：
+
+- 默认 loss 使用 `SmoothL1Loss`，也就是 Huber 风格损失。
+- 初始化时会把 `online_model` 参数同步到 `target_model`。
+- `target_model` 参数会被冻结，只用于无梯度推理。
+- 每隔 `target_update_interval` 次 `train_step()` 同步一次 target network。
+- 第一版是标准 DQN，不做 Double DQN。
+- 第一版逐条图 forward，不做 GraphBatch。
+- 默认使用梯度裁剪 `grad_clip_norm=10.0`。
+
+`DQNTrainStats` 提供：
+
+- `update_step`: 已完成更新次数。
+- `loss`: 本次 TD loss。
+- `mean_q`: 当前 Q 平均值。
+- `mean_target`: target 平均值。
+- `mean_reward`: reward 平均值。
+- `mean_abs_td_error`: 平均绝对 TD 误差。
+- `bootstrap_count`: batch 中使用 next_graph bootstrap 的 transition 数量。
+- `grad_norm`: 裁剪前梯度范数。
+- `target_synced`: 本次是否同步 target network。
+
 ## 后续扩展
 
-- 训练循环应继续放在 `daxigua_rl`，读取 `Transition` 中保存的 `GraphData` 或其 tensor 形式。
+- 完整训练脚本应继续放在 `daxigua_rl`，组合 `RolloutCollector`、`ReplayBuffer` 和 `DQNTrainer`。
 - 多进程采样、replay buffer、模型训练也应在 `daxigua_rl` 内部实现。
 - 如果未来需要性能优化，优先 profile `HeadlessGame`，再决定是否替换底层实现。

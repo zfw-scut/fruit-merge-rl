@@ -16,3 +16,4 @@ Current v0 interface:
 - `Transition`: framework-independent training experience record built from `GraphData`, action offset, reward, next graph, and done flags.
 - `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling `Transition` records.
 - `RolloutCollector`: single-process collector that plays the headless environment with epsilon-greedy actions and writes `Transition` records into `ReplayBuffer`.
+- `DQNTrainer`: minimal standard DQN updater that samples `Transition` records, computes TD loss, and updates the online Q network.
