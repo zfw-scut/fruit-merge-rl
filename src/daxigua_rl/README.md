@@ -15,3 +15,4 @@ Current v0 interface:
 - This package must not import `daxigua.app.Board`, pygame renderers, HUD, audio, or manual input code.
 - `Transition`: framework-independent training experience record built from `GraphData`, action offset, reward, next graph, and done flags.
 - `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling `Transition` records.
+- `RolloutCollector`: single-process collector that plays the headless environment with epsilon-greedy actions and writes `Transition` records into `ReplayBuffer`.

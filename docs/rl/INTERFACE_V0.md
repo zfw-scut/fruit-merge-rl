@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录和基础 `ReplayBuffer`；暂不包含训练循环。
+当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录、基础 `ReplayBuffer` 和单进程 `RolloutCollector`；暂不包含 DQN 参数更新训练循环。
 
 ## 边界
 
@@ -122,6 +122,7 @@ DaxiguaEnv.reset()
 
 - `Transition`: 一条 DQN 经验记录。
 - `ReplayBuffer`: 固定容量内存回放池。
+- `RolloutCollector`: 单进程 rollout 采集器。
 
 字段含义：
 
@@ -165,6 +166,49 @@ target = reward                        # terminal/truncated transition
 - 容量满后覆盖最旧经验。
 - `sample()` 返回原始 `Transition` 元组，不在 buffer 层拼 tensor batch。
 - 第一版使用均匀随机采样，不做优先经验回放。
+
+### `RolloutCollector`
+
+导入方式：
+
+```python
+from daxigua_rl.training import RolloutCollector
+```
+
+第一版接口：
+
+- `RolloutCollector(env, graph_builder, replay_buffer, model=None, policy=None, seed=None)`: 创建单环境采集器。
+- `reset(seed=None, fruit_queue=None)`: 显式重置环境并开始新 episode。
+- `collect_steps(step_count, epsilon=1.0) -> RolloutStats`: 收集指定数量的 transition 并写入 replay buffer。
+
+当前采集流程：
+
+```text
+当前 GameState + action_candidates
+-> GraphBuilder.build(...)
+-> epsilon-greedy 选择 action_offset
+-> DaxiguaEnv.step(action_offset)
+-> 构建 next_graph
+-> Transition(...)
+-> ReplayBuffer.push(...)
+```
+
+当前约定：
+
+- `epsilon=1.0` 时可以不提供模型，collector 会完全随机探索。
+- `epsilon<1.0` 时必须提供 Q 网络模型，用于 greedy 分支。
+- 采集时模型会临时切到 `eval()`，结束后恢复原本训练模式。
+- episode 结束后 collector 会自动 `reset()` 并继续采集，直到达到指定 transition 数。
+- `RolloutCollector` 依赖 PyTorch，因此不会被 `daxigua_rl` 顶层自动导入。
+
+`RolloutStats` 提供：
+
+- `steps`: 本次写入多少条 transition。
+- `episodes`: 本次完成多少局。
+- `total_reward`: 本次总 reward。
+- `episode_rewards`、`episode_lengths`、`episode_scores`: 本次已结束 episode 的统计。
+- `random_actions`、`greedy_actions`: 探索/利用动作数量。
+- `buffer_size`: 采集后 replay buffer 大小。
 
 ## 后续扩展
 
