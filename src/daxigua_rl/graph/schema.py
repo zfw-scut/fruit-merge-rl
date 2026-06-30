@@ -57,20 +57,12 @@ NODE_FEATURE_NAMES = (
     'queue_index',
     'is_current_queue_fruit',
     # 动作语义。
-    'drop_x',
-    'normalized_drop_x',
     'action_index',
-    'current_level',
-    'current_radius',
     # 全局语义。
-    'score',
-    'last_score',
     'max_height',
     'fruit_count',
     'max_level',
     'empty_space_ratio',
-    'step_count',
-    'done',
     # 边界语义。
     'is_left_wall',
     'is_right_wall',
