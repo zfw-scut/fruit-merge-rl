@@ -5,6 +5,13 @@ stable interfaces exposed by daxigua, never the other way around.
 """
 
 from .env import DaxiguaEnv, DaxiguaEnvConfig
+from .graph import GraphBuilder, GraphBuilderConfig, GraphData
 
 
-__all__ = ['DaxiguaEnv', 'DaxiguaEnvConfig']
+__all__ = [
+    'DaxiguaEnv',
+    'DaxiguaEnvConfig',
+    'GraphBuilder',
+    'GraphBuilderConfig',
+    'GraphData',
+]

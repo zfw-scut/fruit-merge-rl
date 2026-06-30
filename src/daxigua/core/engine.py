@@ -326,6 +326,7 @@ class HeadlessGame:
         score_before = self.score
         self._last_merge_events = []
 
+        # 每次 step 都会调用 advance_physics，直到稳定或失败才返回。每次 step 只允许一次 advance_physics。
         while frames_simulated < frame_limit and not self.is_done():
             self.space.step(1 / self.fps)
             self.physics_frame += 1
