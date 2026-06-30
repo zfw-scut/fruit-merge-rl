@@ -14,3 +14,4 @@ Current v0 interface:
 - One RL `step(action_index)` means one fruit drop plus headless physics settling, not one rendered frame.
 - This package must not import `daxigua.app.Board`, pygame renderers, HUD, audio, or manual input code.
 - `Transition`: framework-independent training experience record built from `GraphData`, action offset, reward, next graph, and done flags.
+- `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling `Transition` records.

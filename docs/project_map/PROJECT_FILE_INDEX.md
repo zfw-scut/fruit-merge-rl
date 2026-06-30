@@ -27,8 +27,9 @@
 | `src/daxigua_rl/graph/tensor.py` | PyTorch 张量转换层。把框架无关 `GraphData` 转成模型可直接使用的 `GraphTensor`。 | `graph_to_tensor()`、`GraphTensor` |
 | `src/daxigua_rl/models/` | 强化学习模型代码。当前只包含最小 GNN-Q 前向模型，不包含训练循环。 | `GNNQNetwork` |
 | `src/daxigua_rl/models/gnn_q.py` | 统一图 message passing Q 网络。输入 `GraphData` 或 `GraphTensor`，输出每个候选动作的 Q 值。 | `GNNQNetwork.forward()`、`MessagePassingLayer` |
-| `src/daxigua_rl/training/` | 强化学习训练侧数据结构和后续训练组件目录。当前只包含经验记录结构。 | `Transition` |
+| `src/daxigua_rl/training/` | 强化学习训练侧数据结构和后续训练组件目录。当前包含经验记录和回放池。 | `Transition`、`ReplayBuffer` |
 | `src/daxigua_rl/training/transition.py` | DQN 经验记录。保存当前图、动作下标、奖励、下一状态图和终止标记。 | `Transition` |
+| `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。保存 `Transition`，容量满后覆盖最旧经验，并支持均匀随机采样。 | `ReplayBuffer` |
 
 ## 资源和说明
 
@@ -88,6 +89,7 @@
 - `graph_to_tensor()`：把 `GraphData` 转成 PyTorch 张量，形成 `node_features`、`edge_index`、`edge_features` 和 `action_node_indices`。
 - `GNNQNetwork`：当前最小 GNN-Q 前向模型，输入一张状态图，输出 `[action_count]` 个动作 Q 值。
 - `Transition`：DQN 训练使用的一条经验记录，保存 `graph`、`action_offset`、`reward`、`next_graph`、`terminated` 和 `truncated`。
+- `ReplayBuffer`：固定容量经验回放池，默认保存十万条 `Transition`，采样时返回 `tuple[Transition, ...]`。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
