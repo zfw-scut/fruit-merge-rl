@@ -14,6 +14,7 @@ import pygame as pg
 import pymunk
 
 from .fruit import create_fruit
+from .rules import MAX_FRUIT_LEVEL, merge_score, merged_fruit_physics_radius
 from ..config import DEFAULT_WINDOW_SIZE, FPS, SPAWN_LINE_Y
 
 
@@ -183,18 +184,28 @@ class GameBoard(object):
             在碰撞位置创建 `类型 + 1` 的新水果，并增加分数。
             """
 
-            # 防止同一次碰撞合成在回调链中重复进入。
-            if not self.lock:
-                self.lock = True
+            # 防止同一次合成过程重入；真正的重复碰撞还需要下面的源水果存在性检查。
+            if self.lock:
+                return
 
-                b1, b2 = None, None
+            self.lock = True
+            try:
+                shape_a, shape_b = arbiter.shapes
+
+                # pymunk 在一帧内可能先后报告 AB、AC、BC 多组碰撞。
+                # 如果 A/B 已经在前一个回调中被合成移除，这里的过期回调必须忽略；
+                # 否则会出现“三颗同级水果三组碰撞，凭空生成三颗新水果”的问题。
+                if shape_a not in self.balls or shape_b not in self.balls:
+                    return
 
                 # 两个形状的 collision_type 相同，所以取第一个 + 1 就是合成后的类型。
-                i = arbiter.shapes[0].collision_type + 1
+                i = shape_a.collision_type + 1
+                if i > MAX_FRUIT_LEVEL:
+                    return
 
                 # 读取两个碰撞水果的圆心位置。
-                x1, y1 = arbiter.shapes[0].body.position
-                x2, y2 = arbiter.shapes[1].body.position
+                x1, y1 = shape_a.body.position
+                x2, y2 = shape_b.body.position
 
                 # 新水果尽量生成在较低的那个水果位置，减少合成后突然向上弹的违和感。
                 if y1 > y2:
@@ -202,21 +213,16 @@ class GameBoard(object):
                 else:
                     x, y = x2, y2
 
-                # 如果第一个碰撞形状仍在当前球列表中，移除它的物理形状和显示水果。
-                if arbiter.shapes[0] in self.balls:
-                    b1 = self.balls.index(arbiter.shapes[0])
-                    space.remove(arbiter.shapes[0], arbiter.shapes[0].body)
-                    self.balls.remove(arbiter.shapes[0])
-                    fruit1 = self.fruits[b1]
-                    self.fruits.remove(fruit1)
-
-                # 同样移除第二个碰撞形状。
-                if arbiter.shapes[1] in self.balls:
-                    b2 = self.balls.index(arbiter.shapes[1])
-                    space.remove(arbiter.shapes[1], arbiter.shapes[1].body)
-                    self.balls.remove(arbiter.shapes[1])
-                    fruit2 = self.fruits[b2]
-                    self.fruits.remove(fruit2)
+                # balls/fruits 是平行列表，必须按下标从大到小删除，避免先删前面的元素后下标错位。
+                remove_items = (
+                    (self.balls.index(shape_a), shape_a),
+                    (self.balls.index(shape_b), shape_b),
+                )
+                for index, shape in sorted(remove_items, reverse=True):
+                    space.remove(shape, shape.body)
+                    del self.balls[index]
+                    if index < len(self.fruits):
+                        del self.fruits[index]
 
                 # 创建合成后的水果显示对象。这里传入的 y 是生成线附近，
                 # 但随后 `_sync_fruits()` 会用新刚体的位置重新同步显示坐标。
@@ -225,26 +231,21 @@ class GameBoard(object):
 
                 # 创建合成后的物理圆形刚体，并放在刚才选定的碰撞位置。
                 ball = self.create_ball(
-                    self.space, x, y, m=fruit.r // 10, r=fruit.r - 1, i=i)
+                    self.space, x, y, m=fruit.r // 10, r=merged_fruit_physics_radius(i), i=i)
                 self.balls.append(ball)
 
-                # 计分规则：1 到 10 级合成给等级分，合成 11 级大西瓜给 100 分。
-                score_delta = 0
-                if i < 11:
+                # 计分规则集中在 rules.py，避免手动游戏和 headless 环境规则漂移。
+                score_delta = merge_score(i)
+                if score_delta:
                     self.last_score = self.score
-                    score_delta = i
-                    self.score += score_delta
-                elif i == 11:
-                    self.last_score = self.score
-                    score_delta = 100
                     self.score += score_delta
 
                 # 表现层可以定义 `on_fruit_merged()`，用来播放粒子、飘字、音效等。
                 # 核心层只检查有没有这个钩子，不直接 import 表现层。
                 if hasattr(self, 'on_fruit_merged'):
                     self.on_fruit_merged(i, x, y, score_delta)
-
-                # 合成流程结束，释放锁。
+            finally:
+                # 合成流程结束，释放锁；即使中途 return，也不能让游戏永久停在锁定状态。
                 self.lock = False
 
         # 只注册 1 到 10 级的“同级碰撞合成”。
