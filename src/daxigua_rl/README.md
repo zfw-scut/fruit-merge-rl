@@ -23,5 +23,7 @@ Current v0 interface:
 Run training from the project root:
 
 ```bash
-PYTHONPATH=src conda run -n python-torch python -m daxigua_rl.scripts.train_dqn
+PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigua_rl.scripts.train_dqn
 ```
+
+Use `--no-capture-output` to see progress output in real time when running through conda.
