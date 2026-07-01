@@ -116,6 +116,7 @@ def parse_args():
     parser.add_argument('--eval-episodes', type=int, default=5, help='每次评估跑多少局。')
     parser.add_argument('--eval-max-steps', type=int, default=500, help='每局评估最多投放多少次，防止极端长局。')
     parser.add_argument('--plot-interval', type=int, default=1_000, help='每多少次 update 生成一次曲线图；0 表示只在结束时尝试生成。')
+    parser.add_argument('--progress-interval', type=float, default=3.0, help='每多少秒打印一次轻量训练进度；0 表示关闭。')
 
     # 运行设备。
     parser.add_argument('--device', default='cpu', help='模型设备，例如 cpu、cuda 或 cuda:0。')
@@ -162,6 +163,8 @@ def validate_args(args):
         raise ValueError('--gamma must be in [0, 1]')
     if args.dropout < 0.0 or args.dropout >= 1.0:
         raise ValueError('--dropout must be in [0, 1)')
+    if args.progress_interval < 0.0:
+        raise ValueError('--progress-interval must be >= 0')
 
 
 def resolve_device(device_name):
@@ -462,6 +465,46 @@ def print_log(row):
     print(' | '.join(parts), flush=True)
 
 
+def maybe_print_progress(
+        args,
+        last_progress_at,
+        phase,
+        current,
+        total,
+        env_steps,
+        buffer_size,
+        epsilon,
+        elapsed,
+        latest_loss=None):
+    """按固定时间间隔打印轻量进度心跳。"""
+
+    if args.progress_interval <= 0.0:
+        return last_progress_at
+
+    now = time.perf_counter()
+    if now - last_progress_at < args.progress_interval:
+        return last_progress_at
+
+    percent = 0.0 if total <= 0 else min(100.0, current / total * 100.0)
+    speed = 0.0 if elapsed <= 0.0 else env_steps / elapsed
+    parts = [
+        '[progress]',
+        f'phase={phase}',
+        f'{current}/{total}',
+        f'{percent:.1f}%',
+        f'env_steps={env_steps}',
+        f'buffer={buffer_size}',
+        f'eps={epsilon:.3f}',
+        f'speed={speed:.2f} env_steps/s',
+    ]
+
+    if latest_loss is not None:
+        parts.append(f'loss={latest_loss:.4f}')
+
+    print(' | '.join(parts), flush=True)
+    return now
+
+
 def build_metric_row(
         update_step,
         env_steps,
@@ -565,15 +608,35 @@ def train(args):
     print(f'device={device} matplotlib_output={run_dir / "plots" / "training_curves.png"}', flush=True)
     print(f'warmup_steps={args.warmup_steps}', flush=True)
 
-    warmup_stats = collector.collect_steps(args.warmup_steps, epsilon=1.0)
-    env_steps += warmup_stats.steps
+    start_time = time.perf_counter()
+    last_progress_at = start_time
+    warmup_done = 0
+    warmup_total_reward = 0.0
+    warmup_chunk_size = max(1, min(100, args.warmup_steps))
+
+    while warmup_done < args.warmup_steps:
+        chunk_size = min(warmup_chunk_size, args.warmup_steps - warmup_done)
+        warmup_stats = collector.collect_steps(chunk_size, epsilon=1.0)
+        warmup_done += warmup_stats.steps
+        env_steps += warmup_stats.steps
+        warmup_total_reward += warmup_stats.total_reward
+        last_progress_at = maybe_print_progress(
+            args=args,
+            last_progress_at=last_progress_at,
+            phase='warmup',
+            current=warmup_done,
+            total=args.warmup_steps,
+            env_steps=env_steps,
+            buffer_size=len(replay_buffer),
+            epsilon=1.0,
+            elapsed=time.perf_counter() - start_time,
+        )
+
     print(
         f'warmup done | env_steps={env_steps} | buffer={len(replay_buffer)} '
-        f'| reward={warmup_stats.total_reward:+.2f}',
+        f'| reward={warmup_total_reward:+.2f}',
         flush=True,
     )
-
-    start_time = time.perf_counter()
 
     try:
         for update_step in range(1, args.total_updates + 1):
@@ -583,6 +646,18 @@ def train(args):
             env_steps += collect_stats.steps
 
             train_stats = trainer.train_step()
+            last_progress_at = maybe_print_progress(
+                args=args,
+                last_progress_at=last_progress_at,
+                phase='train',
+                current=update_step,
+                total=args.total_updates,
+                env_steps=env_steps,
+                buffer_size=len(replay_buffer),
+                epsilon=epsilon,
+                elapsed=time.perf_counter() - start_time,
+                latest_loss=train_stats.loss,
+            )
 
             should_log = update_step % args.log_interval == 0 or update_step == 1
             should_eval = args.eval_interval > 0 and update_step % args.eval_interval == 0

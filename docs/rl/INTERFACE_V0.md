@@ -305,8 +305,10 @@ src/daxigua_rl/scripts/train_dqn.py
 运行方式：
 
 ```bash
-PYTHONPATH=src conda run -n python-torch python -m daxigua_rl.scripts.train_dqn
+PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigua_rl.scripts.train_dqn
 ```
+
+注意：普通 `conda run` 会捕获子进程输出，可能导致进度信息等到训练结束才一次性显示。需要使用 `--no-capture-output` 才能实时看到每 3 秒的进度心跳。
 
 默认训练流程：
 
@@ -315,6 +317,7 @@ warmup 随机收集经验
 -> 每轮 collect_per_update 条新经验
 -> DQNTrainer.train_step()
 -> epsilon 线性衰减
+-> 每 3 秒打印轻量进度
 -> 终端日志
 -> metrics.csv
 -> checkpoint
@@ -342,6 +345,19 @@ runs/dqn_YYYYMMDD_HHMMSS/
 - 采集阶段 episode 统计。
 - greedy 评估均分、平均 reward、平均 episode 长度。
 - 采样和训练速度。
+
+训练入口默认每 `3` 秒打印一次轻量进度心跳：
+
+```text
+[progress] | phase=train | 1200/10000 | 12.0% | env_steps=2200 | buffer=2200 | eps=0.958 | speed=40.12 env_steps/s | loss=0.1234
+```
+
+可以通过参数调整或关闭：
+
+```bash
+--progress-interval 3
+--progress-interval 0
+```
 
 `training_curves.png` 会从 `metrics.csv` 当前内存记录生成，包含：
 
