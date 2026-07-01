@@ -15,7 +15,7 @@ from .graph import (
     GraphData,
     get_ablation_preset,
 )
-from .training import ReplayBuffer, Transition
+from .training import ReplayBuffer
 
 
 __all__ = [
@@ -30,7 +30,6 @@ __all__ = [
     'ReplayBuffer',
     'RewardBreakdown',
     'RewardConfig',
-    'Transition',
     'compute_reward',
     'get_ablation_preset',
 ]

@@ -15,8 +15,7 @@ Current v0 interface:
 - `RewardConfig`: configurable reward shaping for score, survival, height, danger, and terminal penalty.
 - One RL `step(action_index)` means one fruit drop plus headless physics settling, not one rendered frame.
 - Training and environment code must not import `daxigua.app.Board`, pygame renderers, HUD, audio, or manual input code.
-- `Transition`: framework-independent training experience record built from `GraphData`, action offset, reward, next graph, and done flags.
-- `TensorTransition`: training-path experience record built from CPU `GraphTensor`, used to avoid repeated `GraphData -> Tensor` conversion.
+- `TensorTransition`: current training-path experience record built from CPU `GraphTensor`; replay graph features are stored as float16 to reduce resident memory.
 - `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling experience records.
 - `RolloutCollector`: single-process collector that plays the headless environment with epsilon-greedy actions and writes `TensorTransition` records into `ReplayBuffer`.
 - `DQNTrainer`: standard DQN updater that samples tensor records, builds `GraphBatch`, computes TD loss, and updates the online Q network.

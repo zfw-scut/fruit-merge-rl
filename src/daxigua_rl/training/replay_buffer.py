@@ -25,9 +25,8 @@ import random
 class ReplayBuffer:
     """固定容量环形 Replay Buffer。
 
-    buffer 只负责保存和采样经验对象，不关心对象内部是 `Transition` 还是
-    `TensorTransition`。这样训练主链路可以保存张量化经验，调试链路仍然可以
-    保存框架无关经验。
+    buffer 只负责保存和采样当前训练主链路使用的 `TensorTransition` 对象。
+    具体结构校验由采集器和 DQNTrainer 负责，ReplayBuffer 自身保持简单。
     """
 
     def __init__(self, capacity=100_000, seed=None):

@@ -22,6 +22,9 @@ from .replay_buffer import ReplayBuffer
 from .tensor_transition import TensorTransition
 
 
+REPLAY_GRAPH_DTYPE = torch.float16
+
+
 @dataclass(frozen=True)
 class RolloutStats:
     """一次 `collect_steps()` 的采集统计。
@@ -274,7 +277,7 @@ class RolloutCollector:
                 continue
 
             graph_data = self.graph_builder.build(self._obs, candidates)
-            graph = graph_to_tensor(graph_data)
+            graph = graph_to_tensor(graph_data, dtype=REPLAY_GRAPH_DTYPE)
             action_count = len(candidates)
             self._validate_action_count(graph, action_count)
 
@@ -292,7 +295,7 @@ class RolloutCollector:
             next_graph = None
             if not done:
                 next_graph_data = self.graph_builder.build(next_obs, next_info['action_candidates'])
-                next_graph = graph_to_tensor(next_graph_data)
+                next_graph = graph_to_tensor(next_graph_data, dtype=REPLAY_GRAPH_DTYPE)
 
             transition = TensorTransition(
                 graph=graph,
