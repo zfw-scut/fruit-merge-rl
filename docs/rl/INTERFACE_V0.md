@@ -332,7 +332,7 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigu
 warmup 随机收集经验
 -> 每轮 collect_per_update 条新经验
 -> DQNTrainer.train_step()
--> epsilon 线性衰减
+-> epsilon 按 schedule 衰减
 -> 每 3 秒打印轻量进度
 -> 终端日志
 -> metrics.csv
@@ -383,6 +383,23 @@ runs/dqn_YYYYMMDD_HHMMSS/
 - TD error。
 - grad norm。
 - mean Q / mean target。
+
+默认 epsilon schedule 是 `smooth`，按训练进度百分比平滑下降。默认
+`epsilon_start=1.0`、`epsilon_end=0.05` 时，曲线大致满足：
+
+```text
+0%   -> 1.00
+30%  -> 0.50
+50%  -> 0.20
+70%  -> 0.07
+80%+ -> 0.05
+```
+
+如需恢复旧的按环境步数线性下降方式，可以使用：
+
+```bash
+--epsilon-schedule linear
+```
 
 ## 模型观看入口
 
