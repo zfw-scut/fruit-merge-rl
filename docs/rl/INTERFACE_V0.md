@@ -15,7 +15,8 @@ reset -> observe -> choose action -> step -> reward / next_state / done
 - `daxigua.core.engine.HeadlessGame` 属于游戏本体，只负责规则、物理、状态和动作候选。
 - `daxigua_rl.env.DaxiguaEnv` 属于 RL 包，只通过 `HeadlessGame` 访问游戏。
 - `daxigua` 不允许 import `daxigua_rl`。
-- `daxigua_rl` 不应 import `daxigua.app.Board`、pygame 渲染、HUD、音频或手动输入代码。
+- `daxigua_rl` 的训练、环境、模型和图构建代码不应 import `daxigua.app.Board`、pygame 渲染、HUD、音频或手动输入代码。
+- 视觉观看脚本可以作为例外懒加载 `daxigua.app.Board`，用于把模型接到真实游戏窗口上检查实际游玩效果；该例外不能反向污染训练接口。
 
 ## 游戏本体接口
 
@@ -367,6 +368,48 @@ runs/dqn_YYYYMMDD_HHMMSS/
 - TD error。
 - grad norm。
 - mean Q / mean target。
+
+## 模型观看入口
+
+第一版真实游戏窗口观看脚本：
+
+```text
+src/daxigua_rl/scripts/watch_dqn.py
+```
+
+运行方式：
+
+```bash
+PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigua_rl.scripts.watch_dqn \
+  --checkpoint runs/dqn_baseline_h128_l3_10k_eps10k/checkpoints/latest.pt
+```
+
+常用参数：
+
+- `--checkpoint`: 必填，训练脚本保存的 checkpoint 路径。
+- `--action-count`: 候选投放动作数量；默认读取 checkpoint 中的训练参数。
+- `--decision-delay-ms`: 模型选定落点后等待多久再投放，默认 `240` 毫秒，方便肉眼看清当前水果移动到哪里。
+- `--print-actions`: 每次投放时打印 action、drop_x 和 Q 值摘要，便于对照画面调试。
+
+当前观看流程：
+
+```text
+加载 checkpoint
+-> 重建 GNNQNetwork
+-> 打开原 pygame Board
+-> playable_adapter 把实时 Board 转成 GameState + ActionCandidate
+-> GraphBuilder.build(...)
+-> GNNQNetwork 输出候选动作 Q 值
+-> 选择 argmax 动作
+-> 通过原 Board 的投放逻辑落子
+```
+
+当前约定：
+
+- 观看入口复用原游戏画面，适合检查模型最终在真实窗口中的操作效果。
+- `playable_adapter.py` 和 `watch_dqn.py` 属于 RL 侧代码；游戏本体不 import 它们。
+- 观看入口是可视化检查工具，不替代无渲染训练、评估和数据采集。
+- 观看脚本会打开 pygame 窗口并持续运行，退出方式沿用原游戏窗口关闭逻辑。
 
 ## 后续扩展
 

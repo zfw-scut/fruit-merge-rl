@@ -18,9 +18,10 @@
 | `src/daxigua/core/fruit.py` | 水果显示精灵和贴图加载。根据等级创建单一 `Fruit` 显示对象，并复用 `rules.py` 中的半径规则。 | `create_fruit(level, x, y)`、`Fruit`、`fruit_image_path()`、`load_fruit_image()` |
 | `src/daxigua/core/rules.py` | 纯规则常量和辅助函数。集中维护水果半径、队列长度、随机生成范围、合成分数和物理半径。 | `FRUIT_RADII`、`FRUIT_QUEUE_LENGTH`、`fruit_radius()`、`merge_score()` |
 | `src/daxigua/core/state.py` | 训练友好的纯数据状态结构。 | `GameState`、`FruitState`、`ActionCandidate`、`DropResult`、`PhysicsResult` |
-| `src/daxigua_rl/` | 自动游玩/RL 相关代码。游戏本体不得 import 它。当前通过 `HeadlessGame` 访问游戏。 | `DaxiguaEnv`、`DaxiguaEnvConfig`、`README.md` 中记录边界规则 |
+| `src/daxigua_rl/` | 自动游玩/RL 相关代码。游戏本体不得 import 它。训练主链路通过 `HeadlessGame` 访问游戏；观看脚本可在 RL 侧懒加载真实 `Board`。 | `DaxiguaEnv`、`DaxiguaEnvConfig`、`README.md` 中记录边界规则 |
 | `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 `step(action_index)` 表示一次投放和无渲染物理稳定。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step()`、`action_candidates()` |
 | `src/daxigua_rl/reward.py` | 强化学习 reward shaping 逻辑。根据动作前后状态和物理结果计算奖励，并返回奖励明细。 | `RewardConfig`、`RewardBreakdown`、`compute_reward()` |
+| `src/daxigua_rl/playable_adapter.py` | 真实 pygame 游戏窗口到 RL 输入结构的适配层。把正在运行的 `Board` 转成 `GameState` 和 `ActionCandidate`，用于观看模型实际游玩。 | `board_game_state()`、`board_action_candidates()` |
 | `src/daxigua_rl/graph/` | GNN 图构建相关代码。负责把游戏状态和动作候选转换成模型输入图，并提供训练实验用的特征消融层。 | `GraphBuilder`、`GraphAblator` |
 | `src/daxigua_rl/graph/schema.py` | 框架无关的图数据结构和节点/边特征名。 | `GraphData`、`GraphNodeRef`、`GraphEdgeRef`、`NODE_FEATURE_NAMES`、`EDGE_FEATURE_NAMES` |
 | `src/daxigua_rl/graph/builder.py` | 从 `GameState` 和 `ActionCandidate` 构建 GNN 输入图。 | `GraphBuilder.build()` |
@@ -33,8 +34,9 @@
 | `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。保存 `Transition`，容量满后覆盖最旧经验，并支持均匀随机采样。 | `ReplayBuffer` |
 | `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。使用 epsilon-greedy 动作选择让模型或随机策略游玩无渲染环境，并把经验写入 `ReplayBuffer`。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
 | `src/daxigua_rl/training/dqn.py` | 标准 DQN 单步更新器。从 `ReplayBuffer` 采样，计算 TD target 和 SmoothL1Loss，更新 online Q 网络，并定期同步 target network。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
-| `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、导出等入口。 | `train_dqn.py` |
+| `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、观看、导出等入口。 | `train_dqn.py`、`watch_dqn.py` |
 | `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和 matplotlib 曲线图。 | `python -m daxigua_rl.scripts.train_dqn` |
+| `src/daxigua_rl/scripts/watch_dqn.py` | 第一版 DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 
 ## 资源和说明
 
@@ -100,6 +102,8 @@
 - `RolloutCollector`：单进程经验采集器，串联 `DaxiguaEnv`、`GraphBuilder`、Q 网络和 `ReplayBuffer`，用于收集训练经验。
 - `DQNTrainer`：标准 DQN 单步更新器，使用 online/target 双网络、SmoothL1Loss 和梯度裁剪更新 Q 网络。
 - `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`checkpoints/latest.pt` 和 `plots/training_curves.png`。
+- `board_game_state()` / `board_action_candidates()`：把原 pygame `Board` 的实时局面转换成 RL 图构建所需的数据结构。
+- `watch_dqn.py`：第一版模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
@@ -108,7 +112,8 @@
 - 游戏运行时直接读取 `assets/fruits/`，不再需要手动解压资源。
 - 当前手动游戏窗口固定为 `400x800`，不再通过拖动窗口边框改变场地大小。
 - 顶部信息层和当前悬浮水果层已经分开；生成线固定为 `180px`，用于避免待投放队列与当前水果视野冲突。
-- `daxigua` 游戏本体不得 import `daxigua_rl`；RL 代码只通过稳定游戏接口访问游戏。
+- `daxigua` 游戏本体不得 import `daxigua_rl`；训练、环境和模型代码只通过稳定游戏接口访问游戏。
+- `watch_dqn.py` 是视觉检查用入口，会在脚本内部懒加载 `daxigua.app.Board` 并打开真实 pygame 窗口；这不是训练路径，也不要求游戏本体 import RL。
 - `Transition` 不依赖 PyTorch，保存的是框架无关 `GraphData`；真正训练采样 batch 时再转换为 tensor。
 - `daxigua_rl.graph.tensor` 和 `daxigua_rl.models` 依赖 PyTorch；它们不会在 `daxigua_rl` 顶层自动导入，避免非训练环境被强制要求安装 torch。
 - `RolloutCollector` 和 `DQNTrainer` 依赖 PyTorch 模型前向；它们通过 `daxigua_rl.training` 懒加载导入，不放进 `daxigua_rl` 顶层导出。
