@@ -49,6 +49,15 @@ class RolloutStats:
     # 本次采集中每个已结束 episode 的最终游戏分数。
     episode_scores: tuple = field(default_factory=tuple)
 
+    # 本次采集中每个已结束 episode 在当前 collect 调用内的结束 step offset。
+    episode_end_offsets: tuple = field(default_factory=tuple)
+
+    # 本次采集中每个已结束 episode 是否由游戏规则终止。
+    episode_terminated_flags: tuple = field(default_factory=tuple)
+
+    # 本次采集中每个已结束 episode 是否由环境流程截断。
+    episode_truncated_flags: tuple = field(default_factory=tuple)
+
     # 由游戏规则结束的 episode 数量。
     terminated_episodes: int = 0
 
@@ -249,6 +258,9 @@ class RolloutCollector:
         episode_rewards = []
         episode_lengths = []
         episode_scores = []
+        episode_end_offsets = []
+        episode_terminated_flags = []
+        episode_truncated_flags = []
         terminated_episodes = 0
         truncated_episodes = 0
         random_actions = 0
@@ -306,6 +318,9 @@ class RolloutCollector:
                 episode_rewards.append(self._episode_reward)
                 episode_lengths.append(self._episode_length)
                 episode_scores.append(next_obs.score)
+                episode_end_offsets.append(steps)
+                episode_terminated_flags.append(terminated)
+                episode_truncated_flags.append(truncated)
 
                 if terminated:
                     terminated_episodes += 1
@@ -324,6 +339,9 @@ class RolloutCollector:
             episode_rewards=tuple(episode_rewards),
             episode_lengths=tuple(episode_lengths),
             episode_scores=tuple(episode_scores),
+            episode_end_offsets=tuple(episode_end_offsets),
+            episode_terminated_flags=tuple(episode_terminated_flags),
+            episode_truncated_flags=tuple(episode_truncated_flags),
             terminated_episodes=terminated_episodes,
             truncated_episodes=truncated_episodes,
             random_actions=random_actions,
