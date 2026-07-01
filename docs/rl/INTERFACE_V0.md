@@ -347,8 +347,10 @@ warmup 随机收集经验
 runs/dqn_YYYYMMDD_HHMMSS/
 ├── config.json
 ├── metrics.csv
+├── episode_metrics.csv
 ├── checkpoints/
 │   ├── latest.pt
+│   ├── best.pt
 │   └── step_XXXXXXXX.pt
 └── plots/
     └── training_curves.png
@@ -359,8 +361,22 @@ runs/dqn_YYYYMMDD_HHMMSS/
 - update step、环境步数、epsilon、buffer 大小。
 - loss、mean Q、mean target、mean reward、TD error、grad norm。
 - 采集阶段 episode 统计。
-- greedy 评估均分、平均 reward、平均 episode 长度。
+- greedy 评估均分、最高分、最低分、历史最高分、平均 reward、平均 episode 长度。
 - 采样和训练速度。
+
+`episode_metrics.csv` 按 episode 结束事件逐行记录训练过程中每局完整游戏的分数：
+
+- `episode_index`: 当前 run 中第几个结束的 episode。
+- `phase`: `warmup` 或 `train`。
+- `update_step`、`env_steps`、`epsilon`: 该局结束时的训练位置。
+- `score`、`episode_reward`、`episode_length`: 单局得分、累计 reward 和投放次数。
+- `terminated`、`truncated`: 该局结束原因。
+
+每次评估刷新历史最高单局分数时，会额外保存：
+
+```text
+checkpoints/best.pt
+```
 
 训练入口默认每 `3` 秒打印一次轻量进度心跳：
 
@@ -378,7 +394,7 @@ runs/dqn_YYYYMMDD_HHMMSS/
 `training_curves.png` 会从 `metrics.csv` 当前内存记录生成，包含：
 
 - loss 曲线。
-- 训练 episode score 和评估 score。
+- 训练过程中每局完整游戏 score、采集均分、评估均分、评估最高分和历史最好分。
 - epsilon 衰减。
 - TD error。
 - grad norm。

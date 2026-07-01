@@ -58,11 +58,28 @@ METRIC_FIELDS = (
     'random_actions',
     'greedy_actions',
     'eval_score_mean',
+    'eval_score_max',
+    'eval_score_min',
     'eval_reward_mean',
     'eval_length_mean',
     'eval_episodes',
+    'best_eval_score',
+    'best_eval_update',
     'updates_per_second',
     'env_steps_per_second',
+)
+
+EPISODE_METRIC_FIELDS = (
+    'episode_index',
+    'phase',
+    'update_step',
+    'env_steps',
+    'epsilon',
+    'score',
+    'episode_reward',
+    'episode_length',
+    'terminated',
+    'truncated',
 )
 
 
@@ -324,6 +341,58 @@ class MetricLogger:
         self._file.close()
 
 
+class EpisodeLogger:
+    """按 episode 结束事件记录单局训练得分。"""
+
+    def __init__(self, csv_path):
+        self.csv_path = Path(csv_path)
+        self.rows = []
+        self._episode_index = 0
+        self._file = self.csv_path.open('w', newline='', encoding='utf-8')
+        self._writer = csv.DictWriter(self._file, fieldnames=EPISODE_METRIC_FIELDS)
+        self._writer.writeheader()
+        self._file.flush()
+
+    def log_collect_stats(self, collect_stats, phase, update_step, start_env_steps, epsilon):
+        """把一次 collect 中结束的 episode 逐条写入 CSV。"""
+
+        count = 0
+        episode_data = zip(
+            collect_stats.episode_scores,
+            collect_stats.episode_rewards,
+            collect_stats.episode_lengths,
+            collect_stats.episode_end_offsets,
+            collect_stats.episode_terminated_flags,
+            collect_stats.episode_truncated_flags,
+        )
+        for score, reward, length, end_offset, terminated, truncated in episode_data:
+            self._episode_index += 1
+            row = {
+                'episode_index': self._episode_index,
+                'phase': phase,
+                'update_step': int(update_step),
+                'env_steps': int(start_env_steps + end_offset),
+                'epsilon': float(epsilon),
+                'score': float(score),
+                'episode_reward': float(reward),
+                'episode_length': int(length),
+                'terminated': int(bool(terminated)),
+                'truncated': int(bool(truncated)),
+            }
+            self.rows.append(row)
+            self._writer.writerow(row)
+            count += 1
+
+        if count:
+            self._file.flush()
+        return count
+
+    def close(self):
+        """关闭 CSV 文件。"""
+
+        self._file.close()
+
+
 def write_config(run_dir, args):
     """保存本次训练配置。"""
 
@@ -346,7 +415,8 @@ def save_checkpoint(
         env_steps,
         epsilon,
         latest_metrics=None,
-        step_checkpoint=False):
+        step_checkpoint=False,
+        extra_checkpoint_name=None):
     """保存模型 checkpoint。"""
 
     checkpoint = {
@@ -368,6 +438,10 @@ def save_checkpoint(
     if step_checkpoint:
         step_path = checkpoint_dir / f'step_{update_step:08d}.pt'
         torch.save(checkpoint, step_path)
+
+    if extra_checkpoint_name:
+        extra_path = checkpoint_dir / extra_checkpoint_name
+        torch.save(checkpoint, extra_path)
 
 
 def evaluate_policy(model, args, device, seed_offset=10_000):
@@ -416,13 +490,15 @@ def evaluate_policy(model, args, device, seed_offset=10_000):
 
     return {
         'eval_score_mean': _mean(episode_scores),
+        'eval_score_max': max(episode_scores) if episode_scores else 0.0,
+        'eval_score_min': min(episode_scores) if episode_scores else 0.0,
         'eval_reward_mean': _mean(episode_rewards),
         'eval_length_mean': _mean(episode_lengths),
         'eval_episodes': len(episode_scores),
     }
 
 
-def maybe_plot_metrics(run_dir, rows):
+def maybe_plot_metrics(run_dir, rows, episode_rows=None):
     """根据已记录指标生成训练曲线图。"""
 
     if not rows:
@@ -444,8 +520,18 @@ def maybe_plot_metrics(run_dir, rows):
     axes = axes.ravel()
 
     _plot_one(axes[0], x, _series(rows, 'loss'), 'loss', 'SmoothL1 loss')
-    _plot_one(axes[1], x, _series(rows, 'collect_mean_episode_score'), 'train score', 'Episode score')
-    _plot_one(axes[1], x, _series(rows, 'eval_score_mean'), 'eval score', 'Episode score')
+    episode_rows = episode_rows or []
+    _plot_one(
+        axes[1],
+        _episode_series(episode_rows, 'update_step'),
+        _episode_series(episode_rows, 'score'),
+        'train episode',
+        'Episode score',
+    )
+    _plot_one(axes[1], x, _series(rows, 'collect_mean_episode_score'), 'train mean', 'Episode score')
+    _plot_one(axes[1], x, _series(rows, 'eval_score_mean'), 'eval mean', 'Episode score')
+    _plot_one(axes[1], x, _series(rows, 'eval_score_max'), 'eval max', 'Episode score')
+    _plot_one(axes[1], x, _series(rows, 'best_eval_score'), 'best eval', 'Episode score')
     _plot_one(axes[2], x, _series(rows, 'epsilon'), 'epsilon', 'Epsilon')
     _plot_one(axes[3], x, _series(rows, 'mean_abs_td_error'), 'td error', 'Mean abs TD error')
     _plot_one(axes[4], x, _series(rows, 'grad_norm'), 'grad norm', 'Gradient norm')
@@ -494,6 +580,19 @@ def _series(rows, field):
     return values
 
 
+def _episode_series(rows, field):
+    """从 episode metrics rows 中取一列浮点序列。"""
+
+    values = []
+    for row in rows:
+        value = row.get(field, '')
+        if value == '' or value is None:
+            values.append(None)
+        else:
+            values.append(float(value))
+    return values
+
+
 def _mean(values):
     """计算平均值；空列表返回 0。"""
 
@@ -523,6 +622,10 @@ def print_log(row):
         parts.append(f"train_score={float(row['collect_mean_episode_score']):.1f}")
     if row.get('eval_score_mean') not in ('', None):
         parts.append(f"eval_score={float(row['eval_score_mean']):.1f}")
+    if row.get('eval_score_max') not in ('', None):
+        parts.append(f"eval_max={float(row['eval_score_max']):.1f}")
+    if row.get('best_eval_score') not in ('', None):
+        parts.append(f"best_eval={float(row['best_eval_score']):.1f}")
 
     print(' | '.join(parts), flush=True)
 
@@ -574,6 +677,8 @@ def build_metric_row(
         train_stats,
         collect_stats,
         eval_stats,
+        best_eval_score,
+        best_eval_update,
         timing):
     """把训练、采集、评估统计合成一行 CSV 指标。"""
 
@@ -610,9 +715,13 @@ def build_metric_row(
         'random_actions': collect_stats.random_actions,
         'greedy_actions': collect_stats.greedy_actions,
         'eval_score_mean': eval_stats.get('eval_score_mean', '') if eval_stats else '',
+        'eval_score_max': eval_stats.get('eval_score_max', '') if eval_stats else '',
+        'eval_score_min': eval_stats.get('eval_score_min', '') if eval_stats else '',
         'eval_reward_mean': eval_stats.get('eval_reward_mean', '') if eval_stats else '',
         'eval_length_mean': eval_stats.get('eval_length_mean', '') if eval_stats else '',
         'eval_episodes': eval_stats.get('eval_episodes', '') if eval_stats else '',
+        'best_eval_score': best_eval_score if best_eval_update else '',
+        'best_eval_update': best_eval_update if best_eval_update else '',
         'updates_per_second': update_step / elapsed,
         'env_steps_per_second': env_steps / elapsed,
     }
@@ -663,8 +772,11 @@ def train(args):
     )
 
     metrics = MetricLogger(run_dir / 'metrics.csv')
+    episode_metrics = EpisodeLogger(run_dir / 'episode_metrics.csv')
     env_steps = 0
     latest_row = None
+    best_eval_score = float('-inf')
+    best_eval_update = 0
 
     print(f'run_dir={run_dir}', flush=True)
     print(f'device={device} matplotlib_output={run_dir / "plots" / "training_curves.png"}', flush=True)
@@ -678,10 +790,18 @@ def train(args):
 
     while warmup_done < args.warmup_steps:
         chunk_size = min(warmup_chunk_size, args.warmup_steps - warmup_done)
+        chunk_start_env_steps = env_steps
         warmup_stats = collector.collect_steps(chunk_size, epsilon=1.0)
         warmup_done += warmup_stats.steps
         env_steps += warmup_stats.steps
         warmup_total_reward += warmup_stats.total_reward
+        episode_metrics.log_collect_stats(
+            warmup_stats,
+            phase='warmup',
+            update_step=0,
+            start_env_steps=chunk_start_env_steps,
+            epsilon=1.0,
+        )
         last_progress_at = maybe_print_progress(
             args=args,
             last_progress_at=last_progress_at,
@@ -705,8 +825,16 @@ def train(args):
             epsilon = scheduled_epsilon(update_step, env_steps, args)
 
             # 收集训练数据
+            collect_start_env_steps = env_steps
             collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
             env_steps += collect_stats.steps
+            episode_metrics.log_collect_stats(
+                collect_stats,
+                phase='train',
+                update_step=update_step,
+                start_env_steps=collect_start_env_steps,
+                epsilon=epsilon,
+            )
 
             # 执行一次 DQN 参数更新
             train_stats = trainer.train_step()
@@ -730,8 +858,13 @@ def train(args):
             should_plot = args.plot_interval > 0 and update_step % args.plot_interval == 0
 
             eval_stats = None
+            best_updated = False
             if should_eval:
                 eval_stats = evaluate_policy(online_model, args, device)
+                if eval_stats['eval_score_max'] > best_eval_score:
+                    best_eval_score = eval_stats['eval_score_max']
+                    best_eval_update = update_step
+                    best_updated = True
 
             if should_log or should_eval or should_save or should_plot or update_step == args.total_updates:
                 latest_row = build_metric_row(
@@ -741,6 +874,8 @@ def train(args):
                     train_stats=train_stats,
                     collect_stats=collect_stats,
                     eval_stats=eval_stats,
+                    best_eval_score=best_eval_score,
+                    best_eval_update=best_eval_update,
                     timing={'elapsed': time.perf_counter() - start_time},
                 )
                 metrics.log(latest_row)
@@ -762,8 +897,22 @@ def train(args):
                     step_checkpoint=True,
                 )
 
+            if best_updated:
+                save_checkpoint(
+                    run_dir=run_dir,
+                    online_model=online_model,
+                    target_model=target_model,
+                    optimizer=optimizer,
+                    args=args,
+                    update_step=update_step,
+                    env_steps=env_steps,
+                    epsilon=epsilon,
+                    latest_metrics=latest_row,
+                    extra_checkpoint_name='best.pt',
+                )
+
             if should_plot:
-                maybe_plot_metrics(run_dir, metrics.rows)
+                maybe_plot_metrics(run_dir, metrics.rows, episode_metrics.rows)
 
         final_epsilon = scheduled_epsilon(args.total_updates, env_steps, args)
         save_checkpoint(
@@ -778,9 +927,10 @@ def train(args):
             latest_metrics=latest_row,
             step_checkpoint=False,
         )
-        maybe_plot_metrics(run_dir, metrics.rows)
+        maybe_plot_metrics(run_dir, metrics.rows, episode_metrics.rows)
     finally:
         metrics.close()
+        episode_metrics.close()
 
     print(f'training finished | run_dir={run_dir} | env_steps={env_steps}', flush=True)
     return run_dir
