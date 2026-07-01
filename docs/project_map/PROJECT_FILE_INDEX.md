@@ -60,6 +60,7 @@
 | 路径 | 作用 | 备注 |
 | --- | --- | --- |
 | `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向与单图前向一致，并确认 collector/trainer 可以写入和训练 `TensorTransition`。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
+| `tests/test_epsilon_schedule.py` | epsilon 衰减曲线测试。验证 smooth schedule 的关键锚点、单调性，以及 linear schedule 的旧行为。 | 使用标准库 `unittest`。 |
 
 ## 文档目录
 

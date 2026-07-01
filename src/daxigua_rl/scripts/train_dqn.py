@@ -79,9 +79,15 @@ def parse_args():
     parser.add_argument('--replay-capacity', type=int, default=100_000, help='ReplayBuffer 最大容量。')
 
     # epsilon-greedy。
+    parser.add_argument(
+        '--epsilon-schedule',
+        choices=('smooth', 'linear'),
+        default='smooth',
+        help='epsilon 衰减方式：smooth 按训练进度平滑下降，linear 按环境步数线性下降。',
+    )
     parser.add_argument('--epsilon-start', type=float, default=1.0, help='初始随机探索概率。')
     parser.add_argument('--epsilon-end', type=float, default=0.05, help='最终保留的随机探索概率。')
-    parser.add_argument('--epsilon-decay-steps', type=int, default=50_000, help='epsilon 线性衰减需要的环境步数。')
+    parser.add_argument('--epsilon-decay-steps', type=int, default=50_000, help='linear schedule 下 epsilon 衰减需要的环境步数。')
 
     # DQN 算法。
     parser.add_argument('--learning-rate', type=float, default=1e-4, help='Adam 学习率。')
@@ -230,11 +236,67 @@ def build_model(args):
     )
 
 
+SMOOTH_EPSILON_ANCHORS = (
+    # (训练进度, 已完成衰减比例)。默认 start=1.0/end=0.05 时大致对应：
+    # 0% -> 1.00, 30% -> 0.50, 50% -> 0.20, 70% -> 0.07, 80% -> 0.05。
+    (0.0, 0.0),
+    (0.30, 0.5263157894736842),
+    (0.50, 0.8421052631578948),
+    (0.70, 0.9789473684210527),
+    (0.80, 1.0),
+    (1.0, 1.0),
+)
+
+
+def scheduled_epsilon(update_step, env_steps, args):
+    """根据当前配置计算 epsilon。"""
+
+    if args.epsilon_schedule == 'linear':
+        return linear_epsilon(env_steps, args)
+
+    progress = _bounded_unit(float(update_step) / float(args.total_updates))
+    return smooth_epsilon(progress, args)
+
+
 def linear_epsilon(env_steps, args):
     """按环境步数线性衰减 epsilon。"""
 
-    progress = min(1.0, max(0.0, float(env_steps) / float(args.epsilon_decay_steps)))
+    progress = _bounded_unit(float(env_steps) / float(args.epsilon_decay_steps))
     return args.epsilon_start + progress * (args.epsilon_end - args.epsilon_start)
+
+
+def smooth_epsilon(progress, args):
+    """按训练进度平滑衰减 epsilon。"""
+
+    progress = _bounded_unit(progress)
+    if args.epsilon_start == args.epsilon_end:
+        return float(args.epsilon_start)
+
+    for anchor_index in range(len(SMOOTH_EPSILON_ANCHORS) - 1):
+        left_progress, left_fraction = SMOOTH_EPSILON_ANCHORS[anchor_index]
+        right_progress, right_fraction = SMOOTH_EPSILON_ANCHORS[anchor_index + 1]
+        if progress <= right_progress:
+            local_progress = 0.0
+            if right_progress > left_progress:
+                local_progress = (progress - left_progress) / (right_progress - left_progress)
+            smooth_progress = _smoothstep(_bounded_unit(local_progress))
+            decay_fraction = left_fraction + smooth_progress * (right_fraction - left_fraction)
+            return args.epsilon_start + decay_fraction * (args.epsilon_end - args.epsilon_start)
+
+    return float(args.epsilon_end)
+
+
+def _smoothstep(value):
+    """返回三次 smoothstep 插值值，保证分段内部变化更平滑。"""
+
+    value = _bounded_unit(value)
+    return value * value * (3.0 - 2.0 * value)
+
+
+def _bounded_unit(value):
+    """把数值限制在 [0, 1]。"""
+
+    return min(1.0, max(0.0, float(value)))
 
 
 class MetricLogger:
@@ -640,7 +702,7 @@ def train(args):
 
     try:
         for update_step in range(1, args.total_updates + 1):
-            epsilon = linear_epsilon(env_steps, args)
+            epsilon = scheduled_epsilon(update_step, env_steps, args)
 
             # 收集训练数据
             collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
@@ -703,7 +765,7 @@ def train(args):
             if should_plot:
                 maybe_plot_metrics(run_dir, metrics.rows)
 
-        final_epsilon = linear_epsilon(env_steps, args)
+        final_epsilon = scheduled_epsilon(args.total_updates, env_steps, args)
         save_checkpoint(
             run_dir=run_dir,
             online_model=online_model,
