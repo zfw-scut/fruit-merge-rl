@@ -1,6 +1,6 @@
 """最小标准 DQN 更新器。
 
-本模块负责从 `ReplayBuffer` 中采样 `Transition`，计算 TD target，
+本模块负责从 `ReplayBuffer` 中采样经验，计算 TD target，
 并更新 online Q 网络参数。
 
 当前第一版刻意保持朴素：
@@ -8,7 +8,7 @@
 - 使用标准 DQN target，不做 Double DQN。
 - 使用 target network 稳定 bootstrap 目标。
 - 使用 SmoothL1Loss/Huber loss，降低大 TD 误差带来的震荡。
-- 逐条图 forward，不做 GraphBatch。
+- 使用 GraphBatch 把多张不连通图合成一次批量 forward。
 - 可选梯度裁剪，默认 `grad_clip_norm=10.0`。
 """
 
@@ -19,7 +19,10 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from daxigua_rl.graph.tensor import collate_graph_tensors
+
 from .replay_buffer import ReplayBuffer
+from .tensor_transition import TensorTransition
 
 
 @dataclass(frozen=True)
@@ -102,7 +105,7 @@ class DQNTrainer:
         参数：
         - `online_model`: 正在训练的 Q 网络。
         - `target_model`: 用于计算 next_state bootstrap 目标的冻结 Q 网络。
-        - `replay_buffer`: 保存 `Transition` 的经验回放池。
+        - `replay_buffer`: 保存经验对象的回放池；正式训练路径通常保存 `TensorTransition`。
         - `optimizer`: 只应该包含 online_model 参数。
         - `config`: DQNTrainerConfig。
         - `loss_fn`: 可选自定义 loss；默认使用 `nn.SmoothL1Loss()`。
@@ -154,35 +157,23 @@ class DQNTrainer:
                 f'but batch_size={self.config.batch_size}'
             )
 
-        batch = self.replay_buffer.sample(self.config.batch_size)
+        batch = tuple(
+            TensorTransition.from_transition(transition)
+            for transition in self.replay_buffer.sample(self.config.batch_size)
+        )
 
         # online_model 需要梯度，target_model 只做无梯度推理。
         self.online_model.train()
         self.target_model.eval()
 
-        current_q_values = []
-        target_values = []
-        rewards = []
-        bootstrap_count = 0
+        # 把 batch 内所有当前状态图拼成一张不连通大图，只做一次 online forward。
+        current_graph_batch = collate_graph_tensors(transition.graph for transition in batch)
+        current_q_flat = self.online_model(current_graph_batch)
+        current_q_tensor = self._select_current_q(current_q_flat, current_graph_batch, batch)
 
-        for transition in batch:
-            # online_model(graph) 输出当前状态所有候选动作的 Q 值。
-            # action_offset 指向这条 transition 当时实际选择的动作。
-            q_values = self.online_model(transition.graph)
-            selected_q = q_values[transition.action_offset]
-            current_q_values.append(selected_q)
-
-            # target value 是标量张量。terminal/truncated transition 不 bootstrap。
-            target_value = self._compute_target_value(transition, selected_q)
-            target_values.append(target_value)
-            rewards.append(float(transition.reward))
-
-            if transition.can_bootstrap:
-                bootstrap_count += 1
-
-        # shape: [batch_size]
-        current_q_tensor = torch.stack(current_q_values)
-        target_tensor = torch.stack(target_values).to(device=current_q_tensor.device)
+        # target 同样批量计算：所有可 bootstrap 的 next_graph 拼成一张不连通大图。
+        target_tensor, bootstrap_count = self._compute_target_values(batch, current_q_tensor)
+        rewards = [float(transition.reward) for transition in batch]
 
         # TD error = 当前 Q 预测 - 训练目标。
         # loss_fn 默认是 SmoothL1Loss，也就是 Huber 风格损失。
@@ -215,8 +206,30 @@ class DQNTrainer:
 
         return stats
 
-    def _compute_target_value(self, transition, selected_q):
-        """计算一条 transition 的 TD target 标量张量。
+    def _select_current_q(self, q_values, graph_batch, transitions):
+        """从扁平 Q 输出中取出每条 transition 实际执行动作的 Q 值。"""
+
+        if q_values.dim() != 1:
+            raise ValueError('q_values must have shape [total_action_count]')
+        if int(q_values.shape[0]) != graph_batch.action_count:
+            raise RuntimeError(
+                f'q_values length mismatch: got {q_values.shape[0]}, '
+                f'expected {graph_batch.action_count}'
+            )
+
+        selected_indices = [
+            action_start + transition.action_offset
+            for transition, (action_start, _action_end) in zip(transitions, graph_batch.action_slices)
+        ]
+        selected_indices = torch.tensor(
+            selected_indices,
+            dtype=torch.long,
+            device=q_values.device,
+        )
+        return q_values.index_select(0, selected_indices)
+
+    def _compute_target_values(self, transitions, selected_q):
+        """批量计算 DQN TD target。
 
         标准 DQN target：
 
@@ -225,23 +238,60 @@ class DQNTrainer:
         terminal/truncated transition 不使用 bootstrap，target 直接等于 reward。
         """
 
-        # reward_tensor 使用 selected_q 的 device/dtype，避免 CPU/GPU 或 dtype 混用。
-        reward_tensor = torch.tensor(
-            float(transition.reward),
+        rewards = torch.tensor(
+            [float(transition.reward) for transition in transitions],
             dtype=selected_q.dtype,
             device=selected_q.device,
         )
+        target_values = rewards.clone()
 
-        if not transition.can_bootstrap:
-            return reward_tensor
+        bootstrap_items = [
+            (transition_index, transition)
+            for transition_index, transition in enumerate(transitions)
+            if transition.can_bootstrap
+        ]
+        if not bootstrap_items:
+            return target_values, 0
 
+        next_graph_batch = collate_graph_tensors(
+            transition.next_graph
+            for _transition_index, transition in bootstrap_items
+        )
         with torch.no_grad():
             # 标准 DQN 使用 target_model 同时完成动作选择和动作估值。
             # Double DQN 会改成 online_model 选动作、target_model 估值；第一版暂不做。
-            next_q_values = self.target_model(transition.next_graph)
-            max_next_q = next_q_values.max().to(device=selected_q.device, dtype=selected_q.dtype)
+            next_q_flat = self.target_model(next_graph_batch)
+            max_next_q = self._max_q_by_graph(next_q_flat, next_graph_batch)
+            max_next_q = max_next_q.to(device=selected_q.device, dtype=selected_q.dtype)
 
-        return reward_tensor + self.config.gamma * max_next_q
+        bootstrap_indices = torch.tensor(
+            [transition_index for transition_index, _transition in bootstrap_items],
+            dtype=torch.long,
+            device=selected_q.device,
+        )
+        target_values[bootstrap_indices] = (
+            rewards.index_select(0, bootstrap_indices)
+            + self.config.gamma * max_next_q
+        )
+        return target_values, len(bootstrap_items)
+
+    def _max_q_by_graph(self, q_values, graph_batch):
+        """按 GraphBatch 中每张原始图分别求动作 Q 最大值。"""
+
+        if q_values.dim() != 1:
+            raise ValueError('q_values must have shape [total_action_count]')
+        if int(q_values.shape[0]) != graph_batch.action_count:
+            raise RuntimeError(
+                f'q_values length mismatch: got {q_values.shape[0]}, '
+                f'expected {graph_batch.action_count}'
+            )
+
+        max_values = []
+        for action_start, action_end in graph_batch.action_slices:
+            if action_end <= action_start:
+                raise ValueError('each graph in GraphBatch must contain at least one action')
+            max_values.append(q_values[action_start:action_end].max())
+        return torch.stack(max_values)
 
     def _clip_or_measure_grad_norm(self):
         """裁剪或测量 online_model 的梯度范数。"""

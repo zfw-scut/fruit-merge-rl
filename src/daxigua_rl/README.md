@@ -16,9 +16,10 @@ Current v0 interface:
 - One RL `step(action_index)` means one fruit drop plus headless physics settling, not one rendered frame.
 - Training and environment code must not import `daxigua.app.Board`, pygame renderers, HUD, audio, or manual input code.
 - `Transition`: framework-independent training experience record built from `GraphData`, action offset, reward, next graph, and done flags.
-- `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling `Transition` records.
-- `RolloutCollector`: single-process collector that plays the headless environment with epsilon-greedy actions and writes `Transition` records into `ReplayBuffer`.
-- `DQNTrainer`: minimal standard DQN updater that samples `Transition` records, computes TD loss, and updates the online Q network.
+- `TensorTransition`: training-path experience record built from CPU `GraphTensor`, used to avoid repeated `GraphData -> Tensor` conversion.
+- `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling experience records.
+- `RolloutCollector`: single-process collector that plays the headless environment with epsilon-greedy actions and writes `TensorTransition` records into `ReplayBuffer`.
+- `DQNTrainer`: standard DQN updater that samples tensor records, builds `GraphBatch`, computes TD loss, and updates the online Q network.
 - `daxigua_rl.scripts.train_dqn`: first full DQN training entrypoint with CSV metrics, checkpoints, greedy evaluation, and matplotlib curves.
 - `daxigua_rl.scripts.watch_dqn`: visual checkpoint viewer that drives the real pygame `Board` with a trained model.
 

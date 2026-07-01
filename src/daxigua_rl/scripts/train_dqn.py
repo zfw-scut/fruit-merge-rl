@@ -8,8 +8,8 @@
 
     RolloutCollector -> ReplayBuffer -> DQNTrainer -> checkpoint/metrics/plots
 
-它仍然是第一版同步单进程训练脚本，不包含多进程采样、GraphBatch、Double DQN
-或 TensorBoard。
+它仍然是同步单进程训练脚本，不包含多进程采样、Double DQN 或 TensorBoard。
+当前 DQN 更新器已经使用 GraphBatch 执行批量图前向。
 """
 
 from __future__ import annotations
@@ -642,9 +642,11 @@ def train(args):
         for update_step in range(1, args.total_updates + 1):
             epsilon = linear_epsilon(env_steps, args)
 
+            # 收集训练数据
             collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
             env_steps += collect_stats.steps
 
+            # 执行一次 DQN 参数更新
             train_stats = trainer.train_step()
             last_progress_at = maybe_print_progress(
                 args=args,
@@ -659,6 +661,7 @@ def train(args):
                 latest_loss=train_stats.loss,
             )
 
+            # 记录指标、打印日志、评估、保存 checkpoint 和绘图
             should_log = update_step % args.log_interval == 0 or update_step == 1
             should_eval = args.eval_interval > 0 and update_step % args.eval_interval == 0
             should_save = args.save_interval > 0 and update_step % args.save_interval == 0

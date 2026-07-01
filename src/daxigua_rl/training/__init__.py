@@ -19,6 +19,7 @@ __all__ = [
     'ReplayBuffer',
     'RolloutCollector',
     'RolloutStats',
+    'TensorTransition',
     'Transition',
 ]
 
@@ -45,5 +46,10 @@ def __getattr__(name):
             'DQNTrainStats': DQNTrainStats,
         }
         return exports[name]
+
+    if name == 'TensorTransition':
+        from .tensor_transition import TensorTransition
+
+        return TensorTransition
 
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
