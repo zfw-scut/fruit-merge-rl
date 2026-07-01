@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from daxigua_rl.graph.schema import EDGE_FEATURE_NAMES, NODE_FEATURE_NAMES, GraphData
-from daxigua_rl.graph.tensor import GraphTensor, graph_to_tensor
+from daxigua_rl.graph.tensor import GraphBatch, GraphTensor, graph_to_tensor
 
 
 def _activation(name):
@@ -219,12 +219,12 @@ class GNNQNetwork(nn.Module):
         # 但 DQN 最终只需要比较候选动作，所以这里仅读取 action 节点。
         action_hidden = node_hidden[graph_tensor.action_node_indices]
 
-        # q_head 输出 shape: [action_count, 1]。
-        # squeeze(-1) 后变成 [action_count]，方便 argmax 选择动作或计算 loss。
+        # 单图时输出 [action_count]；GraphBatch 时输出 [total_action_count]。
+        # batch 中每张图的动作区间由 GraphBatch.action_slices 记录。
         return self.q_head(action_hidden).squeeze(-1)
 
     def _ensure_tensor(self, graph):
-        """接受 GraphData 或 GraphTensor，并移动到模型所在设备。"""
+        """接受 GraphData、GraphTensor 或 GraphBatch，并移动到模型所在设备。"""
 
         # next(self.parameters()).device 是当前模型参数所在设备；
         # 如果调用者把模型 `.to("cuda")`，输入图也会自动移动到 cuda。
@@ -232,6 +232,10 @@ class GNNQNetwork(nn.Module):
 
         # GraphTensor 已经是张量格式，只需要移动设备。
         if isinstance(graph, GraphTensor):
+            return graph.to(device=device)
+
+        # GraphBatch 已经是张量格式，只需要整体移动设备。
+        if isinstance(graph, GraphBatch):
             return graph.to(device=device)
 
         # GraphData 是 GraphBuilder 的原始输出，先转成张量。

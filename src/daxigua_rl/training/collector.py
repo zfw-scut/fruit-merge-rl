@@ -3,7 +3,7 @@
 RolloutCollector 负责把当前已经完成的几个训练零件串起来：
 
     DaxiguaEnv -> GraphBuilder -> GNNQNetwork/EpsilonGreedyPolicy
-    -> Transition -> ReplayBuffer
+    -> TensorTransition -> ReplayBuffer
 
 它只负责“玩游戏并收集经验”，不负责从 replay buffer 采样训练，也不负责
 计算 DQN loss、更新模型参数或同步 target network。
@@ -16,8 +16,10 @@ from dataclasses import dataclass, field
 
 import torch
 
+from daxigua_rl.graph.tensor import graph_to_tensor
+
 from .replay_buffer import ReplayBuffer
-from .transition import Transition
+from .tensor_transition import TensorTransition
 
 
 @dataclass(frozen=True)
@@ -148,7 +150,7 @@ class RolloutCollector:
     1. 从当前环境状态构图。
     2. 用 epsilon-greedy 选择动作。
     3. 调用 `env.step(action_offset)`。
-    4. 构建 `Transition`。
+    4. 构建 CPU `TensorTransition`。
     5. 写入 `ReplayBuffer`。
 
     后续如果要做多进程采样，可以把多个 collector 放到 worker 进程里运行，
@@ -259,7 +261,8 @@ class RolloutCollector:
                 self.reset()
                 continue
 
-            graph = self.graph_builder.build(self._obs, candidates)
+            graph_data = self.graph_builder.build(self._obs, candidates)
+            graph = graph_to_tensor(graph_data)
             action_count = len(candidates)
             self._validate_action_count(graph, action_count)
 
@@ -276,9 +279,10 @@ class RolloutCollector:
             # 非终止 transition 需要下一状态图，后续 DQN target 要读取 max_next_q。
             next_graph = None
             if not done:
-                next_graph = self.graph_builder.build(next_obs, next_info['action_candidates'])
+                next_graph_data = self.graph_builder.build(next_obs, next_info['action_candidates'])
+                next_graph = graph_to_tensor(next_graph_data)
 
-            transition = Transition(
+            transition = TensorTransition(
                 graph=graph,
                 action_offset=action_offset,
                 reward=reward,
@@ -350,7 +354,7 @@ class RolloutCollector:
             raise ValueError('model is required for greedy action selection')
 
         with torch.no_grad():
-            # GNNQNetwork 内部会把 GraphData 转到模型所在设备。
+            # GNNQNetwork 内部会把 GraphTensor 转到模型所在设备。
             # collector 这里只拿 CPU 上的 1D q_values 做 argmax 和长度检查。
             return self.model(graph).detach().cpu()
 

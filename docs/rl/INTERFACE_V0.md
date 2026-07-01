@@ -8,7 +8,7 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、最小 GNN-Q 前向模型、`Transition` 经验记录、基础 `ReplayBuffer`、单进程 `RolloutCollector`、最小标准 `DQNTrainer` 和第一版 DQN 训练入口。
+当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、GNN-Q 前向模型、`Transition` / `TensorTransition` 经验记录、基础 `ReplayBuffer`、单进程 `RolloutCollector`、标准 `DQNTrainer` 和第一版 DQN 训练入口。
 
 ## 边界
 
@@ -125,7 +125,9 @@ edge_feature_dim = 26
 当前 `daxigua_rl.graph.tensor` 提供：
 
 - `graph_to_tensor(graph) -> GraphTensor`
+- `collate_graph_tensors(graphs) -> GraphBatch`
 - `GraphTensor.to(device=None, dtype=None)`
+- `GraphBatch.to(device=None, dtype=None)`
 
 最小前向链路：
 
@@ -138,13 +140,19 @@ DaxiguaEnv.reset()
     -> q_values[action_count]
 ```
 
-当前模型只验证前向链路和反向传播是否可运行；Q 值在训练前没有策略意义。
+模型支持单图和批量图两种输入：
+
+- `GraphData` / `GraphTensor` 输入时，输出 shape 为 `[action_count]`。
+- `GraphBatch` 输入时，输出 shape 为 `[total_action_count]`，每张原始图对应的动作区间由 `GraphBatch.action_slices` 记录。
+
+Q 值在训练前没有策略意义。
 
 ## 训练经验结构
 
 当前 `daxigua_rl.training` 包提供：
 
-- `Transition`: 一条 DQN 经验记录。
+- `Transition`: 框架无关 DQN 经验记录，保留给调试和对照。
+- `TensorTransition`: 张量化 DQN 经验记录，正式训练主链路使用它。
 - `ReplayBuffer`: 固定容量内存回放池。
 - `RolloutCollector`: 单进程 rollout 采集器。
 - `DQNTrainer`: 标准 DQN 单步更新器。
@@ -175,12 +183,12 @@ target = reward                        # terminal/truncated transition
 
 ### `ReplayBuffer`
 
-第一版接口：
+接口：
 
 - `ReplayBuffer(capacity=100_000, seed=None)`: 创建固定容量回放池。
-- `push(transition)`: 写入一条 `Transition`。
+- `push(transition)`: 写入一条经验对象。
 - `extend(transitions)`: 批量写入。
-- `sample(batch_size) -> tuple[Transition, ...]`: 随机无放回采样。
+- `sample(batch_size) -> tuple[...]`: 随机无放回采样。
 - `is_ready(batch_size) -> bool`: 判断是否足够采样一个 batch。
 - `clear()`: 清空。
 - `len(buffer)`: 当前已保存经验数量。
@@ -189,7 +197,8 @@ target = reward                        # terminal/truncated transition
 
 - 默认容量是 `100_000`，也就是十万条经验。
 - 容量满后覆盖最旧经验。
-- `sample()` 返回原始 `Transition` 元组，不在 buffer 层拼 tensor batch。
+- buffer 只负责保存和采样对象，不关心对象内部是 `Transition` 还是 `TensorTransition`。
+- 当前正式训练主链路由 `RolloutCollector` 写入 CPU `TensorTransition`。
 - 第一版使用均匀随机采样，不做优先经验回放。
 
 ### `RolloutCollector`
@@ -211,10 +220,11 @@ from daxigua_rl.training import RolloutCollector
 ```text
 当前 GameState + action_candidates
 -> GraphBuilder.build(...)
+-> graph_to_tensor(...)
 -> epsilon-greedy 选择 action_offset
 -> DaxiguaEnv.step(action_offset)
 -> 构建 next_graph
--> Transition(...)
+-> TensorTransition(...)
 -> ReplayBuffer.push(...)
 ```
 
@@ -265,10 +275,14 @@ DQNTrainerConfig(
 当前标准 DQN target：
 
 ```text
-current_q = online_model(graph)[action_offset]
+current_batch = collate_graph_tensors(batch.graph)
+current_q_flat = online_model(current_batch)
+current_q = current_q_flat[action_slice.start + action_offset]
 
 if transition.can_bootstrap:
-    target = reward + gamma * max(target_model(next_graph))
+    next_batch = collate_graph_tensors(bootstrap_next_graphs)
+    next_q_flat = target_model(next_batch)
+    target = reward + gamma * max(next_q_flat[each_next_action_slice])
 else:
     target = reward
 ```
@@ -280,7 +294,8 @@ else:
 - `target_model` 参数会被冻结，只用于无梯度推理。
 - 每隔 `target_update_interval` 次 `train_step()` 同步一次 target network。
 - 第一版是标准 DQN，不做 Double DQN。
-- 第一版逐条图 forward，不做 GraphBatch。
+- 当前使用 GraphBatch，把 batch 内多张图拼成不连通大图执行批量 forward。
+- ReplayBuffer 正式训练路径保存 CPU `TensorTransition`，训练时再把 `GraphBatch` 搬到模型设备，因此可直接支持 GPU batch 训练。
 - 默认使用梯度裁剪 `grad_clip_norm=10.0`。
 
 `DQNTrainStats` 提供：

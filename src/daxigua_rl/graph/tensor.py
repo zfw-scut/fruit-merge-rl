@@ -100,6 +100,101 @@ class GraphTensor:
         )
 
 
+@dataclass(frozen=True)
+class GraphBatch:
+    """多张 `GraphTensor` 拼成的一张不连通大图。
+
+    GraphBatch 不改变任何单图内部结构，只把节点、边和 action 节点按顺序拼接。
+    每张原始图之间没有新增边，因此 message passing 不会跨样本传播信息。
+    """
+
+    # 拼接后的节点特征矩阵，shape: [total_nodes, node_feature_dim]。
+    node_features: torch.Tensor
+
+    # 拼接并完成节点下标偏移后的有向边索引，shape: [2, total_edges]。
+    edge_index: torch.Tensor
+
+    # 拼接后的边特征矩阵，shape: [total_edges, edge_feature_dim]。
+    edge_features: torch.Tensor
+
+    # 拼接后所有 action 节点在 node_features 中的行号。
+    action_node_indices: torch.Tensor
+
+    # 拼接后所有 action 的原始动作编号。
+    action_indices: torch.Tensor
+
+    # 每张原始图在扁平 Q 值输出中的 action 区间，形如 `(start, end)`。
+    action_slices: tuple
+
+    # 每张原始图在 node_features 中的节点区间，主要用于测试和调试。
+    node_slices: tuple
+
+    # 每张原始图在 edge_features 中的边区间，主要用于测试和调试。
+    edge_slices: tuple
+
+    # 特征名快照，含义和 GraphTensor 一致。
+    node_feature_names: tuple
+    edge_feature_names: tuple
+
+    @property
+    def num_graphs(self):
+        """返回 batch 中包含多少张原始图。"""
+
+        return len(self.action_slices)
+
+    @property
+    def num_nodes(self):
+        """返回拼接后的节点数量。"""
+
+        return int(self.node_features.shape[0])
+
+    @property
+    def num_edges(self):
+        """返回拼接后的边数量。"""
+
+        return int(self.edge_features.shape[0])
+
+    @property
+    def node_feature_dim(self):
+        """返回节点特征维度。"""
+
+        return int(self.node_features.shape[1])
+
+    @property
+    def edge_feature_dim(self):
+        """返回边特征维度。"""
+
+        return int(self.edge_features.shape[1])
+
+    @property
+    def action_count(self):
+        """返回 batch 中所有候选动作节点数量。"""
+
+        return int(self.action_node_indices.shape[0])
+
+    @property
+    def action_counts(self):
+        """返回每张原始图各自的候选动作数量。"""
+
+        return tuple(end - start for start, end in self.action_slices)
+
+    def to(self, device=None, dtype=None):
+        """返回移动到指定设备和 dtype 的新 GraphBatch。"""
+
+        return GraphBatch(
+            node_features=self.node_features.to(device=device, dtype=dtype),
+            edge_index=self.edge_index.to(device=device),
+            edge_features=self.edge_features.to(device=device, dtype=dtype),
+            action_node_indices=self.action_node_indices.to(device=device),
+            action_indices=self.action_indices.to(device=device),
+            action_slices=self.action_slices,
+            node_slices=self.node_slices,
+            edge_slices=self.edge_slices,
+            node_feature_names=self.node_feature_names,
+            edge_feature_names=self.edge_feature_names,
+        )
+
+
 def graph_to_tensor(graph, device=None, dtype=torch.float32):
     """把 `GraphData` 转换成 `GraphTensor`。
 
@@ -133,4 +228,101 @@ def graph_to_tensor(graph, device=None, dtype=torch.float32):
         action_indices=action_indices,
         node_feature_names=graph.node_feature_names,
         edge_feature_names=graph.edge_feature_names,
+    )
+
+
+def collate_graph_tensors(graphs, device=None, dtype=None):
+    """把多张 `GraphTensor` 拼成一张不连通 `GraphBatch`。
+
+    这个函数是批量 GNN 训练的核心胶水：
+    - 节点特征和边特征直接按图顺序拼接；
+    - 每张图的 `edge_index` 和 `action_node_indices` 按累计节点数做偏移；
+    - `action_slices` 记录每张图在扁平 Q 输出中的动作区间。
+    """
+
+    graphs = tuple(graphs)
+    if not graphs:
+        raise ValueError('graphs must contain at least one GraphTensor')
+
+    first = graphs[0]
+    if not isinstance(first, GraphTensor):
+        raise TypeError(f'graphs must contain GraphTensor, got {type(first)!r}')
+
+    node_feature_names = first.node_feature_names
+    edge_feature_names = first.edge_feature_names
+    node_feature_dim = first.node_feature_dim
+    edge_feature_dim = first.edge_feature_dim
+
+    node_chunks = []
+    edge_chunks = []
+    edge_index_chunks = []
+    action_node_chunks = []
+    action_index_chunks = []
+    action_slices = []
+    node_slices = []
+    edge_slices = []
+
+    node_offset = 0
+    edge_offset = 0
+    action_offset = 0
+
+    for graph in graphs:
+        if not isinstance(graph, GraphTensor):
+            raise TypeError(f'graphs must contain GraphTensor, got {type(graph)!r}')
+        if graph.node_feature_names != node_feature_names:
+            raise ValueError('all graphs must use the same node feature schema')
+        if graph.edge_feature_names != edge_feature_names:
+            raise ValueError('all graphs must use the same edge feature schema')
+        if graph.node_feature_dim != node_feature_dim:
+            raise ValueError('all graphs must use the same node feature dimension')
+        if graph.edge_feature_dim != edge_feature_dim:
+            raise ValueError('all graphs must use the same edge feature dimension')
+        if graph.action_count <= 0:
+            raise ValueError('each graph must contain at least one action node')
+
+        graph = graph.to(device=device, dtype=dtype)
+
+        node_start = node_offset
+        node_end = node_start + graph.num_nodes
+        edge_start = edge_offset
+        edge_end = edge_start + graph.num_edges
+        action_start = action_offset
+        action_end = action_start + graph.action_count
+
+        node_chunks.append(graph.node_features)
+        edge_chunks.append(graph.edge_features)
+        if graph.num_edges:
+            edge_index_chunks.append(graph.edge_index + node_offset)
+        action_node_chunks.append(graph.action_node_indices + node_offset)
+        action_index_chunks.append(graph.action_indices)
+
+        node_slices.append((node_start, node_end))
+        edge_slices.append((edge_start, edge_end))
+        action_slices.append((action_start, action_end))
+
+        node_offset = node_end
+        edge_offset = edge_end
+        action_offset = action_end
+
+    node_features = torch.cat(node_chunks, dim=0)
+    edge_features = torch.cat(edge_chunks, dim=0)
+    action_node_indices = torch.cat(action_node_chunks, dim=0)
+    action_indices = torch.cat(action_index_chunks, dim=0)
+
+    if edge_index_chunks:
+        edge_index = torch.cat(edge_index_chunks, dim=1)
+    else:
+        edge_index = torch.empty((2, 0), dtype=torch.long, device=node_features.device)
+
+    return GraphBatch(
+        node_features=node_features,
+        edge_index=edge_index,
+        edge_features=edge_features,
+        action_node_indices=action_node_indices,
+        action_indices=action_indices,
+        action_slices=tuple(action_slices),
+        node_slices=tuple(node_slices),
+        edge_slices=tuple(edge_slices),
+        node_feature_names=node_feature_names,
+        edge_feature_names=edge_feature_names,
     )

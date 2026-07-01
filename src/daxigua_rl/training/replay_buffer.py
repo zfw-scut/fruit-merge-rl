@@ -2,7 +2,7 @@
 
 ReplayBuffer 的职责很单一：
 
-1. 保存 rollout 过程中产生的 `Transition`。
+1. 保存 rollout 过程中产生的经验对象。
 2. 容量满后覆盖最旧经验。
 3. 训练时随机采样一批经验。
 
@@ -22,15 +22,12 @@ from __future__ import annotations
 
 import random
 
-from .transition import Transition
-
-
 class ReplayBuffer:
     """固定容量环形 Replay Buffer。
 
-    第一版 buffer 保存框架无关的 `Transition` 对象，`sample()` 也直接返回
-    `Transition` 元组。由于每个 `GraphData` 的节点数和边数可能不同，暂时不在
-    buffer 层做 tensor batch；后续 DQN trainer 采样后再决定如何处理图 batch。
+    buffer 只负责保存和采样经验对象，不关心对象内部是 `Transition` 还是
+    `TensorTransition`。这样训练主链路可以保存张量化经验，调试链路仍然可以
+    保存框架无关经验。
     """
 
     def __init__(self, capacity=100_000, seed=None):
@@ -79,14 +76,11 @@ class ReplayBuffer:
         self._next_index = 0
 
     def push(self, transition):
-        """写入一条 transition。
+        """写入一条经验对象。
 
         如果 buffer 未满，直接追加到末尾。
         如果 buffer 已满，覆盖当前最旧位置，并把写入指针向后移动一格。
         """
-
-        if not isinstance(transition, Transition):
-            raise TypeError(f'transition must be Transition, got {type(transition)!r}')
 
         if len(self._items) < self.capacity:
             self._items.append(transition)
@@ -107,8 +101,8 @@ class ReplayBuffer:
     def sample(self, batch_size):
         """随机无放回采样一批 transition。
 
-        返回值是 `tuple[Transition, ...]`，而不是已经拼好的 tensor batch。
-        这样第一版 DQN trainer 可以先用最直观的逐图处理方式跑通训练。
+        返回值是原始经验对象元组，而不是已经拼好的 GraphBatch。
+        GraphBatch 拼接由 DQN trainer 在拿到当前 sample 后完成。
         """
 
         batch_size = int(batch_size)
