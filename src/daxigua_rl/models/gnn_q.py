@@ -200,7 +200,7 @@ class GNNQNetwork(nn.Module):
         - `GraphTensor`：训练友好，推荐训练循环中提前转换好后复用。
         """
 
-        # 统一转换成 GraphTensor，并确保张量和模型处于同一个 device。
+        # 统一转换成 GraphTensor，并确保张量和模型处于同一个 device/dtype。
         graph_tensor = self._ensure_tensor(graph)
 
         # 在真正进入神经网络前做形状检查，避免 PyTorch 报出难读的矩阵乘法错误。
@@ -226,17 +226,20 @@ class GNNQNetwork(nn.Module):
     def _ensure_tensor(self, graph):
         """接受 GraphData、GraphTensor 或 GraphBatch，并移动到模型所在设备。"""
 
-        # next(self.parameters()).device 是当前模型参数所在设备；
-        # 如果调用者把模型 `.to("cuda")`，输入图也会自动移动到 cuda。
-        device = next(self.parameters()).device
+        # next(self.parameters()) 给出当前模型参数所在 device/dtype。
+        # ReplayBuffer 可以用 float16 省内存，但模型通常仍是 float32；
+        # 因此进入网络前需要把图特征转回模型参数 dtype，避免 Linear dtype mismatch。
+        first_parameter = next(self.parameters())
+        device = first_parameter.device
+        dtype = first_parameter.dtype
 
         # GraphTensor 已经是张量格式，只需要移动设备。
         if isinstance(graph, GraphTensor):
-            return graph.to(device=device)
+            return graph.to(device=device, dtype=dtype)
 
         # GraphBatch 已经是张量格式，只需要整体移动设备。
         if isinstance(graph, GraphBatch):
-            return graph.to(device=device)
+            return graph.to(device=device, dtype=dtype)
 
         # GraphData 是 GraphBuilder 的原始输出，先转成张量。
         if isinstance(graph, GraphData):

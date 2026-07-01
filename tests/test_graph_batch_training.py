@@ -80,6 +80,8 @@ class GraphBatchTrainingTest(unittest.TestCase):
 
         sampled = replay_buffer.sample(1)[0]
         self.assertIsInstance(sampled, TensorTransition)
+        self.assertEqual(sampled.graph.node_features.dtype, torch.float16)
+        self.assertEqual(sampled.graph.edge_features.dtype, torch.float16)
 
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
         trainer = DQNTrainer(
@@ -93,6 +95,41 @@ class GraphBatchTrainingTest(unittest.TestCase):
 
         self.assertEqual(stats.batch_size, 8)
         self.assertEqual(stats.update_step, 1)
+        self.assertTrue(torch.isfinite(torch.tensor(stats.loss)))
+
+    def test_float16_replay_storage_trains_with_float32_model(self):
+        """ReplayBuffer 固定用 float16 存图，模型前向时应自动转回 float32。"""
+
+        env = DaxiguaEnv(config=DaxiguaEnvConfig(action_count=7, max_physics_frames=240, stable_frames=6))
+        replay_buffer = ReplayBuffer(capacity=128, seed=3)
+        model = GNNQNetwork(hidden_dim=32, message_layers=2)
+        target_model = GNNQNetwork(hidden_dim=32, message_layers=2)
+
+        collector = RolloutCollector(
+            env=env,
+            graph_builder=GraphBuilder(),
+            replay_buffer=replay_buffer,
+            model=model,
+            seed=4,
+        )
+        collector.collect_steps(16, epsilon=1.0)
+
+        sampled = replay_buffer.sample(1)[0]
+        self.assertIsInstance(sampled, TensorTransition)
+        self.assertEqual(sampled.graph.node_features.dtype, torch.float16)
+        self.assertEqual(sampled.graph.edge_features.dtype, torch.float16)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+        trainer = DQNTrainer(
+            online_model=model,
+            target_model=target_model,
+            replay_buffer=replay_buffer,
+            optimizer=optimizer,
+            config=DQNTrainerConfig(batch_size=8, target_update_interval=10, grad_clip_norm=10.0),
+        )
+        stats = trainer.train_step()
+
+        self.assertEqual(stats.batch_size, 8)
         self.assertTrue(torch.isfinite(torch.tensor(stats.loss)))
 
 

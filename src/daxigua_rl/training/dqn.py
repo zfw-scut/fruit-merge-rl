@@ -157,10 +157,13 @@ class DQNTrainer:
                 f'but batch_size={self.config.batch_size}'
             )
 
-        batch = tuple(
-            TensorTransition.from_transition(transition)
-            for transition in self.replay_buffer.sample(self.config.batch_size)
-        )
+        batch = self.replay_buffer.sample(self.config.batch_size)
+        for transition in batch:
+            if not isinstance(transition, TensorTransition):
+                raise TypeError(
+                    'DQNTrainer expects ReplayBuffer to contain TensorTransition; '
+                    f'got {type(transition)!r}'
+                )
 
         # online_model 需要梯度，target_model 只做无梯度推理。
         self.online_model.train()

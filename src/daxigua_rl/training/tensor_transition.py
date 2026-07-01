@@ -1,17 +1,14 @@
-"""DQN 训练使用的张量版经验记录。
+"""DQN 训练使用的张量化经验记录。
 
-`TensorTransition` 是 `Transition` 的训练加速版本。它不再保存框架无关的
-`GraphData`，而是保存已经转好的 CPU `GraphTensor`，方便 replay buffer
-采样后直接拼成 `GraphBatch`。
+`TensorTransition` 是当前训练主链路唯一使用的经验结构。它保存已经转好的
+CPU `GraphTensor`，方便 replay buffer 采样后直接拼成 `GraphBatch`。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from daxigua_rl.graph.tensor import GraphTensor, graph_to_tensor
-
-from .transition import Transition
+from daxigua_rl.graph.tensor import GraphTensor
 
 
 @dataclass(frozen=True)
@@ -20,8 +17,9 @@ class TensorTransition:
 
     约定：
     - replay buffer 长期保存 CPU `GraphTensor`；
+    - 图特征由 `RolloutCollector` 固定为 float16，以降低常驻内存；
     - 训练时再把 collate 后的 `GraphBatch` 搬到模型设备；
-    - 不同时保存 `GraphData` 和 `GraphTensor`，避免双份数据。
+    - 训练入口不再保留旧 GraphData transition 兼容路径。
     """
 
     # 当前状态图，已经是 PyTorch 张量格式。
@@ -71,32 +69,6 @@ class TensorTransition:
 
         if not self.done and self.next_action_count <= 0:
             raise ValueError('non-terminal next_graph must contain at least one action node')
-
-    @classmethod
-    def from_transition(cls, transition, device=None):
-        """从旧版 `Transition` 转换为 `TensorTransition`。
-
-        这个方法主要用于兼容临时调试脚本或旧 buffer 数据。新的训练主链路会在
-        rollout 采集时直接创建 `TensorTransition`。
-        """
-
-        if isinstance(transition, cls):
-            return transition
-        if not isinstance(transition, Transition):
-            raise TypeError(f'expected Transition or TensorTransition, got {type(transition)!r}')
-
-        next_graph = None
-        if transition.next_graph is not None:
-            next_graph = graph_to_tensor(transition.next_graph, device=device)
-
-        return cls(
-            graph=graph_to_tensor(transition.graph, device=device),
-            action_offset=transition.action_offset,
-            reward=transition.reward,
-            next_graph=next_graph,
-            terminated=transition.terminated,
-            truncated=transition.truncated,
-        )
 
     @property
     def action_count(self):
