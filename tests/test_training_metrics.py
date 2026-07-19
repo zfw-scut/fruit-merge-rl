@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from daxigua_rl.models import GNNQNetwork
-from daxigua_rl.scripts.train_dqn import EpisodeLogger, evaluate_policy
+from daxigua_rl.scripts.train_dqn import EpisodeLogger, build_metric_row, evaluate_policy
 from daxigua_rl.training.collector import RolloutStats
 
 
@@ -80,6 +80,54 @@ class TrainingMetricsTest(unittest.TestCase):
         self.assertIn('eval_score_max', stats)
         self.assertIn('eval_score_min', stats)
         self.assertGreaterEqual(stats['eval_score_max'], stats['eval_score_min'])
+
+    def test_metric_row_includes_reward_breakdown_means(self):
+        """metrics.csv 行应包含 reward breakdown 的窗口均值。"""
+
+        collect_stats = RolloutStats(
+            steps=4,
+            episodes=0,
+            total_reward=10.0,
+            reward_breakdown_totals=(
+                ('total', 10.0),
+                ('score_reward', 8.0),
+                ('survival_bonus', 0.2),
+                ('height_delta_reward', -0.1),
+                ('danger_penalty', -1.0),
+                ('terminal_penalty', 0.0),
+                ('previous_height_ratio', 1.2),
+                ('next_height_ratio', 1.4),
+                ('height_delta_ratio', 0.2),
+            ),
+            buffer_size=32,
+        )
+        train_stats = SimpleNamespace(
+            loss=1.0,
+            mean_q=2.0,
+            mean_target=3.0,
+            mean_reward=4.0,
+            mean_abs_td_error=5.0,
+            bootstrap_count=6,
+            grad_norm=7.0,
+            target_synced=False,
+        )
+
+        row = build_metric_row(
+            update_step=10,
+            env_steps=20,
+            epsilon=0.5,
+            train_stats=train_stats,
+            collect_stats=collect_stats,
+            eval_stats=None,
+            best_eval_score=float('-inf'),
+            best_eval_update=0,
+            timing={'elapsed': 2.0},
+        )
+
+        self.assertEqual(row['collect_mean_reward_total'], 2.5)
+        self.assertEqual(row['collect_mean_score_reward'], 2.0)
+        self.assertEqual(row['collect_mean_danger_penalty'], -0.25)
+        self.assertAlmostEqual(row['collect_mean_next_height_ratio'], 0.35)
 
 
 if __name__ == '__main__':

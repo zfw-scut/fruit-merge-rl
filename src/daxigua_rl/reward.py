@@ -9,6 +9,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# 训练日志和可视化需要稳定知道 reward breakdown 有哪些字段。
+# 这里集中维护字段顺序，避免 collector、CSV 和画图逻辑各自手写一份后逐渐不一致。
+REWARD_BREAKDOWN_FIELDS = (
+    'total',
+    'score_reward',
+    'survival_bonus',
+    'height_delta_reward',
+    'danger_penalty',
+    'terminal_penalty',
+    'previous_height_ratio',
+    'next_height_ratio',
+    'height_delta_ratio',
+)
+
+
 @dataclass(frozen=True)
 class RewardConfig:
     """奖励函数配置。
@@ -51,15 +66,8 @@ class RewardBreakdown:
         """转换成普通 dict，方便日志、JSON 或终端打印。"""
 
         return {
-            'total': self.total,
-            'score_reward': self.score_reward,
-            'survival_bonus': self.survival_bonus,
-            'height_delta_reward': self.height_delta_reward,
-            'danger_penalty': self.danger_penalty,
-            'terminal_penalty': self.terminal_penalty,
-            'previous_height_ratio': self.previous_height_ratio,
-            'next_height_ratio': self.next_height_ratio,
-            'height_delta_ratio': self.height_delta_ratio,
+            field_name: getattr(self, field_name)
+            for field_name in REWARD_BREAKDOWN_FIELDS
         }
 
 

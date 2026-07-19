@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS
 from daxigua_rl.graph.tensor import graph_to_tensor
 
 from .replay_buffer import ReplayBuffer
@@ -42,6 +43,10 @@ class RolloutStats:
 
     # 本次采集得到的总 reward，包含未完成 episode 的部分 reward。
     total_reward: float
+
+    # 本次采集中各 reward breakdown 字段的累计值。
+    # 使用 `(字段名, 累计值)` 元组而不是裸 dict，避免 frozen dataclass 持有可变对象。
+    reward_breakdown_totals: tuple = field(default_factory=tuple)
 
     # 本次采集中每个已结束 episode 的累计 reward。
     episode_rewards: tuple = field(default_factory=tuple)
@@ -105,6 +110,19 @@ class RolloutStats:
         if not self.episode_scores:
             return 0.0
         return sum(self.episode_scores) / len(self.episode_scores)
+
+    @property
+    def reward_breakdown_totals_dict(self):
+        """返回 reward breakdown 累计值字典，供训练日志按字段读取。"""
+
+        return dict(self.reward_breakdown_totals)
+
+    def mean_reward_breakdown(self, field_name):
+        """返回某个 reward breakdown 字段在本次采集窗口内的平均值。"""
+
+        if self.steps <= 0:
+            return 0.0
+        return self.reward_breakdown_totals_dict.get(field_name, 0.0) / self.steps
 
 
 class EpsilonGreedyPolicy:
@@ -268,6 +286,10 @@ class RolloutCollector:
         truncated_episodes = 0
         random_actions = 0
         greedy_actions = 0
+        reward_breakdown_totals = {
+            field_name: 0.0
+            for field_name in REWARD_BREAKDOWN_FIELDS
+        }
 
         while steps < step_count:
             candidates = tuple(self._info['action_candidates'])
@@ -289,6 +311,10 @@ class RolloutCollector:
 
             next_obs, reward, terminated, truncated, next_info = self.env.step(action_offset)
             done = terminated or truncated
+            self._accumulate_reward_breakdown(
+                reward_breakdown_totals,
+                next_info.get('reward_breakdown'),
+            )
 
             # terminal/truncated transition 不 bootstrap，因此不强制构建 next_graph。
             # 非终止 transition 需要下一状态图，后续 DQN target 要读取 max_next_q。
@@ -339,6 +365,10 @@ class RolloutCollector:
             steps=steps,
             episodes=len(episode_rewards),
             total_reward=total_reward,
+            reward_breakdown_totals=tuple(
+                (field_name, reward_breakdown_totals[field_name])
+                for field_name in REWARD_BREAKDOWN_FIELDS
+            ),
             episode_rewards=tuple(episode_rewards),
             episode_lengths=tuple(episode_lengths),
             episode_scores=tuple(episode_scores),
@@ -353,6 +383,26 @@ class RolloutCollector:
             current_episode_reward=self._episode_reward,
             current_episode_length=self._episode_length,
         )
+
+    def _accumulate_reward_breakdown(self, totals, reward_breakdown):
+        """把环境返回的单步 reward 明细累加到当前采集统计里。"""
+
+        if reward_breakdown is None:
+            return
+
+        # 正式环境返回 RewardBreakdown 对象；测试或后续适配器也可以返回普通 dict。
+        if hasattr(reward_breakdown, 'to_dict'):
+            values = reward_breakdown.to_dict()
+        elif isinstance(reward_breakdown, dict):
+            values = reward_breakdown
+        else:
+            values = {
+                field_name: getattr(reward_breakdown, field_name, 0.0)
+                for field_name in REWARD_BREAKDOWN_FIELDS
+            }
+
+        for field_name in REWARD_BREAKDOWN_FIELDS:
+            totals[field_name] += float(values.get(field_name, 0.0))
 
     def _select_action(self, graph, action_count, epsilon):
         """根据 epsilon-greedy 策略返回 `(action_offset, used_random)`。"""

@@ -28,11 +28,25 @@ import torch
 
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder, ReplayBuffer
 from daxigua_rl.models import GNNQNetwork
-from daxigua_rl.reward import RewardConfig
+from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS, RewardConfig
 from daxigua_rl.training import (
     DQNTrainer,
     DQNTrainerConfig,
     RolloutCollector,
+    RolloutStats,
+)
+
+
+REWARD_BREAKDOWN_METRIC_FIELDS = (
+    ('total', 'collect_mean_reward_total'),
+    ('score_reward', 'collect_mean_score_reward'),
+    ('survival_bonus', 'collect_mean_survival_bonus'),
+    ('height_delta_reward', 'collect_mean_height_delta_reward'),
+    ('danger_penalty', 'collect_mean_danger_penalty'),
+    ('terminal_penalty', 'collect_mean_terminal_penalty'),
+    ('previous_height_ratio', 'collect_mean_previous_height_ratio'),
+    ('next_height_ratio', 'collect_mean_next_height_ratio'),
+    ('height_delta_ratio', 'collect_mean_height_delta_ratio'),
 )
 
 
@@ -55,6 +69,15 @@ METRIC_FIELDS = (
     'collect_mean_episode_reward',
     'collect_mean_episode_length',
     'collect_mean_episode_score',
+    'collect_mean_reward_total',
+    'collect_mean_score_reward',
+    'collect_mean_survival_bonus',
+    'collect_mean_height_delta_reward',
+    'collect_mean_danger_penalty',
+    'collect_mean_terminal_penalty',
+    'collect_mean_previous_height_ratio',
+    'collect_mean_next_height_ratio',
+    'collect_mean_height_delta_ratio',
     'random_actions',
     'greedy_actions',
     'eval_score_mean',
@@ -393,6 +416,94 @@ class EpisodeLogger:
         self._file.close()
 
 
+class CollectStatsWindow:
+    """把多次 collect 统计合并成一个日志窗口。
+
+    训练通常是每次 update 只采集 1 个环境 step，但 `metrics.csv` 可能每 100 次
+    update 才写一行。如果直接记录最后 1 个 step，reward breakdown 曲线会非常
+    抖动；窗口汇总能让每行日志代表最近一段训练过程的平均奖励组成。
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        """清空当前窗口，等待下一段 collect 统计写入。"""
+
+        self.steps = 0
+        self.total_reward = 0.0
+        self.episodes = 0
+        self.episode_rewards = []
+        self.episode_lengths = []
+        self.episode_scores = []
+        self.episode_end_offsets = []
+        self.episode_terminated_flags = []
+        self.episode_truncated_flags = []
+        self.terminated_episodes = 0
+        self.truncated_episodes = 0
+        self.random_actions = 0
+        self.greedy_actions = 0
+        self.current_episode_reward = 0.0
+        self.current_episode_length = 0
+        self.reward_breakdown_totals = {
+            field_name: 0.0
+            for field_name in REWARD_BREAKDOWN_FIELDS
+        }
+
+    def add(self, stats):
+        """把一次 `RolloutCollector.collect_steps()` 的结果并入窗口。"""
+
+        step_offset = self.steps
+        self.steps += stats.steps
+        self.total_reward += stats.total_reward
+        self.episodes += stats.episodes
+        self.episode_rewards.extend(stats.episode_rewards)
+        self.episode_lengths.extend(stats.episode_lengths)
+        self.episode_scores.extend(stats.episode_scores)
+        self.episode_end_offsets.extend(
+            step_offset + offset
+            for offset in stats.episode_end_offsets
+        )
+        self.episode_terminated_flags.extend(stats.episode_terminated_flags)
+        self.episode_truncated_flags.extend(stats.episode_truncated_flags)
+        self.terminated_episodes += stats.terminated_episodes
+        self.truncated_episodes += stats.truncated_episodes
+        self.random_actions += stats.random_actions
+        self.greedy_actions += stats.greedy_actions
+        self.current_episode_reward = stats.current_episode_reward
+        self.current_episode_length = stats.current_episode_length
+
+        totals = stats.reward_breakdown_totals_dict
+        for field_name in REWARD_BREAKDOWN_FIELDS:
+            self.reward_breakdown_totals[field_name] += float(totals.get(field_name, 0.0))
+
+    def to_rollout_stats(self, buffer_size):
+        """转换成和 collector 输出兼容的 `RolloutStats`，供日志代码复用。"""
+
+        return RolloutStats(
+            steps=self.steps,
+            episodes=self.episodes,
+            total_reward=self.total_reward,
+            reward_breakdown_totals=tuple(
+                (field_name, self.reward_breakdown_totals[field_name])
+                for field_name in REWARD_BREAKDOWN_FIELDS
+            ),
+            episode_rewards=tuple(self.episode_rewards),
+            episode_lengths=tuple(self.episode_lengths),
+            episode_scores=tuple(self.episode_scores),
+            episode_end_offsets=tuple(self.episode_end_offsets),
+            episode_terminated_flags=tuple(self.episode_terminated_flags),
+            episode_truncated_flags=tuple(self.episode_truncated_flags),
+            terminated_episodes=self.terminated_episodes,
+            truncated_episodes=self.truncated_episodes,
+            random_actions=self.random_actions,
+            greedy_actions=self.greedy_actions,
+            buffer_size=buffer_size,
+            current_episode_reward=self.current_episode_reward,
+            current_episode_length=self.current_episode_length,
+        )
+
+
 def write_config(run_dir, args):
     """保存本次训练配置。"""
 
@@ -547,7 +658,108 @@ def maybe_plot_metrics(run_dir, rows, episode_rows=None):
     output_path = run_dir / 'plots' / 'training_curves.png'
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
+    _maybe_plot_reward_breakdown(run_dir, rows, x, plt)
     return True
+
+
+def _maybe_plot_reward_breakdown(run_dir, rows, x, plt):
+    """生成独立的 reward breakdown 曲线图。"""
+
+    reward_fields = tuple(
+        metric_field
+        for _reward_field, metric_field in REWARD_BREAKDOWN_METRIC_FIELDS
+    )
+    if not _has_any_points(rows, reward_fields):
+        return False
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), constrained_layout=True)
+
+    _plot_one(
+        axes[0],
+        x,
+        _series(rows, 'collect_mean_reward_total'),
+        'total',
+        'Reward total and score component',
+    )
+    _plot_one(
+        axes[0],
+        x,
+        _series(rows, 'collect_mean_score_reward'),
+        'score',
+        'Reward total and score component',
+    )
+
+    _plot_one(
+        axes[1],
+        x,
+        _series(rows, 'collect_mean_survival_bonus'),
+        'survival',
+        'Reward shaping components',
+    )
+    _plot_one(
+        axes[1],
+        x,
+        _series(rows, 'collect_mean_height_delta_reward'),
+        'height delta',
+        'Reward shaping components',
+    )
+    _plot_one(
+        axes[1],
+        x,
+        _series(rows, 'collect_mean_danger_penalty'),
+        'danger',
+        'Reward shaping components',
+    )
+    _plot_one(
+        axes[1],
+        x,
+        _series(rows, 'collect_mean_terminal_penalty'),
+        'terminal',
+        'Reward shaping components',
+    )
+
+    _plot_one(
+        axes[2],
+        x,
+        _series(rows, 'collect_mean_previous_height_ratio'),
+        'previous',
+        'Height ratios used by reward',
+    )
+    _plot_one(
+        axes[2],
+        x,
+        _series(rows, 'collect_mean_next_height_ratio'),
+        'next',
+        'Height ratios used by reward',
+    )
+    _plot_one(
+        axes[2],
+        x,
+        _series(rows, 'collect_mean_height_delta_ratio'),
+        'delta',
+        'Height ratios used by reward',
+    )
+
+    for axis in axes:
+        axis.set_xlabel('update')
+        axis.grid(True, alpha=0.25)
+        if axis.get_legend_handles_labels()[0]:
+            axis.legend(loc='best')
+
+    output_path = run_dir / 'plots' / 'reward_breakdown_curves.png'
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return True
+
+
+def _has_any_points(rows, fields):
+    """判断指定字段中是否至少存在一个可绘制的数值。"""
+
+    for row in rows:
+        for field in fields:
+            if row.get(field, '') not in ('', None):
+                return True
+    return False
 
 
 def _plot_one(axis, x_values, y_values, label, title):
@@ -626,6 +838,10 @@ def print_log(row):
         parts.append(f"eval_max={float(row['eval_score_max']):.1f}")
     if row.get('best_eval_score') not in ('', None):
         parts.append(f"best_eval={float(row['best_eval_score']):.1f}")
+    if row.get('collect_mean_reward_total') not in ('', None):
+        parts.append(f"r_total={float(row['collect_mean_reward_total']):+.3f}")
+        parts.append(f"r_score={float(row['collect_mean_score_reward']):+.3f}")
+        parts.append(f"r_danger={float(row['collect_mean_danger_penalty']):+.3f}")
 
     print(' | '.join(parts), flush=True)
 
@@ -693,7 +909,7 @@ def build_metric_row(
         collect_stats.mean_episode_score if collect_stats.episodes > 0 else ''
     )
 
-    return {
+    row = {
         'update_step': update_step,
         'env_steps': env_steps,
         'epsilon': epsilon,
@@ -725,6 +941,15 @@ def build_metric_row(
         'updates_per_second': update_step / elapsed,
         'env_steps_per_second': env_steps / elapsed,
     }
+
+    for reward_field, metric_field in REWARD_BREAKDOWN_METRIC_FIELDS:
+        row[metric_field] = (
+            collect_stats.mean_reward_breakdown(reward_field)
+            if collect_stats.steps > 0
+            else ''
+        )
+
+    return row
 
 
 def train(args):
@@ -777,6 +1002,7 @@ def train(args):
     latest_row = None
     best_eval_score = float('-inf')
     best_eval_update = 0
+    metric_window = CollectStatsWindow()
 
     print(f'run_dir={run_dir}', flush=True)
     print(f'device={device} matplotlib_output={run_dir / "plots" / "training_curves.png"}', flush=True)
@@ -828,6 +1054,7 @@ def train(args):
             collect_start_env_steps = env_steps
             collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
             env_steps += collect_stats.steps
+            metric_window.add(collect_stats)
             episode_metrics.log_collect_stats(
                 collect_stats,
                 phase='train',
@@ -867,18 +1094,22 @@ def train(args):
                     best_updated = True
 
             if should_log or should_eval or should_save or should_plot or update_step == args.total_updates:
+                # metrics.csv 中的 collect_* 字段代表“距离上一行日志以来”的窗口平均，
+                # 比只记录最后一次投放更适合观察 reward breakdown 的趋势。
+                logged_collect_stats = metric_window.to_rollout_stats(buffer_size=len(replay_buffer))
                 latest_row = build_metric_row(
                     update_step=update_step,
                     env_steps=env_steps,
                     epsilon=epsilon,
                     train_stats=train_stats,
-                    collect_stats=collect_stats,
+                    collect_stats=logged_collect_stats,
                     eval_stats=eval_stats,
                     best_eval_score=best_eval_score,
                     best_eval_update=best_eval_update,
                     timing={'elapsed': time.perf_counter() - start_time},
                 )
                 metrics.log(latest_row)
+                metric_window.reset()
 
                 if should_log or should_eval:
                     print_log(latest_row)
