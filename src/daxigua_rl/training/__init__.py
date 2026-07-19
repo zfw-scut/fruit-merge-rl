@@ -15,6 +15,7 @@ __all__ = [
     'DQNTrainerConfig',
     'DQNTrainStats',
     'EpsilonGreedyPolicy',
+    'ParallelRolloutCollector',
     'ReplayBuffer',
     'RolloutCollector',
     'RolloutStats',
@@ -34,6 +35,11 @@ def __getattr__(name):
             'RolloutStats': RolloutStats,
         }
         return exports[name]
+
+    if name == 'ParallelRolloutCollector':
+        from .parallel_collector import ParallelRolloutCollector
+
+        return ParallelRolloutCollector
 
     if name in {'DQNTrainer', 'DQNTrainerConfig', 'DQNTrainStats'}:
         from .dqn import DQNTrainer, DQNTrainerConfig, DQNTrainStats

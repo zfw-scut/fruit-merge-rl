@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import torch
@@ -84,6 +85,27 @@ class DQNTrainStats:
     # 本次更新后是否同步了 target network。
     target_synced: bool
 
+    # 从 ReplayBuffer 随机采样 batch 的耗时，单位秒。
+    sample_seconds: float = 0.0
+
+    # 当前状态图 batch 拼接耗时，单位秒。
+    current_collate_seconds: float = 0.0
+
+    # online_model 当前 Q 前向耗时，单位秒。
+    online_forward_seconds: float = 0.0
+
+    # target_model 下一状态 Q 和 TD target 计算耗时，单位秒。
+    target_compute_seconds: float = 0.0
+
+    # loss.backward() 反向传播耗时，单位秒。
+    backward_seconds: float = 0.0
+
+    # 梯度裁剪、optimizer.step() 和 target 同步耗时，单位秒。
+    optimizer_seconds: float = 0.0
+
+    # train_step 整体耗时，单位秒。
+    train_step_seconds: float = 0.0
+
 
 class DQNTrainer:
     """标准 DQN 单步更新器。
@@ -151,13 +173,16 @@ class DQNTrainer:
     def train_step(self):
         """执行一次 DQN 参数更新，并返回训练统计。"""
 
+        train_step_start = time.perf_counter()
         if not self.is_ready():
             raise ValueError(
                 f'replay buffer has {len(self.replay_buffer)} items, '
                 f'but batch_size={self.config.batch_size}'
             )
 
+        sample_start = time.perf_counter()
         batch = self.replay_buffer.sample(self.config.batch_size)
+        sample_seconds = time.perf_counter() - sample_start
         for transition in batch:
             if not isinstance(transition, TensorTransition):
                 raise TypeError(
@@ -170,12 +195,21 @@ class DQNTrainer:
         self.target_model.eval()
 
         # 把 batch 内所有当前状态图拼成一张不连通大图，只做一次 online forward。
+        current_collate_start = time.perf_counter()
         current_graph_batch = collate_graph_tensors(transition.graph for transition in batch)
+        current_collate_seconds = time.perf_counter() - current_collate_start
+
+        online_forward_start = time.perf_counter()
         current_q_flat = self.online_model(current_graph_batch)
+        self._synchronize_model_device()
+        online_forward_seconds = time.perf_counter() - online_forward_start
         current_q_tensor = self._select_current_q(current_q_flat, current_graph_batch, batch)
 
         # target 同样批量计算：所有可 bootstrap 的 next_graph 拼成一张不连通大图。
+        target_start = time.perf_counter()
         target_tensor, bootstrap_count = self._compute_target_values(batch, current_q_tensor)
+        self._synchronize_model_device()
+        target_compute_seconds = time.perf_counter() - target_start
         rewards = [float(transition.reward) for transition in batch]
 
         # TD error = 当前 Q 预测 - 训练目标。
@@ -183,14 +217,20 @@ class DQNTrainer:
         loss = self.loss_fn(current_q_tensor, target_tensor)
 
         self.optimizer.zero_grad(set_to_none=True)
+        backward_start = time.perf_counter()
         loss.backward()
+        self._synchronize_model_device()
+        backward_seconds = time.perf_counter() - backward_start
 
         # 先计算/裁剪梯度，再更新 online_model。
+        optimizer_start = time.perf_counter()
         grad_norm = self._clip_or_measure_grad_norm()
         self.optimizer.step()
 
         self._update_step += 1
         target_synced = self._maybe_sync_target_model()
+        self._synchronize_model_device()
+        optimizer_seconds = time.perf_counter() - optimizer_start
 
         with torch.no_grad():
             td_error = current_q_tensor.detach() - target_tensor.detach()
@@ -205,6 +245,13 @@ class DQNTrainer:
                 batch_size=len(batch),
                 grad_norm=float(grad_norm.detach().cpu().item()),
                 target_synced=target_synced,
+                sample_seconds=sample_seconds,
+                current_collate_seconds=current_collate_seconds,
+                online_forward_seconds=online_forward_seconds,
+                target_compute_seconds=target_compute_seconds,
+                backward_seconds=backward_seconds,
+                optimizer_seconds=optimizer_seconds,
+                train_step_seconds=time.perf_counter() - train_step_start,
             )
 
         return stats
@@ -324,6 +371,16 @@ class DQNTrainer:
 
         self.sync_target_model()
         return True
+
+    def _synchronize_model_device(self):
+        """如果模型在 CUDA 上，等待当前设备计算完成以获得可信耗时。"""
+
+        try:
+            device = next(self.online_model.parameters()).device
+        except StopIteration:
+            return
+        if device.type == 'cuda' and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
 
     def _freeze_target_model(self):
         """冻结 target_model 参数，防止它参与反向传播或 optimizer 更新。"""

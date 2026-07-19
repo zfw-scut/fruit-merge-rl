@@ -1,6 +1,6 @@
 # 项目文件索引
 
-最后更新：2026-07-01
+最后更新：2026-07-20
 
 ## 项目定位
 
@@ -29,15 +29,20 @@
 | `src/daxigua_rl/graph/tensor.py` | PyTorch 张量转换层。把框架无关 `GraphData` 转成单图 `GraphTensor`，并把多张图拼成不连通 `GraphBatch`。 | `graph_to_tensor()`、`collate_graph_tensors()`、`GraphTensor`、`GraphBatch` |
 | `src/daxigua_rl/models/` | 强化学习模型代码。当前只包含最小 GNN-Q 前向模型，不包含训练循环。 | `GNNQNetwork` |
 | `src/daxigua_rl/models/gnn_q.py` | 统一图 message passing Q 网络。输入 `GraphData`、`GraphTensor` 或 `GraphBatch`，输出单图或批量扁平动作 Q 值。 | `GNNQNetwork.forward()`、`MessagePassingLayer` |
-| `src/daxigua_rl/training/` | 强化学习训练侧数据结构和后续训练组件目录。当前包含张量化经验记录、回放池、单进程采集器和 DQN 更新器。 | `TensorTransition`、`ReplayBuffer`、`RolloutCollector`、`DQNTrainer` |
+| `src/daxigua_rl/training/` | 强化学习训练侧数据结构和后续训练组件目录。当前包含张量化经验记录、分层回放池、单进程/多进程采集器和 DQN 更新器。 | `TensorTransition`、`ReplayBuffer`、`RolloutCollector`、`ParallelRolloutCollector`、`DQNTrainer` |
 | `src/daxigua_rl/training/tensor_transition.py` | DQN 张量化经验记录。保存 CPU `GraphTensor`，用于正式训练主链路和 GraphBatch 拼接。 | `TensorTransition` |
-| `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。保存经验对象，容量满后覆盖最旧经验，并支持均匀随机采样。 | `ReplayBuffer` |
-| `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。使用 epsilon-greedy 动作选择让模型或随机策略游玩无渲染环境，并把 CPU `TensorTransition` 写入 `ReplayBuffer`。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
-| `src/daxigua_rl/training/dqn.py` | 标准 DQN 单步更新器。从 `ReplayBuffer` 采样，拼接 `GraphBatch`，计算 TD target 和 SmoothL1Loss，更新 online Q 网络，并定期同步 target network。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
+| `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。小实验默认纯内存；大容量训练可使用热内存 + 冷磁盘分层存储，并对冷段中的共享图做去重。 | `ReplayBuffer` |
+| `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。使用 epsilon-greedy 动作选择让模型或随机策略游玩无渲染环境，复用上一轮 `next_graph`，并把 CPU `TensorTransition` 写入 `ReplayBuffer`。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
+| `src/daxigua_rl/training/parallel_collector.py` | 多进程 rollout 调度器。每个 worker 独立持有 headless 环境和 CPU 模型，主进程负责同步模型、收集 transition、写 replay，可配合训练入口做异步预采样。 | `ParallelRolloutCollector` |
+| `src/daxigua_rl/training/dqn.py` | 标准 DQN 单步更新器。从 `ReplayBuffer` 采样，拼接 `GraphBatch`，计算 TD target 和 SmoothL1Loss，更新 online Q 网络，并记录训练阶段 profiling。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
 | `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、观看、导出等入口。 | `train_dqn.py`、`watch_dqn.py` |
-| `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和 matplotlib 曲线图；同时记录 reward breakdown 窗口均值并生成独立奖励组成曲线。 | `python -m daxigua_rl.scripts.train_dqn`；输出 `metrics.csv`、`episode_metrics.csv`、`plots/training_curves.png`、`plots/reward_breakdown_curves.png`。 |
+| `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和 matplotlib 曲线图；支持 `fast30` 物理模式、多进程并行采样、异步预采样、分层 replay 和 profiling 日志。 | `python -m daxigua_rl.scripts.train_dqn`；输出 `metrics.csv`、`episode_metrics.csv`、`plots/training_curves.png`、`plots/reward_breakdown_curves.png`。 |
 | `src/daxigua_rl/scripts/watch_dqn.py` | 第一版 DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。用于测试降低 fps、最大物理帧、稳定帧和 Pymunk 迭代次数后的速度收益与游戏分布偏移。 | `python -m daxigua_rl.scripts.compare_physics_modes --checkpoint ...`；输出 `summary.csv`、`episode_metrics.csv` 和 `plots/physics_mode_comparison.png`。 |
+| `configs/` | 项目配置文件目录。用于存放训练、实验或运行参数配置。 | `train_dqn_fast30_parallel.toml` |
+| `configs/train_dqn_fast30_parallel.toml` | DQN fast30 并行训练参数配置。用 TOML 记录选项和值，避免维护超长命令。 | 由 `train_dqn.py --config` 或 `scripts/train_dqn.sh` 读取。 |
+| `scripts/` | 项目级启动脚本目录。只放薄启动器，具体训练参数放在 `configs/`。 | `train_dqn.sh` |
+| `scripts/train_dqn.sh` | DQN 训练启动器。默认读取 `configs/train_dqn_fast30_parallel.toml`，设置 `PYTHONPATH`，通过 `python-torch` conda 环境启动训练并 tee 日志。 | `./scripts/train_dqn.sh` |
 
 ## 资源和说明
 
@@ -61,7 +66,7 @@
 
 | 路径 | 作用 | 备注 |
 | --- | --- | --- |
-| `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向与单图前向一致，并确认 collector/trainer 可以写入和训练 `TensorTransition`。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
+| `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向、next_graph 缓存、分层 replay、并行 collector 和 DQN 更新链路。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
 | `tests/test_epsilon_schedule.py` | epsilon 衰减曲线测试。验证 smooth schedule 的关键锚点、单调性，以及 linear schedule 的旧行为。 | 使用标准库 `unittest`。 |
 | `tests/test_training_metrics.py` | 训练指标测试。验证 episode 结束事件会逐局写入 `episode_metrics.csv`，并验证评估会返回最高/最低分。 | 使用标准库 `unittest`。 |
 
@@ -111,13 +116,16 @@
 - `collate_graph_tensors()`：把多张 `GraphTensor` 拼成不连通 `GraphBatch`，记录每张图的 action slice。
 - `GNNQNetwork`：当前 GNN-Q 前向模型，输入单图输出 `[action_count]`，输入 `GraphBatch` 输出 `[total_action_count]`。
 - `TensorTransition`：正式训练主链路唯一使用的张量化经验记录，保存 CPU `GraphTensor`，图特征固定以 `float16` 存储以降低 replay 常驻内存。
-- `ReplayBuffer`：固定容量经验回放池，默认保存十万条经验对象，采样时返回原始对象元组。
-- `RolloutCollector`：单进程经验采集器，串联 `DaxiguaEnv`、`GraphBuilder`、Q 网络和 `ReplayBuffer`，用于收集张量化训练经验。
-- `DQNTrainer`：标准 DQN 单步更新器，使用 GraphBatch、online/target 双网络、SmoothL1Loss 和梯度裁剪更新 Q 网络。
-- `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`episode_metrics.csv`、`checkpoints/latest.pt`、`checkpoints/best.pt`、`plots/training_curves.png` 和 `plots/reward_breakdown_curves.png`；`metrics.csv` 中的 reward breakdown 字段按日志窗口求均值，便于观察奖励设置是否被某一项主导。
+- `ReplayBuffer`：固定容量经验回放池，支持纯内存和热内存 + 冷磁盘两种模式；正式大规模训练默认只让最新一部分经验常驻内存。
+- `RolloutCollector`：单进程经验采集器，串联 `DaxiguaEnv`、`GraphBuilder`、Q 网络和 `ReplayBuffer`，用于收集张量化训练经验，并复用上一轮 `next_graph`。
+- `ParallelRolloutCollector`：多进程经验采集器，多个 worker 并行推进 headless 物理，主进程统一写 replay；可通过训练脚本的 `--async-rollout` 与 DQN 更新重叠。
+- `DQNTrainer`：标准 DQN 单步更新器，使用 GraphBatch、online/target 双网络、SmoothL1Loss 和梯度裁剪更新 Q 网络，并记录采样、前向、target、反向和优化器耗时。
+- `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`episode_metrics.csv`、`checkpoints/latest.pt`、`checkpoints/best.pt`、`plots/training_curves.png` 和 `plots/reward_breakdown_curves.png`；`metrics.csv` 中的 reward breakdown 字段按日志窗口求均值，另包含训练性能 profiling 和 replay 分层状态。
 - `board_game_state()` / `board_action_candidates()`：把原 pygame `Board` 的实时局面转换成 RL 图构建所需的数据结构。
 - `watch_dqn.py`：第一版模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `compare_physics_modes.py`：物理模式对比入口，用已有 checkpoint 或随机策略比较 accurate 与 fast 模式的速度、分数、局长、物理帧、合成频率和截断率。
+- `configs/train_dqn_fast30_parallel.toml`：正式 DQN 训练参数配置，集中维护 run 目录、训练规模、replay、epsilon、模型、并行采样、reward、评估保存和进度参数。
+- `scripts/train_dqn.sh`：TOML 配置启动器，默认读取 `configs/train_dqn_fast30_parallel.toml`，也可以传入其它配置文件路径。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 

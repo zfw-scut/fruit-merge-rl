@@ -9,7 +9,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from daxigua_rl.models import GNNQNetwork
-from daxigua_rl.scripts.train_dqn import EpisodeLogger, build_metric_row, evaluate_policy
+from daxigua_rl.scripts.train_dqn import (
+    EpisodeLogger,
+    build_metric_row,
+    evaluate_policy,
+    load_config_defaults,
+    parse_args,
+)
 from daxigua_rl.training.collector import RolloutStats
 
 
@@ -128,6 +134,57 @@ class TrainingMetricsTest(unittest.TestCase):
         self.assertEqual(row['collect_mean_score_reward'], 2.0)
         self.assertEqual(row['collect_mean_danger_penalty'], -0.25)
         self.assertAlmostEqual(row['collect_mean_next_height_ratio'], 0.35)
+
+    def test_toml_config_loads_defaults_and_cli_can_override(self):
+        """TOML 配置应能提供默认参数，命令行显式参数应优先。"""
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / 'train.toml'
+            config_path.write_text(
+                '\n'.join((
+                    '[runtime]',
+                    'run_dir = "runs/from_config"',
+                    'device = "cuda"',
+                    '',
+                    '[training]',
+                    'total_updates = 100',
+                    'batch_size = 64',
+                    '',
+                    '[parallel]',
+                    'num_envs = 4',
+                    'async_rollout = true',
+                )),
+                encoding='utf-8',
+            )
+
+            args = parse_args((
+                '--config',
+                str(config_path),
+                '--total-updates',
+                '20',
+                '--no-async-rollout',
+            ))
+
+        self.assertEqual(args.config, str(config_path))
+        self.assertEqual(args.run_dir, 'runs/from_config')
+        self.assertEqual(args.device, 'cuda')
+        self.assertEqual(args.total_updates, 20)
+        self.assertEqual(args.batch_size, 64)
+        self.assertEqual(args.num_envs, 4)
+        self.assertFalse(args.async_rollout)
+
+    def test_toml_config_rejects_unknown_keys(self):
+        """TOML 配置里写错字段名时应直接报错。"""
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / 'bad.toml'
+            config_path.write_text(
+                '[training]\nunknown_option = 1\n',
+                encoding='utf-8',
+            )
+
+            with self.assertRaises(ValueError):
+                load_config_defaults(config_path)
 
 
 if __name__ == '__main__':
