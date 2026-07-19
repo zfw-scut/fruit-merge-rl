@@ -35,7 +35,7 @@
 | `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。使用 epsilon-greedy 动作选择让模型或随机策略游玩无渲染环境，并把 CPU `TensorTransition` 写入 `ReplayBuffer`。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
 | `src/daxigua_rl/training/dqn.py` | 标准 DQN 单步更新器。从 `ReplayBuffer` 采样，拼接 `GraphBatch`，计算 TD target 和 SmoothL1Loss，更新 online Q 网络，并定期同步 target network。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
 | `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、观看、导出等入口。 | `train_dqn.py`、`watch_dqn.py` |
-| `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和 matplotlib 曲线图。 | `python -m daxigua_rl.scripts.train_dqn`；ReplayBuffer 图特征固定以 `float16` 长期存储以降低内存。 |
+| `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和 matplotlib 曲线图；同时记录 reward breakdown 窗口均值并生成独立奖励组成曲线。 | `python -m daxigua_rl.scripts.train_dqn`；输出 `metrics.csv`、`episode_metrics.csv`、`plots/training_curves.png`、`plots/reward_breakdown_curves.png`。 |
 | `src/daxigua_rl/scripts/watch_dqn.py` | 第一版 DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 
 ## 资源和说明
@@ -112,7 +112,7 @@
 - `ReplayBuffer`：固定容量经验回放池，默认保存十万条经验对象，采样时返回原始对象元组。
 - `RolloutCollector`：单进程经验采集器，串联 `DaxiguaEnv`、`GraphBuilder`、Q 网络和 `ReplayBuffer`，用于收集张量化训练经验。
 - `DQNTrainer`：标准 DQN 单步更新器，使用 GraphBatch、online/target 双网络、SmoothL1Loss 和梯度裁剪更新 Q 网络。
-- `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`episode_metrics.csv`、`checkpoints/latest.pt`、`checkpoints/best.pt` 和 `plots/training_curves.png`；固定用 `float16` 长期存储 replay 图特征，模型前向时自动转回模型参数 dtype。
+- `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`episode_metrics.csv`、`checkpoints/latest.pt`、`checkpoints/best.pt`、`plots/training_curves.png` 和 `plots/reward_breakdown_curves.png`；`metrics.csv` 中的 reward breakdown 字段按日志窗口求均值，便于观察奖励设置是否被某一项主导。
 - `board_game_state()` / `board_action_candidates()`：把原 pygame `Board` 的实时局面转换成 RL 图构建所需的数据结构。
 - `watch_dqn.py`：第一版模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。

@@ -84,6 +84,20 @@ RewardConfig(
 
 `DaxiguaEnv.step()` 会在 `info["reward_breakdown"]` 中返回 `RewardBreakdown`，用于查看本次 reward 的组成。复杂奖励设计应继续放在 `daxigua_rl`，不要写回游戏规则层。
 
+训练入口会把采集窗口内的 reward breakdown 均值写入 `metrics.csv`：
+
+- `collect_mean_reward_total`
+- `collect_mean_score_reward`
+- `collect_mean_survival_bonus`
+- `collect_mean_height_delta_reward`
+- `collect_mean_danger_penalty`
+- `collect_mean_terminal_penalty`
+- `collect_mean_previous_height_ratio`
+- `collect_mean_next_height_ratio`
+- `collect_mean_height_delta_ratio`
+
+同时会在 `plots/reward_breakdown_curves.png` 中单独画出奖励组成和高度比例曲线，方便观察辅助奖励是否压过真实得分奖励。
+
 ## 状态数据
 
 当前 `GameState` 包含：
