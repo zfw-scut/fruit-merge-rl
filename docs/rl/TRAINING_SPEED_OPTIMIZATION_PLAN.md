@@ -27,7 +27,7 @@ stable_frames = 15
 space.iterations = 32
 ```
 
-fast 候选模式：
+fast 候选模式历史对比范围：
 
 ```text
 fps = 15 / 30 / 45
@@ -36,16 +36,27 @@ stable_frames = 6
 space.iterations = 8
 ```
 
-其中 `fast_30` 是当前倾向的训练候选配置，`fast_15` 和 `fast_45` 用于观察速度和行为偏移边界。
+经过对比后，当前大规模训练默认建议使用 `fast30`：
+
+```text
+fps = 30
+max_physics_frames = 240
+stable_frames = 6
+space.iterations = 8
+```
+
+`max_physics_frames` 从对比脚本候选的 200 放宽到 240，用一点上限换取更稳的落稳余量。
 
 ## 优化优先级
 
-1. profiling 日志：记录采集、构图、物理、训练、评估、绘图等阶段耗时，避免凭感觉优化。
-2. next_graph 缓存：非终止 transition 的 `next_graph` 可在下一轮作为当前图复用，减少重复构图。
-3. 并行采样：多个 headless 环境独立采集经验，主进程集中训练，让 CPU 多核和 GPU 更充分工作。
-4. fast physics：降低 `max_physics_frames`、`stable_frames`、`space.iterations` 和训练物理 `fps`。
-5. 图构建优化：减少 `GraphData -> GraphTensor` 的中间对象和重复 Python list/tuple 构造。
-6. 降低评估、绘图、保存频率：减少非训练计算，但保留实时进度输出和 ETA。
+1. 已完成：profiling 日志。记录采集、构图、张量转换、动作选择、环境 step、训练、采样、前向、target、反向、优化器、评估、保存、绘图等阶段耗时。
+2. 已完成：next_graph 缓存。非终止 transition 的 `next_graph` 在下一轮作为当前图复用，减少重复构图。
+3. 已完成：并行采样。多个 headless 环境在独立 worker 进程中采集经验，主进程集中写 replay 和训练。
+4. 已完成：fast physics。训练脚本新增 `--physics-mode fast30`，自动使用当前确认的 30fps 快速物理参数。
+5. 已完成：图构建轻量优化。`GraphBuilder` 缓存特征列索引，减少每个节点/边构造完整 dict 的开销。
+6. 已完成：降低评估、绘图、保存频率。默认周期改为更适合长训的低频设置，同时保留 3 秒一次实时进度和 ETA。
+7. 已完成：ReplayBuffer 内存优化。默认大容量训练使用热内存 + 冷磁盘，并在冷段写入时对共享 `GraphTensor` 做段内去重。
+8. 已完成：异步采样入口。`--async-rollout` 可以让下一批并行采样在当前 DQN 参数更新时提前运行。
 
 ## 当前新增工具
 
@@ -75,3 +86,36 @@ fast 模式是否可用于训练，不能只看速度，还要看分布是否明
 - 最终堆叠高度和水果数量是否明显不同。
 
 如果 `fast_30` 速度提升明显，且分数、局长、合成频率、截断率没有明显异常，可以作为大规模训练默认候选；否则仅用于前期快速试验或预训练。
+
+## 训练入口相关参数
+
+`train_dqn.py` 当前与性能直接相关的参数：
+
+- `--physics-mode fast30`: 使用 30fps 快速 headless 物理参数。
+- `--num-envs N`: 开启 N 个并行采样 worker；建议先从 CPU 物理核心数量的一半到相等范围试起。
+- `--collect-per-update M`: 每次 DQN 更新前采集多少次投放；并行采样时建议设为 `num_envs` 的整数倍。
+- `--async-rollout`: 并行采样时提前提交下一批采样，使采样与训练尽量重叠。
+- `--hot-replay-capacity`: 常驻内存的新经验数量；默认 `min(10000, replay_capacity)`。
+- `--replay-cold-dir`: 冷 replay 磁盘目录；默认 `run_dir/replay_cold`。
+- `--replay-cold-sample-ratio`: 每个 batch 期望来自冷 replay 的比例，默认 `0.25`。
+- `--progress-interval`: 实时进度心跳间隔，默认 3 秒。
+
+长训推荐直接使用 TOML 配置启动：
+
+```bash
+./scripts/train_dqn.sh
+```
+
+默认配置文件是：
+
+```text
+configs/train_dqn_fast30_parallel.toml
+```
+
+如果内存仍然紧张，优先降低 `hot_replay_capacity` 和 `batch_size`；如果 CPU 仍然是瓶颈，再调大 `num_envs` 或 `collect_per_update`。
+
+临时覆盖少量参数时，可以在启动命令后追加普通命令行参数：
+
+```bash
+./scripts/train_dqn.sh configs/train_dqn_fast30_parallel.toml --total-updates 200000
+```

@@ -12,6 +12,7 @@ RolloutCollector 负责把当前已经完成的几个训练零件串起来：
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass, field
 
 import torch
@@ -87,6 +88,39 @@ class RolloutStats:
     # 当前未完成 episode 已累计投放次数。
     current_episode_length: int = 0
 
+    # 构建 GraphData 的累计耗时，单位秒。
+    graph_build_seconds: float = 0.0
+
+    # collect_steps 调用整体耗时，单位秒。
+    collect_seconds: float = 0.0
+
+    # GraphData 转 GraphTensor 的累计耗时，单位秒。
+    tensor_convert_seconds: float = 0.0
+
+    # epsilon-greedy 动作选择累计耗时，包含 greedy 分支的模型前向。
+    action_select_seconds: float = 0.0
+
+    # 环境 step 累计耗时，包含投放、物理推进、状态快照和 reward 计算。
+    env_step_seconds: float = 0.0
+
+    # 环境实际推进的物理帧总数，用于判断 fast physics 是否生效。
+    physics_frames_total: int = 0
+
+    # 每个采集 step 后场上水果数量的累计值。
+    fruit_count_total: int = 0
+
+    # 每个采集 step 对应当前图节点数量的累计值。
+    graph_node_count_total: int = 0
+
+    # 每个采集 step 对应当前图边数量的累计值。
+    graph_edge_count_total: int = 0
+
+    # 当前图直接复用上一轮 next_graph 的次数。
+    graph_cache_hits: int = 0
+
+    # 当前图需要重新构建的次数。
+    graph_cache_misses: int = 0
+
     @property
     def mean_episode_reward(self):
         """本次已结束 episode 的平均 reward；没有结束 episode 时返回 0。"""
@@ -123,6 +157,38 @@ class RolloutStats:
         if self.steps <= 0:
             return 0.0
         return self.reward_breakdown_totals_dict.get(field_name, 0.0) / self.steps
+
+    @property
+    def mean_physics_frames(self):
+        """平均每次投放推进多少物理帧。"""
+
+        if self.steps <= 0:
+            return 0.0
+        return self.physics_frames_total / self.steps
+
+    @property
+    def mean_fruit_count(self):
+        """平均每次投放后场上有多少水果。"""
+
+        if self.steps <= 0:
+            return 0.0
+        return self.fruit_count_total / self.steps
+
+    @property
+    def mean_graph_nodes(self):
+        """平均当前状态图节点数。"""
+
+        if self.steps <= 0:
+            return 0.0
+        return self.graph_node_count_total / self.steps
+
+    @property
+    def mean_graph_edges(self):
+        """平均当前状态图边数。"""
+
+        if self.steps <= 0:
+            return 0.0
+        return self.graph_edge_count_total / self.steps
 
 
 class EpsilonGreedyPolicy:
@@ -219,6 +285,7 @@ class RolloutCollector:
         # collect_steps 第一次调用时如果发现它们为空，会自动 reset。
         self._obs = None
         self._info = None
+        self._current_graph = None
         self._episode_reward = 0.0
         self._episode_length = 0
 
@@ -230,6 +297,7 @@ class RolloutCollector:
         """
 
         self._obs, self._info = self.env.reset(seed=seed, fruit_queue=fruit_queue)
+        self._current_graph = None
         self._episode_reward = 0.0
         self._episode_length = 0
         return self._obs, self._info
@@ -274,6 +342,7 @@ class RolloutCollector:
     def _collect_steps_impl(self, step_count, epsilon):
         """`collect_steps()` 的主体实现。"""
 
+        collect_start = time.perf_counter()
         steps = 0
         total_reward = 0.0
         episode_rewards = []
@@ -290,6 +359,16 @@ class RolloutCollector:
             field_name: 0.0
             for field_name in REWARD_BREAKDOWN_FIELDS
         }
+        graph_build_seconds = 0.0
+        tensor_convert_seconds = 0.0
+        action_select_seconds = 0.0
+        env_step_seconds = 0.0
+        physics_frames_total = 0
+        fruit_count_total = 0
+        graph_node_count_total = 0
+        graph_edge_count_total = 0
+        graph_cache_hits = 0
+        graph_cache_misses = 0
 
         while steps < step_count:
             candidates = tuple(self._info['action_candidates'])
@@ -298,30 +377,51 @@ class RolloutCollector:
                 self.reset()
                 continue
 
-            graph_data = self.graph_builder.build(self._obs, candidates)
-            graph = graph_to_tensor(graph_data, dtype=REPLAY_GRAPH_DTYPE)
+            if self._current_graph is None:
+                graph, build_seconds, convert_seconds = self._build_graph_tensor(self._obs, candidates)
+                graph_build_seconds += build_seconds
+                tensor_convert_seconds += convert_seconds
+                graph_cache_misses += 1
+            else:
+                # 上一轮已经为了 DQN bootstrap 构建了 next_graph；
+                # 当前轮的状态正是上一轮 next_state，因此可以直接复用同一张图。
+                graph = self._current_graph
+                graph_cache_hits += 1
+
             action_count = len(candidates)
             self._validate_action_count(graph, action_count)
+            graph_node_count_total += graph.num_nodes
+            graph_edge_count_total += graph.num_edges
 
+            action_select_start = time.perf_counter()
             action_offset, used_random = self._select_action(
                 graph=graph,
                 action_count=action_count,
                 epsilon=epsilon,
             )
+            action_select_seconds += time.perf_counter() - action_select_start
 
+            env_step_start = time.perf_counter()
             next_obs, reward, terminated, truncated, next_info = self.env.step(action_offset)
+            env_step_seconds += time.perf_counter() - env_step_start
             done = terminated or truncated
             self._accumulate_reward_breakdown(
                 reward_breakdown_totals,
                 next_info.get('reward_breakdown'),
             )
+            physics_frames_total += int(next_info.get('frames_simulated', 0))
+            fruit_count_total += int(next_obs.fruit_count)
 
             # terminal/truncated transition 不 bootstrap，因此不强制构建 next_graph。
             # 非终止 transition 需要下一状态图，后续 DQN target 要读取 max_next_q。
             next_graph = None
             if not done:
-                next_graph_data = self.graph_builder.build(next_obs, next_info['action_candidates'])
-                next_graph = graph_to_tensor(next_graph_data, dtype=REPLAY_GRAPH_DTYPE)
+                next_graph, build_seconds, convert_seconds = self._build_graph_tensor(
+                    next_obs,
+                    next_info['action_candidates'],
+                )
+                graph_build_seconds += build_seconds
+                tensor_convert_seconds += convert_seconds
 
             transition = TensorTransition(
                 graph=graph,
@@ -360,6 +460,7 @@ class RolloutCollector:
             else:
                 self._obs = next_obs
                 self._info = next_info
+                self._current_graph = next_graph
 
         return RolloutStats(
             steps=steps,
@@ -382,7 +483,30 @@ class RolloutCollector:
             buffer_size=len(self.replay_buffer),
             current_episode_reward=self._episode_reward,
             current_episode_length=self._episode_length,
+            collect_seconds=time.perf_counter() - collect_start,
+            graph_build_seconds=graph_build_seconds,
+            tensor_convert_seconds=tensor_convert_seconds,
+            action_select_seconds=action_select_seconds,
+            env_step_seconds=env_step_seconds,
+            physics_frames_total=physics_frames_total,
+            fruit_count_total=fruit_count_total,
+            graph_node_count_total=graph_node_count_total,
+            graph_edge_count_total=graph_edge_count_total,
+            graph_cache_hits=graph_cache_hits,
+            graph_cache_misses=graph_cache_misses,
         )
+
+    def _build_graph_tensor(self, obs, candidates):
+        """构建当前状态图并转成 replay 长期保存用的 CPU tensor。"""
+
+        build_start = time.perf_counter()
+        graph_data = self.graph_builder.build(obs, candidates)
+        build_seconds = time.perf_counter() - build_start
+
+        convert_start = time.perf_counter()
+        graph = graph_to_tensor(graph_data, dtype=REPLAY_GRAPH_DTYPE)
+        convert_seconds = time.perf_counter() - convert_start
+        return graph, build_seconds, convert_seconds
 
     def _accumulate_reward_breakdown(self, totals, reward_breakdown):
         """把环境返回的单步 reward 明细累加到当前采集统计里。"""

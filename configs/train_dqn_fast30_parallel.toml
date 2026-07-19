@@ -1,0 +1,140 @@
+# 配置用途：DQN fast30 并行训练的正式参数集合。
+#
+# 字段规则：TOML 字段名和训练脚本参数一一对应。
+# 写法转换：命令行短横线参数在 TOML 中改成下划线，例如 --total-updates 对应 total_updates。
+
+[runtime]
+# 输出目录：保存 metrics、episode_metrics、checkpoint、plots 等训练产物。
+run_dir = "runs/dqn_fast30_parallel_h128_l3_100k"
+
+# 训练设备：模型参数更新使用的 PyTorch 设备，可选 "cuda"、"cuda:0" 或 "cpu"。
+device = "cuda"
+
+[training]
+# 更新次数：DQN 参数更新总次数；一次 update 是一次 batch 训练，不是一局游戏。
+total_updates = 500000
+
+# 预热经验：正式训练前随机采集多少条经验，用于填充 ReplayBuffer。
+warmup_steps = 5000
+
+# 每轮采集：每次参数更新前新采集多少次投放经验；并行时建议是 num_envs 的整数倍。
+collect_per_update = 8
+
+# 批大小：每次训练从 ReplayBuffer 采样多少条 transition。
+batch_size = 64
+
+[replay]
+# 总容量：ReplayBuffer 最多保留多少条经验。
+replay_capacity = 100000
+
+# 热数据容量：常驻内存的最新经验数量；旧经验会进入冷磁盘层。
+hot_replay_capacity = 8000
+
+# 冷段大小：冷磁盘 replay 每多少条 transition 写成一个段文件。
+replay_segment_size = 1024
+
+# 冷缓存容量：训练采样时缓存多少条冷 replay 到内存，减少频繁读盘。
+replay_cold_cache_size = 2048
+
+# 冷采样比例：每个 batch 中期望来自冷 replay 的比例。
+replay_cold_sample_ratio = 0.25
+
+# 冷缓存刷新：每多少次 sample 刷新一次冷 replay 缓存。
+replay_cold_cache_refresh_interval = 500
+
+[epsilon]
+# 衰减方式：smooth 按总训练进度平滑下降，linear 按 env_steps 线性下降。
+epsilon_schedule = "smooth"
+
+# 初始探索率：训练开始时随机选动作的概率。
+epsilon_start = 1.0
+
+# 最终探索率：训练后期保留的随机选动作概率。
+epsilon_end = 0.05
+
+# 线性衰减步数：仅 linear 模式使用，表示 epsilon 从 start 衰减到 end 需要的环境步数。
+epsilon_decay_steps = 50000
+
+[dqn]
+# 学习率：Adam 优化器的 learning rate。
+learning_rate = 1e-4
+
+# 折扣因子：未来奖励在 TD target 中的折扣权重。
+gamma = 0.99
+
+# 目标网络同步：target network 每多少次 update 同步一次 online network。
+target_update_interval = 1000
+
+# 梯度裁剪：限制梯度范数，防止训练初期 Q 值和梯度爆炸；0 表示关闭。
+grad_clip_norm = 10.0
+
+[model]
+# 隐藏维度：GNN hidden_dim；越大表达能力越强，但显存和计算开销越高。
+hidden_dim = 128
+
+# 消息层数：message passing 层数；越多能传播更远的图信息，但也更慢。
+message_layers = 3
+
+# Dropout：模型 dropout 概率；当前默认关闭。
+dropout = 0.0
+
+# 激活函数：GNN 内部 MLP 使用的激活函数，当前可选 "silu" 或 "relu"。
+activation = "silu"
+
+[environment]
+# 随机种子：控制环境、策略和 replay 采样的基础随机种子。
+seed = 0
+
+# 动作数量：离散投放候选动作数量。
+action_count = 15
+
+# 物理模式：fast30 会使用 30fps、较少稳定帧和较少 Pymunk 迭代次数。
+physics_mode = "fast30"
+
+[parallel]
+# 并行环境数：并行 headless 环境数量，建议根据 CPU 核心和内存压力调整。
+num_envs = 8
+
+# Worker 同步：并行 worker 每多少次 update 同步一次 online model 参数。
+worker_sync_interval = 100
+
+# 异步采样：是否让下一批 rollout 和当前 DQN 训练尽量重叠。
+async_rollout = true
+
+[reward]
+# 得分奖励：合成分数奖励的缩放系数。
+score_scale = 1.0
+
+# 存活奖励：未死亡 step 的小额奖励。
+survival_bonus = 0.05
+
+# 高度变化：堆叠变低给正反馈、变高给负反馈的权重。
+height_delta_weight = 0.02
+
+# 危险惩罚：场上水果越靠近顶部，持续惩罚越大。
+danger_height_weight = 1.0
+
+# 终局惩罚：游戏失败时给予的负奖励。
+terminal_penalty = -100.0
+
+[logging]
+# 训练日志：每多少次 update 写一行 metrics 并打印训练日志。
+log_interval = 500
+
+# 模型保存：每多少次 update 保存一次 step checkpoint；0 表示关闭周期保存。
+save_interval = 20000
+
+# 模型评估：每多少次 update 做一次 greedy 评估；0 表示关闭。
+eval_interval = 20000
+
+# 评估局数：每次评估跑多少局游戏。
+eval_episodes = 10
+
+# 评估步数：单局评估最多投放多少次，防止极端长局。
+eval_max_steps = 500
+
+# 曲线绘图：每多少次 update 生成一次曲线图；0 表示只在结束时尝试生成。
+plot_interval = 10000
+
+# 进度心跳：实时进度打印间隔，单位秒。
+progress_interval = 3

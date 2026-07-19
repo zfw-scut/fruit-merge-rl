@@ -77,6 +77,24 @@ class GraphBuilder:
     def __init__(self, config=None):
         self.config = config or GraphBuilderConfig()
         self.max_radius = max(FRUIT_RADII.values())
+        # 特征向量构造是训练采样中的高频路径。提前缓存“特征名 -> 列号”，
+        # 后续每个节点/边只需要修改少量非零列，避免反复创建完整字段字典。
+        self._node_feature_indices = {
+            feature_name: index
+            for index, feature_name in enumerate(NODE_FEATURE_NAMES)
+        }
+        self._edge_feature_indices = {
+            feature_name: index
+            for index, feature_name in enumerate(EDGE_FEATURE_NAMES)
+        }
+        self._node_type_feature_indices = {
+            node_type: self._node_feature_indices[feature_name]
+            for node_type, feature_name in NODE_TYPE_FEATURES.items()
+        }
+        self._edge_type_feature_indices = {
+            edge_type: self._edge_feature_indices[feature_name]
+            for edge_type, feature_name in EDGE_TYPE_FEATURES.items()
+        }
 
     def build(self, state, action_candidates):
         """构建一张 GNN 输入图。
@@ -275,10 +293,11 @@ class GraphBuilder:
         if unknown_names:
             raise KeyError(f'unknown node feature names: {sorted(unknown_names)}')
 
-        values = {name: 0.0 for name in NODE_FEATURE_NAMES}
-        values[NODE_TYPE_FEATURES[node_type]] = 1.0
-        values.update(feature_values)
-        return tuple(float(values[name]) for name in NODE_FEATURE_NAMES)
+        values = [0.0] * len(NODE_FEATURE_NAMES)
+        values[self._node_type_feature_indices[node_type]] = 1.0
+        for feature_name, feature_value in feature_values.items():
+            values[self._node_feature_indices[feature_name]] = float(feature_value)
+        return tuple(values)
 
     def _edge_vector(self, edge_type, feature_values):
         """把字典形式的边特征转成固定顺序的向量。"""
@@ -287,10 +306,11 @@ class GraphBuilder:
         if unknown_names:
             raise KeyError(f'unknown edge feature names: {sorted(unknown_names)}')
 
-        values = {name: 0.0 for name in EDGE_FEATURE_NAMES}
-        values[EDGE_TYPE_FEATURES[edge_type]] = 1.0
-        values.update(feature_values)
-        return tuple(float(values[name]) for name in EDGE_FEATURE_NAMES)
+        values = [0.0] * len(EDGE_FEATURE_NAMES)
+        values[self._edge_type_feature_indices[edge_type]] = 1.0
+        for feature_name, feature_value in feature_values.items():
+            values[self._edge_feature_indices[feature_name]] = float(feature_value)
+        return tuple(values)
 
     def _board_fruit_features(self, fruit, geometry):
         """生成场上水果节点特征。"""

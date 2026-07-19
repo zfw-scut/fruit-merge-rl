@@ -280,7 +280,10 @@ def collate_graph_tensors(graphs, device=None, dtype=None):
         if graph.action_count <= 0:
             raise ValueError('each graph must contain at least one action node')
 
-        graph = graph.to(device=device, dtype=dtype)
+        # 训练主链路中大多数 GraphTensor 已经在 CPU/float16 上，collate 时通常
+        # 不需要额外转换；避免每张图都创建一个临时 GraphTensor 包装对象。
+        if device is not None or dtype is not None:
+            graph = graph.to(device=device, dtype=dtype)
 
         node_start = node_offset
         node_end = node_start + graph.num_nodes

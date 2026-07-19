@@ -8,8 +8,8 @@
 
     RolloutCollector -> ReplayBuffer -> DQNTrainer -> checkpoint/metrics/plots
 
-它仍然是同步单进程训练脚本，不包含多进程采样、Double DQN 或 TensorBoard。
-当前 DQN 更新器已经使用 GraphBatch 执行批量图前向。
+当前 DQN 更新器已经使用 GraphBatch 执行批量图前向；当 `--num-envs > 1`
+时，rollout 采集可以切换为多进程 headless 环境并行。
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS, RewardConfig
 from daxigua_rl.training import (
     DQNTrainer,
     DQNTrainerConfig,
+    ParallelRolloutCollector,
     RolloutCollector,
     RolloutStats,
 )
@@ -79,6 +80,32 @@ METRIC_FIELDS = (
     'collect_mean_previous_height_ratio',
     'collect_mean_next_height_ratio',
     'collect_mean_height_delta_ratio',
+    'collect_seconds',
+    'collect_graph_build_seconds',
+    'collect_tensor_convert_seconds',
+    'collect_action_select_seconds',
+    'collect_env_step_seconds',
+    'collect_mean_physics_frames',
+    'collect_mean_fruit_count',
+    'collect_mean_graph_nodes',
+    'collect_mean_graph_edges',
+    'collect_graph_cache_hit_rate',
+    'train_step_seconds',
+    'replay_sample_seconds',
+    'current_collate_seconds',
+    'online_forward_seconds',
+    'target_compute_seconds',
+    'backward_seconds',
+    'optimizer_seconds',
+    'eval_seconds',
+    'save_seconds',
+    'plot_seconds',
+    'replay_mode',
+    'replay_hot_count',
+    'replay_cold_count',
+    'replay_pending_cold_count',
+    'replay_cold_segments',
+    'replay_cold_cache_count',
     'random_actions',
     'greedy_actions',
     'eval_score_mean',
@@ -107,10 +134,27 @@ EPISODE_METRIC_FIELDS = (
 )
 
 
-def parse_args():
+def parse_args(argv=None):
     """解析训练命令行参数。"""
 
+    parser = build_arg_parser()
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument('--config', default=None)
+    config_args, remaining_args = config_parser.parse_known_args(argv)
+
+    if config_args.config:
+        config_defaults = load_config_defaults(config_args.config, parser)
+        parser.set_defaults(**config_defaults)
+        parser.set_defaults(config=config_args.config)
+
+    return parser.parse_args(remaining_args)
+
+
+def build_arg_parser():
+    """创建训练命令行参数解析器。"""
+
     parser = argparse.ArgumentParser(description='训练第一版 GNN-DQN 合成大西瓜智能体。')
+    parser.add_argument('--config', default=None, help='从 TOML 文件读取训练参数，命令行显式参数会覆盖配置文件。')
 
     # 训练规模。
     parser.add_argument('--total-updates', type=int, default=10_000, help='总共执行多少次 DQN 参数更新。')
@@ -118,6 +162,12 @@ def parse_args():
     parser.add_argument('--collect-per-update', type=int, default=1, help='每次参数更新前收集多少条新经验。')
     parser.add_argument('--batch-size', type=int, default=32, help='每次 train_step 从 ReplayBuffer 采样多少条经验。')
     parser.add_argument('--replay-capacity', type=int, default=100_000, help='ReplayBuffer 最大容量。')
+    parser.add_argument('--hot-replay-capacity', type=int, default=None, help='常驻内存的最新 replay 数量；默认 min(10000, replay_capacity)。')
+    parser.add_argument('--replay-cold-dir', default=None, help='冷 replay 磁盘目录；默认 run_dir/replay_cold。')
+    parser.add_argument('--replay-segment-size', type=int, default=1024, help='冷 replay 每多少条 transition 写一个段文件。')
+    parser.add_argument('--replay-cold-cache-size', type=int, default=4096, help='训练采样时最多缓存多少条冷 replay。')
+    parser.add_argument('--replay-cold-sample-ratio', type=float, default=0.25, help='每个 batch 期望从冷 replay 采样的比例。')
+    parser.add_argument('--replay-cold-cache-refresh-interval', type=int, default=500, help='每多少次 sample 刷新冷 replay 缓存。')
 
     # epsilon-greedy。
     parser.add_argument(
@@ -145,10 +195,26 @@ def parse_args():
     # 环境参数。
     parser.add_argument('--seed', type=int, default=0, help='随机种子。')
     parser.add_argument('--action-count', type=int, default=15, help='离散候选投放动作数量。')
-    parser.add_argument('--physics-fps', type=int, default=FPS, help='headless 训练物理步频；降低后每个 physics step 推进更长时间。')
-    parser.add_argument('--max-physics-frames', type=int, default=720, help='每次投放后最多推进多少物理帧。')
-    parser.add_argument('--stable-frames', type=int, default=15, help='连续多少帧稳定后结束本次 step。')
-    parser.add_argument('--space-iterations', type=int, default=32, help='Pymunk 每个物理步的约束求解迭代次数。')
+    parser.add_argument(
+        '--physics-mode',
+        choices=('accurate', 'fast30'),
+        default='accurate',
+        help='物理模式：accurate 使用当前游戏精度，fast30 使用 30fps 快速训练候选参数。',
+    )
+    parser.add_argument('--physics-fps', type=int, default=None, help='headless 训练物理步频；不传则由 physics-mode 决定。')
+    parser.add_argument('--max-physics-frames', type=int, default=None, help='每次投放后最多推进多少物理帧；不传则由 physics-mode 决定。')
+    parser.add_argument('--stable-frames', type=int, default=None, help='连续多少帧稳定后结束本次 step；不传则由 physics-mode 决定。')
+    parser.add_argument('--space-iterations', type=int, default=None, help='Pymunk 每个物理步的约束求解迭代次数；不传则由 physics-mode 决定。')
+
+    # 并行采样。num_envs=1 时使用单进程 collector；大于 1 时启用 worker 采样。
+    parser.add_argument('--num-envs', type=int, default=1, help='并行 headless 采样环境数量；1 表示关闭并行采样。')
+    parser.add_argument('--worker-sync-interval', type=int, default=100, help='并行采样时每多少次 update 同步一次 worker 模型参数。')
+    parser.add_argument(
+        '--async-rollout',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help='并行采样时提前提交下一批 rollout，让采样和训练尽量重叠。',
+    )
 
     # reward 参数。
     parser.add_argument('--score-scale', type=float, default=1.0, help='合成分数奖励缩放。')
@@ -159,22 +225,65 @@ def parse_args():
 
     # 日志、保存、评估和可视化。
     parser.add_argument('--run-dir', default=None, help='训练输出目录；默认 runs/dqn_YYYYMMDD_HHMMSS。')
-    parser.add_argument('--log-interval', type=int, default=100, help='每多少次 update 记录并打印一次日志。')
-    parser.add_argument('--save-interval', type=int, default=5_000, help='每多少次 update 保存一次 step checkpoint；0 表示关闭周期保存。')
-    parser.add_argument('--eval-interval', type=int, default=5_000, help='每多少次 update 执行一次 greedy 评估；0 表示关闭。')
-    parser.add_argument('--eval-episodes', type=int, default=5, help='每次评估跑多少局。')
+    parser.add_argument('--log-interval', type=int, default=500, help='每多少次 update 记录并打印一次日志。')
+    parser.add_argument('--save-interval', type=int, default=20_000, help='每多少次 update 保存一次 step checkpoint；0 表示关闭周期保存。')
+    parser.add_argument('--eval-interval', type=int, default=20_000, help='每多少次 update 执行一次 greedy 评估；0 表示关闭。')
+    parser.add_argument('--eval-episodes', type=int, default=10, help='每次评估跑多少局。')
     parser.add_argument('--eval-max-steps', type=int, default=500, help='每局评估最多投放多少次，防止极端长局。')
-    parser.add_argument('--plot-interval', type=int, default=1_000, help='每多少次 update 生成一次曲线图；0 表示只在结束时尝试生成。')
+    parser.add_argument('--plot-interval', type=int, default=10_000, help='每多少次 update 生成一次曲线图；0 表示只在结束时尝试生成。')
     parser.add_argument('--progress-interval', type=float, default=3.0, help='每多少秒打印一次轻量训练进度；0 表示关闭。')
 
     # 运行设备。
     parser.add_argument('--device', default='cpu', help='模型设备，例如 cpu、cuda 或 cuda:0。')
 
-    return parser.parse_args()
+    return parser
+
+
+def load_config_defaults(config_path, parser=None):
+    """读取 TOML 配置文件，并转换成 argparse 默认值字典。"""
+
+    try:
+        import tomllib
+    except ModuleNotFoundError as exc:
+        raise RuntimeError('loading TOML config requires Python 3.11+ tomllib') from exc
+
+    path = Path(config_path)
+    with path.open('rb') as file_obj:
+        config = tomllib.load(file_obj)
+
+    if not isinstance(config, dict):
+        raise ValueError('training config must be a TOML table')
+
+    if parser is None:
+        parser = build_arg_parser()
+    allowed_keys = _parser_destinations(parser)
+    defaults = {}
+    for section_name, section_values in config.items():
+        if not isinstance(section_values, dict):
+            raise ValueError(f'TOML section [{section_name}] must contain key/value pairs')
+
+        for key, value in section_values.items():
+            if allowed_keys is not None and key not in allowed_keys:
+                raise ValueError(f'unknown training config key: [{section_name}].{key}')
+            defaults[key] = value
+
+    return defaults
+
+
+def _parser_destinations(parser):
+    """返回 argparse parser 当前支持的参数 dest 名称集合。"""
+
+    destinations = set()
+    for action in parser._actions:
+        if action.dest != 'help':
+            destinations.add(action.dest)
+    return destinations
 
 
 def validate_args(args):
     """检查训练参数中的明显错误。"""
+
+    apply_physics_mode_defaults(args)
 
     positive_int_fields = (
         'total_updates',
@@ -182,6 +291,8 @@ def validate_args(args):
         'collect_per_update',
         'batch_size',
         'replay_capacity',
+        'replay_segment_size',
+        'replay_cold_cache_refresh_interval',
         'epsilon_decay_steps',
         'target_update_interval',
         'hidden_dim',
@@ -191,6 +302,8 @@ def validate_args(args):
         'max_physics_frames',
         'stable_frames',
         'space_iterations',
+        'num_envs',
+        'worker_sync_interval',
         'log_interval',
         'eval_episodes',
         'eval_max_steps',
@@ -216,6 +329,38 @@ def validate_args(args):
         raise ValueError('--dropout must be in [0, 1)')
     if args.progress_interval < 0.0:
         raise ValueError('--progress-interval must be >= 0')
+    if args.hot_replay_capacity is not None and int(args.hot_replay_capacity) <= 0:
+        raise ValueError('--hot-replay-capacity must be positive')
+    if args.replay_cold_cache_size < 0:
+        raise ValueError('--replay-cold-cache-size must be >= 0')
+    if args.replay_cold_sample_ratio < 0.0 or args.replay_cold_sample_ratio > 1.0:
+        raise ValueError('--replay-cold-sample-ratio must be in [0, 1]')
+    if args.async_rollout and args.num_envs <= 1:
+        raise ValueError('--async-rollout requires --num-envs > 1')
+
+
+def apply_physics_mode_defaults(args):
+    """根据 `--physics-mode` 填充未显式指定的物理参数。"""
+
+    mode = getattr(args, 'physics_mode', 'accurate')
+    if mode == 'fast30':
+        defaults = {
+            'physics_fps': 30,
+            'max_physics_frames': 240,
+            'stable_frames': 6,
+            'space_iterations': 8,
+        }
+    else:
+        defaults = {
+            'physics_fps': FPS,
+            'max_physics_frames': 720,
+            'stable_frames': 15,
+            'space_iterations': 32,
+        }
+
+    for field_name, default_value in defaults.items():
+        if getattr(args, field_name, None) is None:
+            setattr(args, field_name, default_value)
 
 
 def resolve_device(device_name):
@@ -281,6 +426,67 @@ def build_model(args):
         message_layers=args.message_layers,
         activation=args.activation,
         dropout=args.dropout,
+    )
+
+
+def build_model_config(args):
+    """返回可传给 worker 进程创建同结构 GNN-Q 模型的配置。"""
+
+    return {
+        'hidden_dim': args.hidden_dim,
+        'message_layers': args.message_layers,
+        'activation': args.activation,
+        'dropout': args.dropout,
+    }
+
+
+def build_collector(args, env_config, replay_buffer, online_model):
+    """根据 `--num-envs` 创建单进程或多进程 rollout collector。"""
+
+    if args.num_envs <= 1:
+        return RolloutCollector(
+            env=DaxiguaEnv(config=env_config),
+            graph_builder=GraphBuilder(),
+            replay_buffer=replay_buffer,
+            model=online_model,
+            seed=args.seed + 2,
+        )
+
+    return ParallelRolloutCollector(
+        worker_count=args.num_envs,
+        env_config=env_config,
+        replay_buffer=replay_buffer,
+        model_config=build_model_config(args),
+        model=online_model,
+        seed=args.seed + 2,
+    )
+
+
+def build_replay_buffer(args, run_dir):
+    """根据训练参数创建 replay buffer。
+
+    小容量训练会自动退化为纯内存模式；大容量训练默认把最近 10000 条作为热
+    数据，其余旧数据写入 `run_dir/replay_cold`，降低长期内存占用。
+    """
+
+    hot_capacity = args.hot_replay_capacity
+    if hot_capacity is None:
+        hot_capacity = min(10_000, int(args.replay_capacity))
+    hot_capacity = min(int(hot_capacity), int(args.replay_capacity))
+
+    cold_dir = None
+    if hot_capacity < int(args.replay_capacity):
+        cold_dir = Path(args.replay_cold_dir) if args.replay_cold_dir else run_dir / 'replay_cold'
+
+    return ReplayBuffer(
+        capacity=args.replay_capacity,
+        seed=args.seed + 1,
+        hot_capacity=hot_capacity,
+        cold_dir=cold_dir,
+        segment_size=args.replay_segment_size,
+        cold_cache_size=args.replay_cold_cache_size,
+        cold_sample_ratio=args.replay_cold_sample_ratio,
+        cold_cache_refresh_interval=args.replay_cold_cache_refresh_interval,
     )
 
 
@@ -453,6 +659,17 @@ class CollectStatsWindow:
         self.greedy_actions = 0
         self.current_episode_reward = 0.0
         self.current_episode_length = 0
+        self.collect_seconds = 0.0
+        self.graph_build_seconds = 0.0
+        self.tensor_convert_seconds = 0.0
+        self.action_select_seconds = 0.0
+        self.env_step_seconds = 0.0
+        self.physics_frames_total = 0
+        self.fruit_count_total = 0
+        self.graph_node_count_total = 0
+        self.graph_edge_count_total = 0
+        self.graph_cache_hits = 0
+        self.graph_cache_misses = 0
         self.reward_breakdown_totals = {
             field_name: 0.0
             for field_name in REWARD_BREAKDOWN_FIELDS
@@ -480,6 +697,17 @@ class CollectStatsWindow:
         self.greedy_actions += stats.greedy_actions
         self.current_episode_reward = stats.current_episode_reward
         self.current_episode_length = stats.current_episode_length
+        self.collect_seconds += getattr(stats, 'collect_seconds', 0.0)
+        self.graph_build_seconds += getattr(stats, 'graph_build_seconds', 0.0)
+        self.tensor_convert_seconds += getattr(stats, 'tensor_convert_seconds', 0.0)
+        self.action_select_seconds += getattr(stats, 'action_select_seconds', 0.0)
+        self.env_step_seconds += getattr(stats, 'env_step_seconds', 0.0)
+        self.physics_frames_total += getattr(stats, 'physics_frames_total', 0)
+        self.fruit_count_total += getattr(stats, 'fruit_count_total', 0)
+        self.graph_node_count_total += getattr(stats, 'graph_node_count_total', 0)
+        self.graph_edge_count_total += getattr(stats, 'graph_edge_count_total', 0)
+        self.graph_cache_hits += getattr(stats, 'graph_cache_hits', 0)
+        self.graph_cache_misses += getattr(stats, 'graph_cache_misses', 0)
 
         totals = stats.reward_breakdown_totals_dict
         for field_name in REWARD_BREAKDOWN_FIELDS:
@@ -509,6 +737,17 @@ class CollectStatsWindow:
             buffer_size=buffer_size,
             current_episode_reward=self.current_episode_reward,
             current_episode_length=self.current_episode_length,
+            collect_seconds=self.collect_seconds,
+            graph_build_seconds=self.graph_build_seconds,
+            tensor_convert_seconds=self.tensor_convert_seconds,
+            action_select_seconds=self.action_select_seconds,
+            env_step_seconds=self.env_step_seconds,
+            physics_frames_total=self.physics_frames_total,
+            fruit_count_total=self.fruit_count_total,
+            graph_node_count_total=self.graph_node_count_total,
+            graph_edge_count_total=self.graph_edge_count_total,
+            graph_cache_hits=self.graph_cache_hits,
+            graph_cache_misses=self.graph_cache_misses,
         )
 
 
@@ -850,8 +1089,37 @@ def print_log(row):
         parts.append(f"r_total={float(row['collect_mean_reward_total']):+.3f}")
         parts.append(f"r_score={float(row['collect_mean_score_reward']):+.3f}")
         parts.append(f"r_danger={float(row['collect_mean_danger_penalty']):+.3f}")
+    if row.get('collect_seconds') not in ('', None):
+        parts.append(f"collect={_format_ms(row['collect_seconds'])}(采集)")
+        parts.append(f"env={_format_ms(row['collect_env_step_seconds'])}(环境)")
+        parts.append(f"graph={_format_ms(row['collect_graph_build_seconds'])}(构图)")
+        parts.append(f"train={_format_ms(row['train_step_seconds'])}(训练)")
+        parts.append(f"sample={_format_ms(row['replay_sample_seconds'])}(采样)")
+        parts.append(f"frames={float(row['collect_mean_physics_frames']):.1f}(物理帧)")
+        parts.append(f"nodes={float(row['collect_mean_graph_nodes']):.1f}(节点)")
+        parts.append(f"edges={float(row['collect_mean_graph_edges']):.1f}(边)")
 
     print(' | '.join(parts), flush=True)
+
+
+def _format_ms(value):
+    """把秒格式化成毫秒字符串。"""
+
+    if value in ('', None):
+        return ''
+    return f'{float(value) * 1000.0:.1f}ms'
+
+
+def should_sync_parallel_workers(update_step, worker_sync_interval):
+    """判断当前 update 采集前是否需要同步并行 worker 模型。"""
+
+    return update_step == 1 or (update_step - 1) % int(worker_sync_interval) == 0
+
+
+def should_sync_parallel_workers_after_train(update_step, worker_sync_interval):
+    """判断当前 update 训练后是否需要先同步 worker，再提交下一批异步采集。"""
+
+    return update_step % int(worker_sync_interval) == 0
 
 
 def maybe_print_progress(
@@ -876,15 +1144,19 @@ def maybe_print_progress(
 
     percent = 0.0 if total <= 0 else min(100.0, current / total * 100.0)
     speed = 0.0 if elapsed <= 0.0 else env_steps / elapsed
+    update_speed = 0.0 if elapsed <= 0.0 else current / elapsed
+    remaining_updates = max(0.0, total - current)
+    eta_seconds = 0.0 if update_speed <= 0.0 else remaining_updates / update_speed
     parts = [
-        '[progress]',
-        f'phase={phase}',
+        '[progress 进度]',
+        f'phase={phase} 阶段={phase}',
         f'{current}/{total}',
         f'{percent:.1f}%',
-        f'env_steps={env_steps}',
-        f'buffer={buffer_size}',
+        f'env_steps={env_steps} 投放={env_steps}',
+        f'buffer={buffer_size} 经验池={buffer_size}',
         f'eps={epsilon:.3f}',
-        f'speed={speed:.2f} env_steps/s',
+        f'speed={speed:.2f} env_steps/s 投放/秒={speed:.2f}',
+        f'eta={eta_seconds / 60.0:.1f}min 预计剩余={eta_seconds / 60.0:.1f}分钟',
     ]
 
     if latest_loss is not None:
@@ -903,7 +1175,8 @@ def build_metric_row(
         eval_stats,
         best_eval_score,
         best_eval_update,
-        timing):
+        timing,
+        replay_stats=None):
     """把训练、采集、评估统计合成一行 CSV 指标。"""
 
     elapsed = max(1e-9, timing['elapsed'])
@@ -915,6 +1188,13 @@ def build_metric_row(
     )
     collect_mean_episode_score = (
         collect_stats.mean_episode_score if collect_stats.episodes > 0 else ''
+    )
+    replay_stats = replay_stats or {}
+    graph_cache_total = collect_stats.graph_cache_hits + collect_stats.graph_cache_misses
+    graph_cache_hit_rate = (
+        collect_stats.graph_cache_hits / graph_cache_total
+        if graph_cache_total > 0
+        else ''
     )
 
     row = {
@@ -936,6 +1216,32 @@ def build_metric_row(
         'collect_mean_episode_reward': collect_mean_episode_reward,
         'collect_mean_episode_length': collect_mean_episode_length,
         'collect_mean_episode_score': collect_mean_episode_score,
+        'collect_seconds': collect_stats.collect_seconds,
+        'collect_graph_build_seconds': collect_stats.graph_build_seconds,
+        'collect_tensor_convert_seconds': collect_stats.tensor_convert_seconds,
+        'collect_action_select_seconds': collect_stats.action_select_seconds,
+        'collect_env_step_seconds': collect_stats.env_step_seconds,
+        'collect_mean_physics_frames': collect_stats.mean_physics_frames,
+        'collect_mean_fruit_count': collect_stats.mean_fruit_count,
+        'collect_mean_graph_nodes': collect_stats.mean_graph_nodes,
+        'collect_mean_graph_edges': collect_stats.mean_graph_edges,
+        'collect_graph_cache_hit_rate': graph_cache_hit_rate,
+        'train_step_seconds': getattr(train_stats, 'train_step_seconds', ''),
+        'replay_sample_seconds': getattr(train_stats, 'sample_seconds', ''),
+        'current_collate_seconds': getattr(train_stats, 'current_collate_seconds', ''),
+        'online_forward_seconds': getattr(train_stats, 'online_forward_seconds', ''),
+        'target_compute_seconds': getattr(train_stats, 'target_compute_seconds', ''),
+        'backward_seconds': getattr(train_stats, 'backward_seconds', ''),
+        'optimizer_seconds': getattr(train_stats, 'optimizer_seconds', ''),
+        'eval_seconds': timing.get('eval_seconds', ''),
+        'save_seconds': timing.get('save_seconds', ''),
+        'plot_seconds': timing.get('plot_seconds', ''),
+        'replay_mode': replay_stats.get('mode', ''),
+        'replay_hot_count': replay_stats.get('hot_count', ''),
+        'replay_cold_count': replay_stats.get('cold_count', ''),
+        'replay_pending_cold_count': replay_stats.get('pending_cold_count', ''),
+        'replay_cold_segments': replay_stats.get('cold_segment_count', ''),
+        'replay_cold_cache_count': replay_stats.get('cold_cache_count', ''),
         'random_actions': collect_stats.random_actions,
         'greedy_actions': collect_stats.greedy_actions,
         'eval_score_mean': eval_stats.get('eval_score_mean', '') if eval_stats else '',
@@ -974,9 +1280,7 @@ def train(args):
     write_config(run_dir, args)
 
     env_config = build_env_config(args)
-    env = DaxiguaEnv(config=env_config)
-    graph_builder = GraphBuilder()
-    replay_buffer = ReplayBuffer(capacity=args.replay_capacity, seed=args.seed + 1)
+    replay_buffer = build_replay_buffer(args, run_dir)
 
     online_model = build_model(args).to(device)
     target_model = build_model(args).to(device)
@@ -996,13 +1300,7 @@ def train(args):
         optimizer=optimizer,
         config=trainer_config,
     )
-    collector = RolloutCollector(
-        env=env,
-        graph_builder=graph_builder,
-        replay_buffer=replay_buffer,
-        model=online_model,
-        seed=args.seed + 2,
-    )
+    collector = build_collector(args, env_config, replay_buffer, online_model)
 
     metrics = MetricLogger(run_dir / 'metrics.csv')
     episode_metrics = EpisodeLogger(run_dir / 'episode_metrics.csv')
@@ -1014,6 +1312,33 @@ def train(args):
 
     print(f'run_dir={run_dir}', flush=True)
     print(f'device={device} matplotlib_output={run_dir / "plots" / "training_curves.png"}', flush=True)
+    print(
+        'physics_mode={} 物理模式={} | fps={} | max_frames={} 最大物理帧={} | '
+        'stable_frames={} 稳定帧={} | iterations={} 迭代次数={}'.format(
+            args.physics_mode,
+            args.physics_mode,
+            args.physics_fps,
+            args.max_physics_frames,
+            args.max_physics_frames,
+            args.stable_frames,
+            args.stable_frames,
+            args.space_iterations,
+            args.space_iterations,
+        ),
+        flush=True,
+    )
+    print(f'replay_storage={replay_buffer.storage_stats}', flush=True)
+    print(
+        f'collector={"parallel" if isinstance(collector, ParallelRolloutCollector) else "single"} '
+        f'num_envs={args.num_envs} async_rollout={int(bool(args.async_rollout))}',
+        flush=True,
+    )
+    if isinstance(collector, ParallelRolloutCollector) and args.collect_per_update < args.num_envs:
+        print(
+            'warning=collect_per_update 小于 num_envs，单次采样不会用满所有 worker；'
+            '建议把 --collect-per-update 调到 num_envs 的整数倍。',
+            flush=True,
+        )
     print(f'warmup_steps={args.warmup_steps}', flush=True)
 
     start_time = time.perf_counter()
@@ -1054,13 +1379,29 @@ def train(args):
         flush=True,
     )
 
+    pending_collect = None
     try:
         for update_step in range(1, args.total_updates + 1):
             epsilon = scheduled_epsilon(update_step, env_steps, args)
 
             # 收集训练数据
             collect_start_env_steps = env_steps
-            collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
+            if isinstance(collector, ParallelRolloutCollector) and args.async_rollout:
+                if pending_collect is None:
+                    if should_sync_parallel_workers(update_step, args.worker_sync_interval):
+                        collector.sync_model(online_model)
+                    pending_collect = collector.start_collect_steps(
+                        args.collect_per_update,
+                        epsilon=epsilon,
+                    )
+                collect_stats = collector.finish_collect_steps(pending_collect)
+                pending_collect = None
+            else:
+                if (
+                        isinstance(collector, ParallelRolloutCollector)
+                        and should_sync_parallel_workers(update_step, args.worker_sync_interval)):
+                    collector.sync_model(online_model)
+                collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
             env_steps += collect_stats.steps
             metric_window.add(collect_stats)
             episode_metrics.log_collect_stats(
@@ -1071,8 +1412,38 @@ def train(args):
                 epsilon=epsilon,
             )
 
+            # 异步采样路径会在当前 train_step 前提交下一轮 collect，让 CPU 物理模拟
+            # 尽量和主进程的模型反向传播重叠。DQN 是 off-policy 算法，worker 使用
+            # 间隔同步的稍旧 online model 做行为策略是可接受的。
+            pending_next_collect = None
+            next_epsilon = None
+            if (
+                    isinstance(collector, ParallelRolloutCollector)
+                    and args.async_rollout
+                    and update_step < args.total_updates):
+                next_epsilon = scheduled_epsilon(update_step + 1, env_steps, args)
+                if not should_sync_parallel_workers_after_train(update_step, args.worker_sync_interval):
+                    pending_next_collect = collector.start_collect_steps(
+                        args.collect_per_update,
+                        epsilon=next_epsilon,
+                    )
+
             # 执行一次 DQN 参数更新
             train_stats = trainer.train_step()
+
+            if (
+                    isinstance(collector, ParallelRolloutCollector)
+                    and args.async_rollout
+                    and update_step < args.total_updates):
+                if pending_next_collect is None:
+                    collector.sync_model(online_model)
+                    pending_collect = collector.start_collect_steps(
+                        args.collect_per_update,
+                        epsilon=next_epsilon,
+                    )
+                else:
+                    pending_collect = pending_next_collect
+
             last_progress_at = maybe_print_progress(
                 args=args,
                 last_progress_at=last_progress_at,
@@ -1093,9 +1464,12 @@ def train(args):
             should_plot = args.plot_interval > 0 and update_step % args.plot_interval == 0
 
             eval_stats = None
+            eval_seconds = ''
             best_updated = False
             if should_eval:
+                eval_start = time.perf_counter()
                 eval_stats = evaluate_policy(online_model, args, device)
+                eval_seconds = time.perf_counter() - eval_start
                 if eval_stats['eval_score_max'] > best_eval_score:
                     best_eval_score = eval_stats['eval_score_max']
                     best_eval_update = update_step
@@ -1114,44 +1488,57 @@ def train(args):
                     eval_stats=eval_stats,
                     best_eval_score=best_eval_score,
                     best_eval_update=best_eval_update,
-                    timing={'elapsed': time.perf_counter() - start_time},
+                    timing={
+                        'elapsed': time.perf_counter() - start_time,
+                        'eval_seconds': eval_seconds,
+                    },
+                    replay_stats=replay_buffer.storage_stats,
                 )
+                save_seconds = 0.0
+                if should_save:
+                    save_start = time.perf_counter()
+                    save_checkpoint(
+                        run_dir=run_dir,
+                        online_model=online_model,
+                        target_model=target_model,
+                        optimizer=optimizer,
+                        args=args,
+                        update_step=update_step,
+                        env_steps=env_steps,
+                        epsilon=epsilon,
+                        latest_metrics=latest_row,
+                        step_checkpoint=True,
+                    )
+                    save_seconds += time.perf_counter() - save_start
+
+                if best_updated:
+                    save_start = time.perf_counter()
+                    save_checkpoint(
+                        run_dir=run_dir,
+                        online_model=online_model,
+                        target_model=target_model,
+                        optimizer=optimizer,
+                        args=args,
+                        update_step=update_step,
+                        env_steps=env_steps,
+                        epsilon=epsilon,
+                        latest_metrics=latest_row,
+                        extra_checkpoint_name='best.pt',
+                    )
+                    save_seconds += time.perf_counter() - save_start
+                latest_row['save_seconds'] = save_seconds if save_seconds else ''
+
+                if should_plot:
+                    plot_start = time.perf_counter()
+                    row_for_plot = {field: latest_row.get(field, '') for field in METRIC_FIELDS}
+                    maybe_plot_metrics(run_dir, metrics.rows + [row_for_plot], episode_metrics.rows)
+                    latest_row['plot_seconds'] = time.perf_counter() - plot_start
+
                 metrics.log(latest_row)
                 metric_window.reset()
 
                 if should_log or should_eval:
                     print_log(latest_row)
-
-            if should_save:
-                save_checkpoint(
-                    run_dir=run_dir,
-                    online_model=online_model,
-                    target_model=target_model,
-                    optimizer=optimizer,
-                    args=args,
-                    update_step=update_step,
-                    env_steps=env_steps,
-                    epsilon=epsilon,
-                    latest_metrics=latest_row,
-                    step_checkpoint=True,
-                )
-
-            if best_updated:
-                save_checkpoint(
-                    run_dir=run_dir,
-                    online_model=online_model,
-                    target_model=target_model,
-                    optimizer=optimizer,
-                    args=args,
-                    update_step=update_step,
-                    env_steps=env_steps,
-                    epsilon=epsilon,
-                    latest_metrics=latest_row,
-                    extra_checkpoint_name='best.pt',
-                )
-
-            if should_plot:
-                maybe_plot_metrics(run_dir, metrics.rows, episode_metrics.rows)
 
         final_epsilon = scheduled_epsilon(args.total_updates, env_steps, args)
         save_checkpoint(
@@ -1168,6 +1555,9 @@ def train(args):
         )
         maybe_plot_metrics(run_dir, metrics.rows, episode_metrics.rows)
     finally:
+        replay_buffer.flush()
+        if isinstance(collector, ParallelRolloutCollector):
+            collector.close()
         metrics.close()
         episode_metrics.close()
 
