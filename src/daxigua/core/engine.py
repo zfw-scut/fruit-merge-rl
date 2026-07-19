@@ -59,6 +59,7 @@ class HeadlessGame:
             height=None,
             spawn_y=SPAWN_LINE_Y,
             fps=FPS,
+            space_iterations=32,
             gravity=(0, 1800),
             queue_length=FRUIT_QUEUE_LENGTH,
             create_time=2.0,
@@ -69,7 +70,16 @@ class HeadlessGame:
         self.height = int(height or default_height)
         self.spawn_y = int(spawn_y)
         self.wall_width = 20
-        self.fps = fps
+        self.fps = int(fps or FPS)
+        if self.fps <= 0:
+            raise ValueError('fps must be positive')
+
+        # `space.iterations` 是 Chipmunk/Pymunk 每个物理步求解约束的迭代次数。
+        # 数值越高碰撞和堆叠越精细，但每帧耗时也更高；训练 fast 模式会显式降低它。
+        self.space_iterations = int(space_iterations)
+        if self.space_iterations <= 0:
+            raise ValueError('space_iterations must be positive')
+
         self.gravity = gravity
         self.queue_length = queue_length
         self.create_time = create_time
@@ -93,7 +103,7 @@ class HeadlessGame:
         # 每次 reset 重新创建 Space，比逐个清理旧对象更可靠，也更适合训练反复重置。
         self.space = pymunk.Space()
         self.space.gravity = self.gravity
-        self.space.iterations = 32
+        self.space.iterations = self.space_iterations
         self.space.damping = 0.995
 
         self.balls = []

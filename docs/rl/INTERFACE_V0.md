@@ -39,6 +39,13 @@ advance_physics(...)
 get_state()
 ```
 
+`HeadlessGame` 支持训练侧配置物理步频和 Pymunk 迭代次数：
+
+- `fps`: 每次 `space.step(1 / fps)` 的物理积分步长来源。
+- `space_iterations`: Pymunk 每个物理步的约束求解迭代次数。
+
+这两个参数用于后续 accurate/fast 训练模式对比。游戏表现层仍使用自己的渲染循环，不依赖 RL 对比脚本。
+
 ## RL 环境接口
 
 ### `DaxiguaEnv`
@@ -50,6 +57,13 @@ get_state()
 - `step(action_index) -> (GameState, reward, terminated, truncated, info)`
 
 这里的 `step(action_index)` 表示一次完整投放，不是一帧游戏画面。
+
+`DaxiguaEnvConfig` 中和物理速度相关的字段：
+
+- `physics_fps`: headless 物理步频，默认使用项目 `FPS`。
+- `max_physics_frames`: 一次投放后最多推进多少物理帧。
+- `stable_frames`: 连续多少帧稳定后结束当前 step。
+- `space_iterations`: Pymunk 每个物理步的迭代次数。
 
 默认 reward 已从单一 `score_delta` 扩展为可配置 reward shaping：
 
