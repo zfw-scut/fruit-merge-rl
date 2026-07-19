@@ -9,6 +9,7 @@
 
 from dataclasses import dataclass, field
 
+from daxigua.config import FPS
 from daxigua.core.engine import HeadlessGame
 
 from .reward import RewardConfig, compute_reward
@@ -19,8 +20,10 @@ class DaxiguaEnvConfig:
     """RL 环境配置。"""
 
     action_count: int = 15
+    physics_fps: int = FPS
     max_physics_frames: int = 720
     stable_frames: int = 15
+    space_iterations: int = 32
     reward_config: RewardConfig = field(default_factory=RewardConfig)
 
 
@@ -34,7 +37,10 @@ class DaxiguaEnv:
         self.config = config or DaxiguaEnvConfig()
 
         # 允许外部注入 HeadlessGame，便于后续做不同场地尺寸或固定队列实验。
-        self.game = game or HeadlessGame()
+        self.game = game or HeadlessGame(
+            fps=self.config.physics_fps,
+            space_iterations=self.config.space_iterations,
+        )
 
     def reset(self, seed=None, fruit_queue=None):
         """重置环境。

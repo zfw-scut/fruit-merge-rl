@@ -26,6 +26,7 @@ from pathlib import Path
 
 import torch
 
+from daxigua.config import FPS
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder, ReplayBuffer
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS, RewardConfig
@@ -144,8 +145,10 @@ def parse_args():
     # 环境参数。
     parser.add_argument('--seed', type=int, default=0, help='随机种子。')
     parser.add_argument('--action-count', type=int, default=15, help='离散候选投放动作数量。')
+    parser.add_argument('--physics-fps', type=int, default=FPS, help='headless 训练物理步频；降低后每个 physics step 推进更长时间。')
     parser.add_argument('--max-physics-frames', type=int, default=720, help='每次投放后最多推进多少物理帧。')
     parser.add_argument('--stable-frames', type=int, default=15, help='连续多少帧稳定后结束本次 step。')
+    parser.add_argument('--space-iterations', type=int, default=32, help='Pymunk 每个物理步的约束求解迭代次数。')
 
     # reward 参数。
     parser.add_argument('--score-scale', type=float, default=1.0, help='合成分数奖励缩放。')
@@ -184,8 +187,10 @@ def validate_args(args):
         'hidden_dim',
         'message_layers',
         'action_count',
+        'physics_fps',
         'max_physics_frames',
         'stable_frames',
+        'space_iterations',
         'log_interval',
         'eval_episodes',
         'eval_max_steps',
@@ -259,8 +264,11 @@ def build_env_config(args):
     )
     return DaxiguaEnvConfig(
         action_count=args.action_count,
+        # 兼容旧测试对象或旧 checkpoint 参数：没有新字段时继续使用当前项目默认值。
+        physics_fps=getattr(args, 'physics_fps', FPS),
         max_physics_frames=args.max_physics_frames,
         stable_frames=args.stable_frames,
+        space_iterations=getattr(args, 'space_iterations', 32),
         reward_config=reward_config,
     )
 
