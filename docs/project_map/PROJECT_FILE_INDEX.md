@@ -59,6 +59,7 @@
 | 路径 | 作用 | 备注 |
 | --- | --- | --- |
 | `tools/cuda_stress_test.py` | 独立 PyTorch CUDA 计算压力测试脚本。只做矩阵乘法和可选显存预留，并采集 GPU、系统内存、进程内存和内核 NVIDIA/Xid 日志。 | 用于判断黑屏/Xid 是否能在脱离游戏和 RL 训练代码后复现；默认输出到 `runs/cuda_stress/<时间戳>/`。 |
+| `tools/export_training_catalog.py` | 训练实验归档工具。扫描本地 `runs/`，从配置、训练指标和文件信息中生成可纳入 Git 的轻量实验目录。 | 不复制 checkpoint、replay 和完整指标 CSV；运行方式见 `docs/training_runs/README.md`。 |
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |
 | `tools/temporary_rollout_smoke_test.py` | 临时 GNN rollout 验证脚本。用于检查 `DaxiguaEnv -> GraphBuilder -> GNNQNetwork -> step()` 链路是否闭合。 | 不是正式训练入口；验证完成或正式训练脚本落地后可删除或改造。 |
 
@@ -68,6 +69,7 @@
 | --- | --- | --- |
 | `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向、next_graph 缓存、分层 replay、并行 collector 和 DQN 更新链路。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
 | `tests/test_epsilon_schedule.py` | epsilon 衰减曲线测试。验证 smooth schedule 的关键锚点、单调性，以及 linear schedule 的旧行为。 | 使用标准库 `unittest`。 |
+| `tests/test_training_catalog.py` | 训练实验归档工具测试。验证新旧指标格式、奖励分解加权汇总、checkpoint 摘要和文档输出。 | 使用临时目录，不依赖本地 `runs/`。 |
 | `tests/test_training_metrics.py` | 训练指标测试。验证 episode 结束事件会逐局写入 `episode_metrics.csv`，并验证评估会返回最高/最低分。 | 使用标准库 `unittest`。 |
 
 ## 文档目录
@@ -78,6 +80,7 @@
 | `docs/CODING_STYLE.md` | 项目编码风格说明。 | 当前记录游戏源码采用教学型详细注释，后续改代码时应同步维护注释。 |
 | `docs/codex/` | Codex 较大修改记录。 | 每次较大修改按编号追加记录。 |
 | `docs/project_map/` | 项目文件职责索引。 | 结构变化后需要同步更新。 |
+| `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
 | `docs/rl/INTERFACE_V0.md` | RL v0 接口说明。 | 记录 `HeadlessGame`、`DaxiguaEnv`、状态数据和边界规则。 |
@@ -97,7 +100,7 @@
 | `.vscode/` | VS Code 本地配置和缓存。 | 已忽略。 |
 | `__pycache__/` | Python 字节码缓存。 | 已忽略。 |
 | `src/**/__pycache__/` | 包内 Python 字节码缓存。 | 已忽略。 |
-| `runs/` | DQN 训练输出目录，包含 `metrics.csv`、`episode_metrics.csv`、checkpoint 和曲线图。 | 已忽略。 |
+| `runs/` | DQN 训练输出目录，包含 `metrics.csv`、`episode_metrics.csv`、checkpoint、replay 和曲线图。 | 已忽略；轻量归档由 `tools/export_training_catalog.py` 生成到 `docs/training_runs/`。 |
 | `.agents/`、`.codex/` | 当前工作环境辅助目录。 | 不属于原项目核心源码。 |
 
 ## 可复用组件
@@ -123,6 +126,7 @@
 - `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`episode_metrics.csv`、`checkpoints/latest.pt`、`checkpoints/best.pt`、`plots/training_curves.png` 和 `plots/reward_breakdown_curves.png`；`metrics.csv` 中的 reward breakdown 字段按日志窗口求均值，另包含训练性能 profiling 和 replay 分层状态。
 - `board_game_state()` / `board_action_candidates()`：把原 pygame `Board` 的实时局面转换成 RL 图构建所需的数据结构。
 - `watch_dqn.py`：第一版模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
+- `export_training_catalog.py`：扫描被 Git 忽略的训练输出，生成配置快照、指标摘要、产物清单和跨实验索引，方便迁移后复盘训练数据。
 - `compare_physics_modes.py`：物理模式对比入口，用已有 checkpoint 或随机策略比较 accurate 与 fast 模式的速度、分数、局长、物理帧、合成频率和截断率。
 - `configs/train_dqn_fast30_parallel.toml`：正式 DQN 训练参数配置，集中维护 run 目录、训练规模、replay、epsilon、模型、并行采样、reward、评估保存和进度参数。
 - `scripts/train_dqn.sh`：TOML 配置启动器，默认读取 `configs/train_dqn_fast30_parallel.toml`，也可以传入其它配置文件路径。
