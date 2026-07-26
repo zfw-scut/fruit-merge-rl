@@ -46,5 +46,9 @@ python tools/export_training_catalog.py \
 ## 数据解释限制
 
 - 早期训练版本没有 `episode_metrics.csv` 或 reward breakdown 时，对应字段会显示“未记录”。
+- 当前导出器同时识别 Reward V2 的 task/potential 指标与 Reward V1 的
+  score/survival/height 指标；旧字段只用于解释历史实验，不代表仍在当前训练中启用。
+- Reward V2 的 `StateAnalyzer` 性能、降级率和 shaping p95 只会出现在采用新版
+  `metrics.csv` 的实验中。
 - 历史 `config.json` 没有 Git commit 字段，因此不能可靠推断训练对应的源码提交。
 - 指标摘要来自已经落盘的 CSV；突然断电前尚未 flush 的最后几轮不会出现。

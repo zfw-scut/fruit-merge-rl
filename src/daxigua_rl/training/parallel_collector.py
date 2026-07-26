@@ -263,6 +263,7 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
     episode_rewards = []
     episode_lengths = []
     episode_scores = []
+    potential_shaping_abs_values = []
     transition_keys = []
     episode_end_offsets = []
     episode_terminated_flags = []
@@ -275,6 +276,10 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
     tensor_convert_seconds = 0.0
     action_select_seconds = 0.0
     env_step_seconds = 0.0
+    state_analysis_calls = 0
+    state_analysis_seconds = 0.0
+    state_analysis_cache_hits = 0
+    state_analysis_degraded_count = 0
     physics_frames_total = 0
     fruit_count_total = 0
     graph_node_count_total = 0
@@ -290,6 +295,9 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         episode_rewards.extend(stats.episode_rewards)
         episode_lengths.extend(stats.episode_lengths)
         episode_scores.extend(stats.episode_scores)
+        potential_shaping_abs_values.extend(
+            stats.potential_shaping_abs_values
+        )
         transition_keys.extend(stats.transition_keys)
         episode_end_offsets.extend(
             step_offset + int(offset)
@@ -307,6 +315,10 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         tensor_convert_seconds += stats.tensor_convert_seconds
         action_select_seconds += stats.action_select_seconds
         env_step_seconds += stats.env_step_seconds
+        state_analysis_calls += stats.state_analysis_calls
+        state_analysis_seconds += stats.state_analysis_seconds
+        state_analysis_cache_hits += stats.state_analysis_cache_hits
+        state_analysis_degraded_count += stats.state_analysis_degraded_count
         physics_frames_total += stats.physics_frames_total
         fruit_count_total += stats.fruit_count_total
         graph_node_count_total += stats.graph_node_count_total
@@ -321,6 +333,9 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         reward_breakdown_totals=tuple(
             (field_name, reward_breakdown_totals[field_name])
             for field_name in REWARD_BREAKDOWN_FIELDS
+        ),
+        potential_shaping_abs_values=tuple(
+            potential_shaping_abs_values
         ),
         transition_keys=tuple(transition_keys),
         episode_rewards=tuple(episode_rewards),
@@ -339,6 +354,10 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         tensor_convert_seconds=tensor_convert_seconds,
         action_select_seconds=action_select_seconds,
         env_step_seconds=env_step_seconds,
+        state_analysis_calls=state_analysis_calls,
+        state_analysis_seconds=state_analysis_seconds,
+        state_analysis_cache_hits=state_analysis_cache_hits,
+        state_analysis_degraded_count=state_analysis_degraded_count,
         physics_frames_total=physics_frames_total,
         fruit_count_total=fruit_count_total,
         graph_node_count_total=graph_node_count_total,

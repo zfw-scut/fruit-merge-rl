@@ -8,7 +8,9 @@
 reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
-当前提供无渲染游戏接口、RL 环境壳层、GNN 图构建基础设施、GNN-Q 前向模型、`Transition` / `TensorTransition` 经验记录、基础 `ReplayBuffer`、单进程 `RolloutCollector`、标准 `DQNTrainer` 和第一版 DQN 训练入口。
+当前提供无渲染游戏接口、带 StateAnalyzer/Reward V2 的 RL 环境壳层、GNN 图构建
+基础设施、GNN-Q 前向模型、`Transition` / `TensorTransition` 经验记录、基础
+`ReplayBuffer`、单/多进程 collector、标准 `DQNTrainer` 和第一版 DQN 训练入口。
 
 ## 边界
 
@@ -58,9 +60,14 @@ get_state()
 
 - `reset(seed=None, fruit_queue=None) -> (GameState, info)`
 - `action_candidates() -> list[ActionCandidate]`
-- `step(action_index) -> (GameState, reward, terminated, truncated, info)`
+- `step(action_index, *, transition_key=None) -> (GameState, reward, terminated, truncated, info)`
 
 这里的 `step(action_index)` 表示一次完整投放，不是一帧游戏画面。
+
+正式 rollout 会在动作执行前传入
+`TransitionKey(worker_id, episode_id, step_index)`。直接调用环境时可以省略，
+环境会使用 worker 0 和本地递增的 episode 编号；无论采用哪种方式，
+`step_index` 都必须等于当前 `GameState.step_count`。
 
 终止语义：
 
@@ -77,52 +84,78 @@ get_state()
 - `stable_frames`: 连续多少帧稳定后结束当前 step。
 - `space_iterations`: Pymunk 每个物理步的迭代次数。
 
-默认 reward 已从单一 `score_delta` 扩展为可配置 reward shaping：
+状态分析配置通过 `state_analyzer_config: StateAnalyzerConfig` 传入。
+`DaxiguaEnv` 构造时在当前进程内创建分析器；并行训练只把可 pickle 的配置送入
+Windows spawn worker，不从主进程传递分析器实例。
+
+当前环境使用 Reward V2：
 
 ```text
-reward =
-    score_reward
-    + survival_bonus
-    + height_delta_reward
-    + danger_penalty
-    + terminal_penalty
+task_reward = sum(2 ** ((merge.new_level - 2) / 2))
+Phi(s) = 0.6 * C(s) + 0.3 * R(s) + 0.1 * K(s)
+potential_shaping_reward =
+    lambda_phi * (gamma * Phi(effective_next) - Phi(previous))
+reward = task_reward + potential_shaping_reward + terminal_penalty
 ```
 
 当前默认配置：
 
 ```python
 RewardConfig(
-    score_scale=1.0,
-    survival_bonus=0.05,
-    height_delta_weight=0.02,
-    danger_height_weight=1.0,
-    terminal_penalty=-100.0,
+    gamma=0.99,
+    lambda_phi=0.5,
+    capacity_weight=0.6,
+    recoverability_weight=0.3,
+    chain_readiness_weight=0.1,
+    terminal_penalty=0.0,
 )
 ```
 
 各项含义：
 
-- `score_reward = score_delta * score_scale`: 保留真实合成分数作为主奖励。
-- `survival_bonus`: 没有死亡时给一个很小的存活奖励。
-- `height_delta_reward`: 堆叠高度降低时为正，堆叠升高时为负。
-- `danger_penalty`: 堆叠越接近顶部危险线，持续惩罚越大。
-- `terminal_penalty`: 游戏失败时的终局惩罚。
+- `task_reward` 只读取本次真实 `MergeEvent`，不直接复用原游戏分数。
+- `C(s)` 是 q0～q3 的顶部可达投放容量，`R(s)` 是水果可恢复性，
+  `K(s)` 是连锁就绪度；三项均来自 `StateAnalysis` 且位于 `[0, 1]`。
+- `gamma` 必须与 DQN target 的折扣因子相同，训练入口从同一个 `--gamma`
+  参数构造两份配置。
+- `terminal_penalty` 默认是 0，仅保留为短跑发现信号不足后的显式开关。
+- 存活时间、最高水果高度、绝对危险高度和固定 `-100` 终局惩罚已经删除。
 
-`DaxiguaEnv.step()` 会在 `info["reward_breakdown"]` 中返回 `RewardBreakdown`，用于查看本次 reward 的组成。复杂奖励设计应继续放在 `daxigua_rl`，不要写回游戏规则层。
+真实 terminal 的有效 next potential 强制为 0，而且
+`info["next_state_analysis"]` 为 `None`。truncated 不是 MDP 终态：
+它会生成同 episode 的 `analysis[t+1]`，保留 next potential 和 bootstrap；
+该不稳定分析标记为 degraded、不能产生高置信归因，并在 reset 时丢弃缓存。
+
+`DaxiguaEnv` 为每个 worker 持有一个 `StateAnalyzer`。初始 step 分析当前和下一
+边界；之后正常连续 step 复用上一轮的 next analysis，因此通常每次投放只新增一次
+分析。分析始终使用规范 15 动作列，即使某些小型测试用更少策略动作。
+
+`DaxiguaEnv.step()` 的 `info` 包含：
+
+- `reward_breakdown`: `RewardBreakdown`；
+- `previous_state_analysis` / `next_state_analysis`: worker-local 前后分析；
+- `state_analysis_calls` / `state_analysis_seconds`: 本 step 真正新增的分析次数和耗时；
+- `state_analysis_cache_hit`: 是否复用前一轮 next analysis；
+- `state_analysis_degraded_count`: 本 step 新分析中的降级数量。
+
+完整 `StateAnalysis` 不进入 `TensorTransition` 或主 `ReplayBuffer`，并行 worker
+也只向主进程返回 scalar reward 和聚合统计。
 
 训练入口会把采集窗口内的 reward breakdown 均值写入 `metrics.csv`：
 
 - `collect_mean_reward_total`
-- `collect_mean_score_reward`
-- `collect_mean_survival_bonus`
-- `collect_mean_height_delta_reward`
-- `collect_mean_danger_penalty`
+- `collect_mean_task_reward`
+- `collect_mean_potential_shaping_reward`
 - `collect_mean_terminal_penalty`
-- `collect_mean_previous_height_ratio`
-- `collect_mean_next_height_ratio`
-- `collect_mean_height_delta_ratio`
+- `collect_mean_previous_potential` / `collect_mean_next_potential`
+- `collect_mean_potential_delta`
+- 前后 `top_connected_capacity`、`recoverability`、`chain_readiness`
+- `collect_mean_merge_event_count`
+- `collect_p95_abs_potential_shaping_reward`
 
-同时会在 `plots/reward_breakdown_curves.png` 中单独画出奖励组成和高度比例曲线，方便观察辅助奖励是否压过真实得分奖励。
+同一 CSV 还记录 StateAnalyzer 调用次数、总/平均耗时、缓存命中率和降级率。
+`plots/reward_breakdown_curves.png` 会分别绘制 task/shaping、potential 分量和
+next-state C/R/K，供短跑校准 shaping 是否压过真实合成效用。
 
 ## 状态数据
 
@@ -216,9 +249,10 @@ analysis = analyzer.analyze(
 
 `StateAnalyzer` 是纯只读、无物理推进的 worker-local 组件。调用方可以把前一动作已经
 压缩好的 `ContactInfluenceEdge` 和对应 `incoming_transition_key` 一并交给分析器，
-但当前分析器不会自行采集逐帧碰撞日志。`StateAnalysis` 尚未接入
-`RolloutCollector`、`TensorTransition`、`ReplayBuffer`、Reward V2 或
-`AttributionTracker`；训练主链路行为因此保持不变。
+但当前分析器不会自行采集逐帧碰撞日志。`DaxiguaEnv` 已把相邻分析接入 Reward V2，
+collector 负责提供稳定轨迹键并汇总分析性能；分析对象仍不写入
+`TensorTransition` / 主 `ReplayBuffer`。`AttributionTracker`、接触证据采集和
+独立因果 replay 尚未实现。
 
 ## 图构建接口
 
@@ -349,7 +383,9 @@ from daxigua_rl.training import RolloutCollector
 -> GraphBuilder.build(...)
 -> graph_to_tensor(...)
 -> epsilon-greedy 选择 action_offset
--> DaxiguaEnv.step(action_offset)
+-> 生成 TransitionKey
+-> DaxiguaEnv.step(action_offset, transition_key=...)
+-> StateAnalyzer 前后边界 + Reward V2
 -> 构建 next_graph
 -> TensorTransition(...)
 -> ReplayBuffer.push(...)
@@ -373,8 +409,9 @@ TransitionKey(worker_id, episode_id, step_index)
 - `episode_id` 在每个 worker 内随成功 reset 单调增加。
 - `step_index` 从 `0` 开始，并跨多次 `collect_steps()` 调用保持连续。
 - 键在一次训练 run 内唯一；跨 run 时由 run 目录或未来的 `run_id` 提供外层命名空间。
-- 键通过 `RolloutStats.transition_keys` 按采集顺序返回，供后续
-  `StateAnalyzer` / `AttributionTracker` 使用，不写入主 ReplayBuffer。
+- collector 把键传给环境，使 `analysis[t] -> analysis[t+1]`、scalar reward 和
+  transition 使用同一身份；键也通过 `RolloutStats.transition_keys` 按采集顺序
+  返回，但不写入主 ReplayBuffer。
 
 `RolloutStats` 提供：
 
@@ -385,6 +422,11 @@ TransitionKey(worker_id, episode_id, step_index)
 - `episode_rewards`、`episode_lengths`、`episode_scores`: 本次已结束 episode 的统计。
 - `random_actions`、`greedy_actions`: 探索/利用动作数量。
 - `buffer_size`: 采集后 replay buffer 大小。
+- `reward_breakdown_totals`: Reward V2 各项累计值。
+- `potential_shaping_abs_values`: 用于日志窗口计算 shaping 绝对值 p95 的轻量标量。
+- `state_analysis_calls` / `state_analysis_seconds`: 真正执行的状态分析次数和总耗时。
+- `state_analysis_cache_hits`: 复用上一轮 next analysis 的次数。
+- `state_analysis_degraded_count`: truncated 等不稳定边界产生的降级分析数。
 
 ### `DQNTrainer`
 
@@ -501,7 +543,9 @@ runs/dqn_YYYYMMDD_HHMMSS/
 
 - update step、环境步数、epsilon、buffer 大小。
 - loss、mean Q、mean target、mean reward、TD error、grad norm。
-- 采集阶段 episode 统计。
+- 采集阶段 episode 统计，以及 Reward V2 的 task、potential shaping、C/R/K 和
+  merge event 数量。
+- shaping 绝对值 p95，以及 StateAnalyzer 调用次数、耗时、缓存命中率和降级率。
 - greedy 评估均分、最高分、最低分、历史最高分、平均 reward、平均 episode 长度。
 - 采样和训练速度。
 

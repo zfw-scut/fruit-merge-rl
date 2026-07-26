@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import random
 import sys
 import time
@@ -26,6 +27,7 @@ from daxigua.config import FPS
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.reward import RewardConfig
+from daxigua_rl.training import TransitionKey
 
 
 EPISODE_FIELDS = (
@@ -167,12 +169,13 @@ def parse_args():
     parser.add_argument('--fast-stable-frames', type=int, default=6, help='fast 模式稳定判定连续帧数。')
     parser.add_argument('--fast-space-iterations', type=int, default=8, help='fast 模式 Pymunk 迭代次数。')
 
-    # reward 参数保持和训练脚本一致，避免对比时 reward 定义漂移。
-    parser.add_argument('--score-scale', type=float, default=1.0, help='合成分数奖励缩放。')
-    parser.add_argument('--survival-bonus', type=float, default=0.05, help='未死亡 step 的存活小奖励。')
-    parser.add_argument('--height-delta-weight', type=float, default=0.02, help='高度变化奖励权重。')
-    parser.add_argument('--danger-height-weight', type=float, default=1.0, help='危险高度持续惩罚权重。')
-    parser.add_argument('--terminal-penalty', type=float, default=-100.0, help='游戏失败终局惩罚。')
+    # Reward V2 参数保持和训练脚本一致，避免物理对比时奖励定义漂移。
+    parser.add_argument('--gamma', type=float, default=0.99, help='potential shaping 使用的折扣因子。')
+    parser.add_argument('--lambda-phi', type=float, default=0.5, help='状态 potential shaping 的总权重。')
+    parser.add_argument('--capacity-weight', type=float, default=0.6, help='顶部可达投放容量 C(s) 的 potential 权重。')
+    parser.add_argument('--recoverability-weight', type=float, default=0.3, help='水果可恢复性 R(s) 的 potential 权重。')
+    parser.add_argument('--chain-readiness-weight', type=float, default=0.1, help='连锁就绪度 K(s) 的 potential 权重。')
+    parser.add_argument('--terminal-penalty', type=float, default=0.0, help='真实终局的可选额外惩罚；Reward V2 默认关闭。')
 
     return parser.parse_args()
 
@@ -199,6 +202,30 @@ def validate_args(args):
         raise ValueError('--action-count must be positive')
     if args.progress_interval < 0.0:
         raise ValueError('--progress-interval must be >= 0')
+    if not math.isfinite(args.gamma) or args.gamma < 0.0 or args.gamma > 1.0:
+        raise ValueError('--gamma must be in [0, 1]')
+    if (
+            not math.isfinite(args.lambda_phi)
+            or args.lambda_phi < 0.0
+            or args.lambda_phi > 1.0):
+        raise ValueError('--lambda-phi must be in [0, 1]')
+    potential_weights = (
+        args.capacity_weight,
+        args.recoverability_weight,
+        args.chain_readiness_weight,
+    )
+    if any(
+            not math.isfinite(weight) or weight < 0.0 or weight > 1.0
+            for weight in potential_weights):
+        raise ValueError('Reward V2 potential weights must each be in [0, 1]')
+    if not math.isclose(
+            sum(potential_weights),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9):
+        raise ValueError('Reward V2 potential weights must sum to 1')
+    if not math.isfinite(args.terminal_penalty) or args.terminal_penalty > 0.0:
+        raise ValueError('--terminal-penalty must be finite and <= 0')
 
     parse_fast_fps_values(args.fast_fps_values)
 
@@ -317,10 +344,11 @@ def build_reward_config(args):
     """创建和训练脚本一致的 reward 配置。"""
 
     return RewardConfig(
-        score_scale=args.score_scale,
-        survival_bonus=args.survival_bonus,
-        height_delta_weight=args.height_delta_weight,
-        danger_height_weight=args.danger_height_weight,
+        gamma=args.gamma,
+        lambda_phi=args.lambda_phi,
+        capacity_weight=args.capacity_weight,
+        recoverability_weight=args.recoverability_weight,
+        chain_readiness_weight=args.chain_readiness_weight,
         terminal_penalty=args.terminal_penalty,
     )
 
@@ -368,7 +396,15 @@ def run_episode(mode, args, action_count, reward_config, model, graph_builder, d
             action_rng=action_rng,
             device=device,
         )
-        obs, reward, terminated, truncated, info = env.step(action_offset)
+        transition_key = TransitionKey(
+            worker_id=0,
+            episode_id=episode_index,
+            step_index=_step_index,
+        )
+        obs, reward, terminated, truncated, info = env.step(
+            action_offset,
+            transition_key=transition_key,
+        )
 
         frames_simulated = int(info.get('frames_simulated', 0))
         merge_count = len(info.get('merge_events', ()))

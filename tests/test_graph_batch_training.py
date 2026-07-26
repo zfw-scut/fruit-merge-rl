@@ -244,6 +244,21 @@ class GraphBatchTrainingTest(unittest.TestCase):
         self.assertEqual(first_stats.steps, 4)
         self.assertEqual(second_stats.steps, 4)
         self.assertEqual(len(replay_buffer), 8)
+        self.assertEqual(len(set(first_stats.transition_keys)), 4)
+        self.assertEqual(
+            {key.worker_id for key in first_stats.transition_keys},
+            {0, 1},
+        )
+        self.assertEqual(len(first_stats.potential_shaping_abs_values), 4)
+        self.assertEqual(len(second_stats.potential_shaping_abs_values), 4)
+        self.assertGreaterEqual(first_stats.state_analysis_calls, 4)
+        self.assertGreaterEqual(second_stats.state_analysis_calls, 4)
+        self.assertTrue(
+            all(
+                value >= 0.0
+                for value in first_stats.potential_shaping_abs_values
+            )
+        )
         self.assertGreater(first_stats.collect_seconds, 0.0)
         self.assertEqual(len(first_stats.transition_keys), 4)
         self.assertEqual(

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.scripts.train_dqn import (
     EpisodeLogger,
+    build_env_config,
     build_metric_row,
     evaluate_policy,
     load_config_defaults,
@@ -68,13 +69,16 @@ class TrainingMetricsTest(unittest.TestCase):
 
         args = SimpleNamespace(
             action_count=5,
+            physics_fps=30,
             max_physics_frames=120,
             stable_frames=4,
-            score_scale=1.0,
-            survival_bonus=0.05,
-            height_delta_weight=0.02,
-            danger_height_weight=1.0,
-            terminal_penalty=-100.0,
+            space_iterations=8,
+            gamma=0.99,
+            lambda_phi=0.5,
+            capacity_weight=0.6,
+            recoverability_weight=0.3,
+            chain_readiness_weight=0.1,
+            terminal_penalty=0.0,
             eval_episodes=2,
             eval_max_steps=3,
             seed=0,
@@ -96,15 +100,25 @@ class TrainingMetricsTest(unittest.TestCase):
             total_reward=10.0,
             reward_breakdown_totals=(
                 ('total', 10.0),
-                ('score_reward', 8.0),
-                ('survival_bonus', 0.2),
-                ('height_delta_reward', -0.1),
-                ('danger_penalty', -1.0),
-                ('terminal_penalty', 0.0),
-                ('previous_height_ratio', 1.2),
-                ('next_height_ratio', 1.4),
-                ('height_delta_ratio', 0.2),
+                ('task_reward', 8.0),
+                ('potential_shaping_reward', 1.6),
+                ('terminal_penalty', 0.4),
+                ('previous_potential', 1.2),
+                ('next_potential', 1.4),
+                ('potential_delta', 0.2),
+                ('previous_top_connected_capacity', 2.0),
+                ('next_top_connected_capacity', 2.4),
+                ('previous_recoverability', 2.8),
+                ('next_recoverability', 2.4),
+                ('previous_chain_readiness', 0.4),
+                ('next_chain_readiness', 0.8),
+                ('merge_event_count', 4.0),
             ),
+            potential_shaping_abs_values=(0.1, 0.2, 0.3, 0.4),
+            state_analysis_calls=6,
+            state_analysis_seconds=0.06,
+            state_analysis_cache_hits=2,
+            state_analysis_degraded_count=1,
             buffer_size=32,
         )
         train_stats = SimpleNamespace(
@@ -131,9 +145,50 @@ class TrainingMetricsTest(unittest.TestCase):
         )
 
         self.assertEqual(row['collect_mean_reward_total'], 2.5)
-        self.assertEqual(row['collect_mean_score_reward'], 2.0)
-        self.assertEqual(row['collect_mean_danger_penalty'], -0.25)
-        self.assertAlmostEqual(row['collect_mean_next_height_ratio'], 0.35)
+        self.assertEqual(row['collect_mean_task_reward'], 2.0)
+        self.assertEqual(row['collect_mean_potential_shaping_reward'], 0.4)
+        self.assertAlmostEqual(row['collect_mean_next_potential'], 0.35)
+        self.assertAlmostEqual(
+            row['collect_p95_abs_potential_shaping_reward'],
+            0.385,
+        )
+        self.assertEqual(row['collect_state_analysis_calls'], 6)
+        self.assertEqual(row['collect_state_analysis_cache_hits'], 2)
+        self.assertEqual(row['collect_state_analysis_degraded_count'], 1)
+        self.assertAlmostEqual(
+            row['collect_state_analysis_cache_hit_rate'],
+            0.5,
+        )
+        self.assertAlmostEqual(
+            row['collect_state_analysis_degraded_rate'],
+            1 / 6,
+        )
+        self.assertAlmostEqual(
+            row['collect_mean_state_analysis_seconds'],
+            0.01,
+        )
+
+    def test_reward_and_dqn_use_the_same_gamma(self):
+        """训练入口只能从同一个 gamma 构造 TD target 和 Reward V2。"""
+
+        args = parse_args((
+            '--gamma',
+            '0.87',
+            '--lambda-phi',
+            '0.4',
+            '--capacity-weight',
+            '0.5',
+            '--recoverability-weight',
+            '0.3',
+            '--chain-readiness-weight',
+            '0.2',
+        ))
+
+        env_config = build_env_config(args)
+
+        self.assertEqual(args.gamma, 0.87)
+        self.assertEqual(env_config.reward_config.gamma, args.gamma)
+        self.assertEqual(env_config.reward_config.lambda_phi, 0.4)
 
     def test_toml_config_loads_defaults_and_cli_can_override(self):
         """TOML 配置应能提供默认参数，命令行显式参数应优先。"""
@@ -149,6 +204,16 @@ class TrainingMetricsTest(unittest.TestCase):
                     '[training]',
                     'total_updates = 100',
                     'batch_size = 64',
+                    '',
+                    '[dqn]',
+                    'gamma = 0.87',
+                    '',
+                    '[reward]',
+                    'lambda_phi = 0.4',
+                    'capacity_weight = 0.5',
+                    'recoverability_weight = 0.3',
+                    'chain_readiness_weight = 0.2',
+                    'terminal_penalty = 0.0',
                     '',
                     '[parallel]',
                     'num_envs = 4',
@@ -170,6 +235,12 @@ class TrainingMetricsTest(unittest.TestCase):
         self.assertEqual(args.device, 'cuda')
         self.assertEqual(args.total_updates, 20)
         self.assertEqual(args.batch_size, 64)
+        self.assertEqual(args.gamma, 0.87)
+        self.assertEqual(args.lambda_phi, 0.4)
+        self.assertEqual(args.capacity_weight, 0.5)
+        self.assertEqual(args.recoverability_weight, 0.3)
+        self.assertEqual(args.chain_readiness_weight, 0.2)
+        self.assertEqual(args.terminal_penalty, 0.0)
         self.assertEqual(args.num_envs, 4)
         self.assertFalse(args.async_rollout)
 

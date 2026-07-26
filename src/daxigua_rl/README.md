@@ -12,7 +12,11 @@ Boundary rule:
 Current v0 interface:
 
 - `DaxiguaEnv`: gym-like wrapper around `daxigua.core.engine.HeadlessGame`.
-- `RewardConfig`: configurable reward shaping for score, survival, height, danger, and terminal penalty.
+- `RewardConfig`: Reward V2 parameters shared by task utility and potential shaping.
+- Reward V2 values each real merge as `2**((new_level - 2) / 2)` and shapes
+  state changes with `lambda_phi * (gamma * Phi(next) - Phi(previous))`, where
+  `Phi = capacity_weight*C + recoverability_weight*R + chain_readiness_weight*K`.
+  Survival time, maximum pile height, and continuous danger penalties are not rewards.
 - One RL `step(action_index)` means one fruit drop plus headless physics settling, not one rendered frame.
 - `FruitState` and `ActionCandidate` expose both display radius and the actual Pymunk collision radius; graph geometry uses the collision radius.
 - Training and environment code must not import `daxigua.app.Board`, pygame renderers, HUD, audio, or manual input code.
@@ -25,8 +29,12 @@ Current v0 interface:
   read-only `StateAnalyzer`. It uses analytic circular vertical drop columns for
   15-action fruit/queue reachability and blockers, a canonical minimum-fruit
   probe grid for top-connected space and sealed cavities, and static
-  support/partner/motif analysis. Results remain worker-local and are not yet
-  connected to the collector, reward, tracker, or main replay.
+  support/partner/motif analysis. `DaxiguaEnv` caches adjacent analyses inside
+  each worker and uses them for Reward V2; full analysis objects remain
+  worker-local and are not written to the main replay.
+- `DaxiguaEnv.step(..., transition_key=...)` accepts the collector's stable
+  `(worker_id, episode_id, step_index)` identity. Direct callers may omit it and
+  use the environment-local worker-0 identity.
 - `daxigua_rl.scripts.train_dqn`: first full DQN training entrypoint with CSV metrics, checkpoints, greedy evaluation, and matplotlib curves.
 - `daxigua_rl.scripts.watch_dqn`: visual checkpoint viewer that drives the real pygame `Board` with a trained model.
 

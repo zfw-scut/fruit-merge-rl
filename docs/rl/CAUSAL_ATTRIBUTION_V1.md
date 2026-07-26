@@ -46,15 +46,17 @@ DaxiguaEnv
 - 图中已经包含动作、水果、队列、边界和全局节点，以及动作投放路径关系。
 - 正式训练默认使用 15 个离散投放动作、8 个并行环境和 `fast30` 物理模式。
 - 当前长训配置为 500000 次更新，每次更新采集 8 次投放。
+- 每个环境在 worker 内缓存相邻 `StateAnalysis`，Reward V2 已消费 C/R/K potential。
+- `RolloutStats` 和训练 CSV 已记录 Reward V2 分项、shaping p95 与 StateAnalyzer 性能。
 
 现有缺口包括：
 
-- 当前 reward 仍包含存活奖励、最高堆叠高度相关奖励和固定终局惩罚。
 - `TensorTransition` 只保存即时标量 reward，没有历史归因字段。
 - 当前是标准单步 DQN，不是 Double DQN，也没有 n-step return。
-- 当前没有可达性、支撑、封路、埋死或连锁结构分析。
+- 当前已有静态可达性、支撑和基础连锁结构分析，但没有历史谱系、pending
+  封路/埋死事件和兑现追踪。
 - 当前公开 `GameState` 不是可恢复的完整物理快照。
-- 当前 `truncated` 会被当作 episode 结束并关闭 bootstrap，可能错误切断长期谱系。
+- 当前没有 `AttributionTracker`、`CausalReplayBuffer` 或因果排序 loss。
 
 ## 3. V1 总体结构
 
@@ -250,7 +252,9 @@ V1 不使用 `age_frames` 计算负担。年龄受物理模式和稳定帧配置
 - 非终止物理截断：保留下一状态 potential，并允许 bootstrap。
 - 物理异常且无法生成可信下一状态：丢弃该 transition，记录异常，不得伪装成正常死亡。
 
-正式实现 Reward V2 前必须先修正当前 `terminated/truncated` 语义。
+当前实现已经满足上述语义：terminal 不创建 next analysis 并把下一 potential
+强制为零；truncated 生成同 episode 的降级 `analysis[t+1]`，保留 potential 和
+bootstrap，但 reset 后不会跨 episode 复用。
 
 ## 5. 状态分析模型
 
@@ -417,8 +421,9 @@ touches_left_wall / touches_right_wall / touches_floor
 未来同级伙伴仍可形成，因此该分量保守地集中惩罚“零入口死果”；渐进减少的 15 位路径
 仍完整保留给容量和后续 tracker 使用。ladder 暂以 pair 中点近似未来合成位置，实际
 引擎合成坐标可能偏向较低父水果，该误差属于静态近似。所有这些分析都属于动作前稳定
-边界的 worker-local 只读快照；本步骤尚未把它们接入 collector、主 replay、
-Reward V2 或 `AttributionTracker`。
+边界的 worker-local 只读快照；环境已经缓存相邻分析并接入 Reward V2，collector
+负责提供稳定 `TransitionKey` 和聚合性能统计。完整分析仍不进入主 replay，
+`AttributionTracker` 尚未实现。
 
 ### 5.5 四张基础图
 
@@ -1066,7 +1071,8 @@ snapshot
 
 ## 15. 并行采集要求
 
-- 每个 worker 独立维护 `StateAnalyzer`、`AttributionTracker` 和快照环。
+- 每个 worker 独立维护 `StateAnalyzer`；`AttributionTracker` 和快照环实现后也必须
+  保持同一 worker-local 边界。
 - 全局键必须使用 `(worker_id, episode_id, step_index)`。
 - tracker、事件和样本类型必须定义在模块顶层并可 pickle，兼容 Windows `spawn`。
 - 因果任务和结果通过独立有界队列传递。
@@ -1115,7 +1121,8 @@ snapshot
 
 ### 性能
 
-- `StateAnalyzer` 耗时；
+- `StateAnalyzer` 调用次数、总/平均耗时、缓存命中率和降级率；（已接入）
+- potential shaping 绝对值 p95；（已接入）
 - `AttributionTracker` 耗时；
 - 反事实模拟步数；
 - 反事实成本比例；
@@ -1284,7 +1291,7 @@ tests/test_counterfactual.py
 2. 暴露真实物理半径和完整 episode/worker 键。（已完成）
 3. 实现 `StateAnalysis` schema。（已完成）
 4. 实现 15 动作可达性、顶部连通容量、封闭空腔和支撑图。（已完成）
-5. 实现 Reward V2。
+5. 实现 Reward V2。（已完成）
 6. 实现谱系、正负归因事件和 pending 生命周期。
 7. 实现 `CausalReplayBuffer` 与规则排序 loss。
 8. 将 DQN 改为 Double DQN 和 3-step return。

@@ -1,69 +1,172 @@
-"""RL reward shaping 逻辑。
+"""Reward V2：指数合成效用与状态 potential shaping。
 
-游戏本体只负责规则和分数；强化学习奖励属于训练接口的一部分，因此放在
-`daxigua_rl` 中实现。这样后续可以反复调整奖励，而不污染手动游戏逻辑。
+游戏规则层继续维护原始 score；训练奖励只消费真实 ``MergeEvent`` 和
+``StateAnalysis``，避免把存活时间、最高水果高度或同一次连锁重复计分。
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from numbers import Real
+from operator import index
+
+from daxigua.core.rules import MAX_FRUIT_LEVEL, MIN_FRUIT_LEVEL, merge_score
+from daxigua.core.state import MergeEvent, PhysicsResult
+
+from .attribution.schema import StateAnalysis
 
 
-# 训练日志和可视化需要稳定知道 reward breakdown 有哪些字段。
-# 这里集中维护字段顺序，避免 collector、CSV 和画图逻辑各自手写一份后逐渐不一致。
+# 训练日志和可视化只从这里读取稳定字段顺序。
 REWARD_BREAKDOWN_FIELDS = (
     'total',
-    'score_reward',
-    'survival_bonus',
-    'height_delta_reward',
-    'danger_penalty',
+    'task_reward',
+    'potential_shaping_reward',
     'terminal_penalty',
-    'previous_height_ratio',
-    'next_height_ratio',
-    'height_delta_ratio',
+    'previous_potential',
+    'next_potential',
+    'potential_delta',
+    'previous_top_connected_capacity',
+    'next_top_connected_capacity',
+    'previous_recoverability',
+    'next_recoverability',
+    'previous_chain_readiness',
+    'next_chain_readiness',
+    'merge_event_count',
 )
 
 
-@dataclass(frozen=True)
+def _finite_float(name, value, *, minimum=None, maximum=None):
+    """读取有限实数，并拒绝 bool 之类容易误配的值。"""
+
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f'{name} must be a real number')
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f'{name} must be finite')
+    if minimum is not None and result < minimum:
+        raise ValueError(f'{name} must be >= {minimum}')
+    if maximum is not None and result > maximum:
+        raise ValueError(f'{name} must be <= {maximum}')
+    return result
+
+
+def _strict_integer(name, value, *, minimum=None):
+    """读取严格整数，避免浮点截断或 bool 污染事件一致性检查。"""
+
+    if isinstance(value, bool):
+        raise TypeError(f'{name} must be an integer')
+    try:
+        result = index(value)
+    except TypeError as exc:
+        raise TypeError(f'{name} must be an integer') from exc
+    if minimum is not None and result < minimum:
+        raise ValueError(f'{name} must be >= {minimum}')
+    return result
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RewardConfig:
-    """奖励函数配置。
+    """Reward V2 的固定公式参数。
 
-    第一版 reward 由几部分组成：
-
-    - 合成得分奖励：鼓励真实得分。
-    - 存活奖励：轻微鼓励成功完成一次投放。
-    - 高度变化奖励/惩罚：鼓励让堆叠变低，惩罚让堆叠变高。
-    - 危险高度惩罚：局面越接近顶部死亡线，持续惩罚越大。
-    - 终局惩罚：游戏失败时给较大负奖励。
+    ``gamma`` 必须与 DQN target 的折扣因子相同；训练入口只从同一个参数构造两者。
+    ``terminal_penalty`` 默认关闭，仅保留为短跑证明确有必要时的小额显式开关。
     """
 
-    score_scale: float = 1.0
-    survival_bonus: float = 0.05
-    height_delta_weight: float = 0.02
-    danger_height_weight: float = 1.0
-    terminal_penalty: float = -100.0
+    gamma: float = 0.99
+    lambda_phi: float = 0.5
+    capacity_weight: float = 0.6
+    recoverability_weight: float = 0.3
+    chain_readiness_weight: float = 0.1
+    terminal_penalty: float = 0.0
+
+    def __post_init__(self):
+        for field_name in (
+                'gamma',
+                'lambda_phi',
+                'capacity_weight',
+                'recoverability_weight',
+                'chain_readiness_weight'):
+            object.__setattr__(
+                self,
+                field_name,
+                _finite_float(
+                    field_name,
+                    getattr(self, field_name),
+                    minimum=0.0,
+                    maximum=1.0,
+                ),
+            )
+
+        weight_sum = (
+            self.capacity_weight
+            + self.recoverability_weight
+            + self.chain_readiness_weight
+        )
+        if not math.isclose(weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError('potential weights must sum to 1')
+
+        terminal_penalty = _finite_float(
+            'terminal_penalty',
+            self.terminal_penalty,
+            maximum=0.0,
+        )
+        object.__setattr__(self, 'terminal_penalty', terminal_penalty)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RewardBreakdown:
-    """一次 step 的 reward 明细。
-
-    这些字段会放入 `info["reward_breakdown"]`，方便训练日志观察模型到底在被
-    哪些奖励项驱动。
-    """
+    """一次环境 step 的 Reward V2 明细。"""
 
     total: float
-    score_reward: float
-    survival_bonus: float
-    height_delta_reward: float
-    danger_penalty: float
+    task_reward: float
+    potential_shaping_reward: float
     terminal_penalty: float
-    previous_height_ratio: float
-    next_height_ratio: float
-    height_delta_ratio: float
+    previous_potential: float
+    next_potential: float
+    potential_delta: float
+    previous_top_connected_capacity: float
+    next_top_connected_capacity: float
+    previous_recoverability: float
+    next_recoverability: float
+    previous_chain_readiness: float
+    next_chain_readiness: float
+    merge_event_count: int
+
+    def __post_init__(self):
+        for field_name in REWARD_BREAKDOWN_FIELDS:
+            value = getattr(self, field_name)
+            if field_name == 'merge_event_count':
+                if isinstance(value, bool):
+                    raise TypeError('merge_event_count must be an integer')
+                try:
+                    count = index(value)
+                except TypeError as exc:
+                    raise TypeError('merge_event_count must be an integer') from exc
+                if count < 0:
+                    raise ValueError('merge_event_count must be non-negative')
+                object.__setattr__(self, field_name, count)
+            else:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _finite_float(field_name, value),
+                )
+
+        reconstructed = (
+            self.task_reward
+            + self.potential_shaping_reward
+            + self.terminal_penalty
+        )
+        if not math.isclose(
+                self.total,
+                reconstructed,
+                rel_tol=0.0,
+                abs_tol=1e-9):
+            raise ValueError('reward breakdown components must reconstruct total')
 
     def to_dict(self):
-        """转换成普通 dict，方便日志、JSON 或终端打印。"""
+        """转换成普通 dict，供 collector、CSV 和终端日志统一消费。"""
 
         return {
             field_name: getattr(self, field_name)
@@ -71,71 +174,188 @@ class RewardBreakdown:
         }
 
 
-def compute_reward(previous_state, next_state, physics_result, config=None):
-    """根据前后状态和物理结果计算 reward。
+def merge_utility(new_level):
+    """返回合成到等级 ``L`` 的指数任务效用 ``2**((L-2)/2)``。"""
 
-    参数：
-    - `previous_state`: 执行动作前的 `GameState`。
-    - `next_state`: 物理稳定后或终止后的 `GameState`。
-    - `physics_result`: `HeadlessGame.advance_physics(...)` 的结果。
-    - `config`: `RewardConfig`。
+    new_level = _strict_integer('new_level', new_level)
 
-    返回：
-    - `(reward, RewardBreakdown)`
+    minimum_merge_level = MIN_FRUIT_LEVEL + 1
+    if new_level < minimum_merge_level or new_level > MAX_FRUIT_LEVEL:
+        raise ValueError(
+            f'new_level must be in [{minimum_merge_level}, {MAX_FRUIT_LEVEL}]'
+        )
+    return float(2.0 ** ((new_level - 2) / 2.0))
+
+
+def compute_state_potential(analysis, config=None):
+    """由完整状态分析计算 ``Phi(s)``。"""
+
+    if not isinstance(analysis, StateAnalysis):
+        raise TypeError('analysis must be StateAnalysis')
+    config = config or RewardConfig()
+    if not isinstance(config, RewardConfig):
+        raise TypeError('config must be RewardConfig')
+
+    potential = (
+        config.capacity_weight * analysis.top_connected_capacity
+        + config.recoverability_weight * analysis.recoverability
+        + config.chain_readiness_weight * analysis.chain_readiness
+    )
+    # 三个输入和归一化权重都已校验；容忍浮点求和的极小边界误差。
+    return max(0.0, min(1.0, float(potential)))
+
+
+def compute_reward(
+        previous_analysis,
+        next_analysis,
+        physics_result,
+        config=None):
+    """计算 Reward V2，并返回 ``(reward, RewardBreakdown)``。
+
+    真实终止允许 ``next_analysis=None`` 且强制下一 potential 为零；普通 transition
+    和物理截断必须提供相邻的下一状态分析。该函数不运行 ``StateAnalyzer``。
     """
 
     config = config or RewardConfig()
+    if not isinstance(config, RewardConfig):
+        raise TypeError('config must be RewardConfig')
+    if not isinstance(previous_analysis, StateAnalysis):
+        raise TypeError('previous_analysis must be StateAnalysis')
+    if not isinstance(physics_result, PhysicsResult):
+        raise TypeError('physics_result must be PhysicsResult')
+    if physics_result.done and physics_result.truncated:
+        raise ValueError('physics_result cannot be both done and truncated')
 
-    previous_height_ratio = _height_ratio(previous_state)
-    next_height_ratio = _height_ratio(next_state)
-    height_delta_ratio = next_height_ratio - previous_height_ratio
+    if next_analysis is not None:
+        if not isinstance(next_analysis, StateAnalysis):
+            raise TypeError('next_analysis must be StateAnalysis or None')
+        _validate_adjacent_analyses(previous_analysis, next_analysis)
+    elif not physics_result.done:
+        raise ValueError('non-terminal reward requires next_analysis')
 
-    # 真实游戏分数仍然是主奖励来源。
-    score_reward = float(physics_result.score_delta) * config.score_scale
-
-    # 只要这一步没有结束游戏，就给一点点存活奖励。
-    # 数值必须较小，避免模型为了苟活而忽视合成得分。
-    survival_bonus = 0.0 if physics_result.done else float(config.survival_bonus)
-
-    # 高度变高时 height_delta_ratio 为正，给负奖励；
-    # 高度变低时为负，转成正奖励，鼓励通过合成/滚动降低堆叠。
-    height_delta_reward = -float(config.height_delta_weight) * height_delta_ratio
-
-    # 局面整体越高，越接近顶部危险线，持续负奖励越大。
-    danger_penalty = -float(config.danger_height_weight) * next_height_ratio
-
-    # 游戏失败时给终局惩罚。truncated 暂不额外惩罚，后续如果发现物理不稳定被利用再加。
-    terminal_penalty = float(config.terminal_penalty) if physics_result.done else 0.0
-
-    total = (
-        score_reward
-        + survival_bonus
-        + height_delta_reward
-        + danger_penalty
-        + terminal_penalty
+    merge_events = _validate_merge_events(physics_result)
+    task_reward = sum(
+        merge_utility(event.new_level)
+        for event in merge_events
     )
+
+    previous_potential = compute_state_potential(previous_analysis, config)
+    if physics_result.done:
+        next_potential = 0.0
+        next_capacity = 0.0
+        next_recoverability = 0.0
+        next_chain_readiness = 0.0
+    else:
+        next_potential = compute_state_potential(next_analysis, config)
+        next_capacity = float(next_analysis.top_connected_capacity)
+        next_recoverability = float(next_analysis.recoverability)
+        next_chain_readiness = float(next_analysis.chain_readiness)
+
+    potential_delta = config.gamma * next_potential - previous_potential
+    potential_shaping_reward = config.lambda_phi * potential_delta
+    terminal_penalty = (
+        config.terminal_penalty
+        if physics_result.done
+        else 0.0
+    )
+    total = task_reward + potential_shaping_reward + terminal_penalty
 
     breakdown = RewardBreakdown(
         total=float(total),
-        score_reward=float(score_reward),
-        survival_bonus=float(survival_bonus),
-        height_delta_reward=float(height_delta_reward),
-        danger_penalty=float(danger_penalty),
+        task_reward=float(task_reward),
+        potential_shaping_reward=float(potential_shaping_reward),
         terminal_penalty=float(terminal_penalty),
-        previous_height_ratio=float(previous_height_ratio),
-        next_height_ratio=float(next_height_ratio),
-        height_delta_ratio=float(height_delta_ratio),
+        previous_potential=float(previous_potential),
+        next_potential=float(next_potential),
+        potential_delta=float(potential_delta),
+        previous_top_connected_capacity=float(
+            previous_analysis.top_connected_capacity
+        ),
+        next_top_connected_capacity=next_capacity,
+        previous_recoverability=float(previous_analysis.recoverability),
+        next_recoverability=next_recoverability,
+        previous_chain_readiness=float(previous_analysis.chain_readiness),
+        next_chain_readiness=next_chain_readiness,
+        merge_event_count=len(merge_events),
     )
     return float(total), breakdown
 
 
-def _height_ratio(state):
-    """把当前最大堆叠高度归一化到 `[0, 1]`。
+def _validate_adjacent_analyses(previous_analysis, next_analysis):
+    """拒绝跨 worker、跨 episode、跳步或分析口径漂移。"""
 
-    `GameState.max_height` 表示从地板往上算的最高堆叠高度。
-    可玩高度约等于 `height - spawn_y`；越接近 1，说明越接近顶部危险线。
-    """
+    previous_key = previous_analysis.transition_key
+    next_key = next_analysis.transition_key
+    if (
+            previous_key.worker_id != next_key.worker_id
+            or previous_key.episode_id != next_key.episode_id
+            or previous_key.step_index + 1 != next_key.step_index):
+        raise ValueError(
+            'next_analysis must identify the immediately following state '
+            'in the same worker and episode'
+        )
+    if (
+            next_analysis.incoming_transition_key is not None
+            and next_analysis.incoming_transition_key != previous_key):
+        raise ValueError(
+            'next_analysis.incoming_transition_key must match previous analysis'
+        )
+    if (
+            previous_analysis.analyzer_config_fingerprint
+            != next_analysis.analyzer_config_fingerprint):
+        raise ValueError('adjacent analyses must use the same analyzer config')
 
-    playable_height = max(1.0, float(state.geometry.height - state.geometry.spawn_y))
-    ratio = float(state.max_height) / playable_height
-    return max(0.0, min(1.0, ratio))
+
+def _validate_merge_events(physics_result):
+    """检查任务价值所依赖的事件流完整且没有重复。"""
+
+    merge_events = tuple(physics_result.merge_events)
+    if any(not isinstance(event, MergeEvent) for event in merge_events):
+        raise TypeError('physics_result.merge_events must contain MergeEvent values')
+
+    new_fruit_ids = []
+    score_delta_total = 0
+    for event_offset, event in enumerate(merge_events):
+        # merge_utility 同时验证等级范围。
+        merge_utility(event.new_level)
+        expected_score = merge_score(event.new_level)
+        event_score = _strict_integer(
+            f'merge_events[{event_offset}].score_delta',
+            event.score_delta,
+        )
+        if event_score != expected_score:
+            raise ValueError(
+                'merge event score_delta does not match the game rule '
+                f'for level {event.new_level}'
+            )
+        source_ids = tuple(
+            _strict_integer(
+                f'merge_events[{event_offset}].source_ids[{source_offset}]',
+                source_id,
+                minimum=1,
+            )
+            for source_offset, source_id in enumerate(event.source_ids)
+        )
+        if len(source_ids) != 2 or source_ids[0] == source_ids[1]:
+            raise ValueError('merge event must contain two distinct source_ids')
+        new_fruit_id = _strict_integer(
+            f'merge_events[{event_offset}].new_fruit_id',
+            event.new_fruit_id,
+            minimum=1,
+        )
+        if new_fruit_id in source_ids:
+            raise ValueError('merge event new_fruit_id must differ from source_ids')
+        new_fruit_ids.append(new_fruit_id)
+        score_delta_total += event_score
+
+    if len(set(new_fruit_ids)) != len(new_fruit_ids):
+        raise ValueError('merge_events contains duplicate new_fruit_id values')
+    physics_score_delta = _strict_integer(
+        'physics_result.score_delta',
+        physics_result.score_delta,
+    )
+    if score_delta_total != physics_score_delta:
+        raise ValueError(
+            'physics_result.score_delta must equal the sum of merge event scores'
+        )
+    return merge_events

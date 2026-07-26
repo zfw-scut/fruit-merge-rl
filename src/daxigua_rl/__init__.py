@@ -5,7 +5,13 @@ stable interfaces exposed by daxigua, never the other way around.
 """
 
 from .env import DaxiguaEnv, DaxiguaEnvConfig
-from .reward import RewardBreakdown, RewardConfig, compute_reward
+from .reward import (
+    RewardBreakdown,
+    RewardConfig,
+    compute_reward,
+    compute_state_potential,
+    merge_utility,
+)
 from .graph import (
     FeatureAblationConfig,
     FeatureMask,
@@ -31,5 +37,7 @@ __all__ = [
     'RewardBreakdown',
     'RewardConfig',
     'compute_reward',
+    'compute_state_potential',
+    'merge_utility',
     'get_ablation_preset',
 ]

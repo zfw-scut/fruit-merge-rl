@@ -45,7 +45,8 @@ class TrainingCatalogTest(unittest.TestCase):
                 'env_steps',
                 'collect_steps',
                 'collect_mean_reward_total',
-                'collect_mean_score_reward',
+                'collect_mean_task_reward',
+                'collect_mean_potential_shaping_reward',
                 'updates_per_second',
                 'env_steps_per_second',
             )
@@ -61,7 +62,8 @@ class TrainingCatalogTest(unittest.TestCase):
                         'env_steps': 4,
                         'collect_steps': 2,
                         'collect_mean_reward_total': 1,
-                        'collect_mean_score_reward': 2,
+                        'collect_mean_task_reward': 2,
+                        'collect_mean_potential_shaping_reward': -1,
                         'updates_per_second': 3,
                         'env_steps_per_second': 12,
                     }
@@ -72,7 +74,8 @@ class TrainingCatalogTest(unittest.TestCase):
                         'env_steps': 8,
                         'collect_steps': 6,
                         'collect_mean_reward_total': 3,
-                        'collect_mean_score_reward': 4,
+                        'collect_mean_task_reward': 4,
+                        'collect_mean_potential_shaping_reward': -1,
                         'updates_per_second': 4,
                         'env_steps_per_second': 16,
                     }
@@ -128,7 +131,11 @@ class TrainingCatalogTest(unittest.TestCase):
 
             # reward 均值按 collect_steps 加权：(1*2 + 3*6) / 8 = 2.5。
             self.assertEqual(summary.reward_stats['total'], 2.5)
-            self.assertEqual(summary.reward_stats['score_reward'], 3.5)
+            self.assertEqual(summary.reward_stats['task_reward'], 3.5)
+            self.assertEqual(
+                summary.reward_stats['potential_shaping_reward'],
+                -1.0,
+            )
 
             generated_run = output_dir / 'runs' / 'sample_run'
             self.assertTrue((generated_run / 'summary.md').is_file())

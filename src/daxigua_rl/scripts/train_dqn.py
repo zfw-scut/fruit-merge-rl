@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import random
 import sys
@@ -36,19 +37,31 @@ from daxigua_rl.training import (
     ParallelRolloutCollector,
     RolloutCollector,
     RolloutStats,
+    TransitionKey,
 )
 
 
 REWARD_BREAKDOWN_METRIC_FIELDS = (
     ('total', 'collect_mean_reward_total'),
-    ('score_reward', 'collect_mean_score_reward'),
-    ('survival_bonus', 'collect_mean_survival_bonus'),
-    ('height_delta_reward', 'collect_mean_height_delta_reward'),
-    ('danger_penalty', 'collect_mean_danger_penalty'),
+    ('task_reward', 'collect_mean_task_reward'),
+    ('potential_shaping_reward', 'collect_mean_potential_shaping_reward'),
     ('terminal_penalty', 'collect_mean_terminal_penalty'),
-    ('previous_height_ratio', 'collect_mean_previous_height_ratio'),
-    ('next_height_ratio', 'collect_mean_next_height_ratio'),
-    ('height_delta_ratio', 'collect_mean_height_delta_ratio'),
+    ('previous_potential', 'collect_mean_previous_potential'),
+    ('next_potential', 'collect_mean_next_potential'),
+    ('potential_delta', 'collect_mean_potential_delta'),
+    (
+        'previous_top_connected_capacity',
+        'collect_mean_previous_top_connected_capacity',
+    ),
+    (
+        'next_top_connected_capacity',
+        'collect_mean_next_top_connected_capacity',
+    ),
+    ('previous_recoverability', 'collect_mean_previous_recoverability'),
+    ('next_recoverability', 'collect_mean_next_recoverability'),
+    ('previous_chain_readiness', 'collect_mean_previous_chain_readiness'),
+    ('next_chain_readiness', 'collect_mean_next_chain_readiness'),
+    ('merge_event_count', 'collect_mean_merge_event_count'),
 )
 
 
@@ -72,14 +85,20 @@ METRIC_FIELDS = (
     'collect_mean_episode_length',
     'collect_mean_episode_score',
     'collect_mean_reward_total',
-    'collect_mean_score_reward',
-    'collect_mean_survival_bonus',
-    'collect_mean_height_delta_reward',
-    'collect_mean_danger_penalty',
+    'collect_mean_task_reward',
+    'collect_mean_potential_shaping_reward',
     'collect_mean_terminal_penalty',
-    'collect_mean_previous_height_ratio',
-    'collect_mean_next_height_ratio',
-    'collect_mean_height_delta_ratio',
+    'collect_mean_previous_potential',
+    'collect_mean_next_potential',
+    'collect_mean_potential_delta',
+    'collect_mean_previous_top_connected_capacity',
+    'collect_mean_next_top_connected_capacity',
+    'collect_mean_previous_recoverability',
+    'collect_mean_next_recoverability',
+    'collect_mean_previous_chain_readiness',
+    'collect_mean_next_chain_readiness',
+    'collect_mean_merge_event_count',
+    'collect_p95_abs_potential_shaping_reward',
     'collect_seconds',
     'collect_graph_build_seconds',
     'collect_tensor_convert_seconds',
@@ -90,6 +109,13 @@ METRIC_FIELDS = (
     'collect_mean_graph_nodes',
     'collect_mean_graph_edges',
     'collect_graph_cache_hit_rate',
+    'collect_state_analysis_calls',
+    'collect_state_analysis_seconds',
+    'collect_mean_state_analysis_seconds',
+    'collect_state_analysis_cache_hits',
+    'collect_state_analysis_cache_hit_rate',
+    'collect_state_analysis_degraded_count',
+    'collect_state_analysis_degraded_rate',
     'train_step_seconds',
     'replay_sample_seconds',
     'current_collate_seconds',
@@ -216,12 +242,13 @@ def build_arg_parser():
         help='并行采样时提前提交下一批 rollout，让采样和训练尽量重叠。',
     )
 
-    # reward 参数。
-    parser.add_argument('--score-scale', type=float, default=1.0, help='合成分数奖励缩放。')
-    parser.add_argument('--survival-bonus', type=float, default=0.05, help='未死亡 step 的存活小奖励。')
-    parser.add_argument('--height-delta-weight', type=float, default=0.02, help='高度变化奖励权重。')
-    parser.add_argument('--danger-height-weight', type=float, default=1.0, help='危险高度持续惩罚权重。')
-    parser.add_argument('--terminal-penalty', type=float, default=-100.0, help='游戏失败终局惩罚。')
+    # Reward V2。gamma 直接复用上面的 DQN gamma，保证 potential shaping 和
+    # TD / n-step return 使用同一个折扣因子。
+    parser.add_argument('--lambda-phi', type=float, default=0.5, help='状态 potential shaping 的总权重。')
+    parser.add_argument('--capacity-weight', type=float, default=0.6, help='顶部可达投放容量 C(s) 的 potential 权重。')
+    parser.add_argument('--recoverability-weight', type=float, default=0.3, help='水果可恢复性 R(s) 的 potential 权重。')
+    parser.add_argument('--chain-readiness-weight', type=float, default=0.1, help='连锁就绪度 K(s) 的 potential 权重。')
+    parser.add_argument('--terminal-penalty', type=float, default=0.0, help='真实终局的可选额外惩罚；Reward V2 默认关闭。')
 
     # 日志、保存、评估和可视化。
     parser.add_argument('--run-dir', default=None, help='训练输出目录；默认 runs/dqn_YYYYMMDD_HHMMSS。')
@@ -323,8 +350,30 @@ def validate_args(args):
         raise ValueError('--epsilon-end must be in [0, 1]')
     if args.learning_rate <= 0.0:
         raise ValueError('--learning-rate must be positive')
-    if args.gamma < 0.0 or args.gamma > 1.0:
+    if not math.isfinite(args.gamma) or args.gamma < 0.0 or args.gamma > 1.0:
         raise ValueError('--gamma must be in [0, 1]')
+    if (
+            not math.isfinite(args.lambda_phi)
+            or args.lambda_phi < 0.0
+            or args.lambda_phi > 1.0):
+        raise ValueError('--lambda-phi must be in [0, 1]')
+    potential_weights = (
+        args.capacity_weight,
+        args.recoverability_weight,
+        args.chain_readiness_weight,
+    )
+    if any(
+            not math.isfinite(weight) or weight < 0.0 or weight > 1.0
+            for weight in potential_weights):
+        raise ValueError('Reward V2 potential weights must each be in [0, 1]')
+    if not math.isclose(
+            sum(potential_weights),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-9):
+        raise ValueError('Reward V2 potential weights must sum to 1')
+    if not math.isfinite(args.terminal_penalty) or args.terminal_penalty > 0.0:
+        raise ValueError('--terminal-penalty must be finite and <= 0')
     if args.dropout < 0.0 or args.dropout >= 1.0:
         raise ValueError('--dropout must be in [0, 1)')
     if args.progress_interval < 0.0:
@@ -400,12 +449,30 @@ def set_random_seeds(seed):
 def build_env_config(args):
     """根据命令行参数创建环境配置。"""
 
+    reward_defaults = RewardConfig()
     reward_config = RewardConfig(
-        score_scale=args.score_scale,
-        survival_bonus=args.survival_bonus,
-        height_delta_weight=args.height_delta_weight,
-        danger_height_weight=args.danger_height_weight,
-        terminal_penalty=args.terminal_penalty,
+        gamma=getattr(args, 'gamma', reward_defaults.gamma),
+        lambda_phi=getattr(args, 'lambda_phi', reward_defaults.lambda_phi),
+        capacity_weight=getattr(
+            args,
+            'capacity_weight',
+            reward_defaults.capacity_weight,
+        ),
+        recoverability_weight=getattr(
+            args,
+            'recoverability_weight',
+            reward_defaults.recoverability_weight,
+        ),
+        chain_readiness_weight=getattr(
+            args,
+            'chain_readiness_weight',
+            reward_defaults.chain_readiness_weight,
+        ),
+        terminal_penalty=getattr(
+            args,
+            'terminal_penalty',
+            reward_defaults.terminal_penalty,
+        ),
     )
     return DaxiguaEnvConfig(
         action_count=args.action_count,
@@ -671,6 +738,11 @@ class CollectStatsWindow:
         self.graph_edge_count_total = 0
         self.graph_cache_hits = 0
         self.graph_cache_misses = 0
+        self.potential_shaping_abs_values = []
+        self.state_analysis_calls = 0
+        self.state_analysis_seconds = 0.0
+        self.state_analysis_cache_hits = 0
+        self.state_analysis_degraded_count = 0
         self.reward_breakdown_totals = {
             field_name: 0.0
             for field_name in REWARD_BREAKDOWN_FIELDS
@@ -710,6 +782,22 @@ class CollectStatsWindow:
         self.graph_edge_count_total += getattr(stats, 'graph_edge_count_total', 0)
         self.graph_cache_hits += getattr(stats, 'graph_cache_hits', 0)
         self.graph_cache_misses += getattr(stats, 'graph_cache_misses', 0)
+        self.potential_shaping_abs_values.extend(
+            float(value)
+            for value in getattr(stats, 'potential_shaping_abs_values', ())
+        )
+        self.state_analysis_calls += getattr(stats, 'state_analysis_calls', 0)
+        self.state_analysis_seconds += getattr(stats, 'state_analysis_seconds', 0.0)
+        self.state_analysis_cache_hits += getattr(
+            stats,
+            'state_analysis_cache_hits',
+            0,
+        )
+        self.state_analysis_degraded_count += getattr(
+            stats,
+            'state_analysis_degraded_count',
+            0,
+        )
 
         totals = stats.reward_breakdown_totals_dict
         for field_name in REWARD_BREAKDOWN_FIELDS:
@@ -751,6 +839,13 @@ class CollectStatsWindow:
             graph_edge_count_total=self.graph_edge_count_total,
             graph_cache_hits=self.graph_cache_hits,
             graph_cache_misses=self.graph_cache_misses,
+            potential_shaping_abs_values=tuple(
+                self.potential_shaping_abs_values
+            ),
+            state_analysis_calls=self.state_analysis_calls,
+            state_analysis_seconds=self.state_analysis_seconds,
+            state_analysis_cache_hits=self.state_analysis_cache_hits,
+            state_analysis_degraded_count=self.state_analysis_degraded_count,
         )
 
 
@@ -835,7 +930,15 @@ def evaluate_policy(model, args, device, seed_offset=10_000):
                     q_values = model(graph).detach().cpu()
                 action_offset = int(torch.argmax(q_values).item())
 
-                obs, reward, terminated, truncated, info = env.step(action_offset)
+                transition_key = TransitionKey(
+                    worker_id=int(getattr(args, 'num_envs', 1)),
+                    episode_id=episode_index,
+                    step_index=episode_length,
+                )
+                obs, reward, terminated, truncated, info = env.step(
+                    action_offset,
+                    transition_key=transition_key,
+                )
                 episode_reward += reward
                 episode_length += 1
 
@@ -922,72 +1025,77 @@ def _maybe_plot_reward_breakdown(run_dir, rows, x, plt):
     if not _has_any_points(rows, reward_fields):
         return False
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10), constrained_layout=True)
+    fig, axes = plt.subplots(4, 1, figsize=(12, 13), constrained_layout=True)
 
     _plot_one(
         axes[0],
         x,
         _series(rows, 'collect_mean_reward_total'),
         'total',
-        'Reward total and score component',
+        'Reward V2 total and task utility',
     )
     _plot_one(
         axes[0],
         x,
-        _series(rows, 'collect_mean_score_reward'),
-        'score',
-        'Reward total and score component',
+        _series(rows, 'collect_mean_task_reward'),
+        'task',
+        'Reward V2 total and task utility',
     )
 
     _plot_one(
         axes[1],
         x,
-        _series(rows, 'collect_mean_survival_bonus'),
-        'survival',
-        'Reward shaping components',
-    )
-    _plot_one(
-        axes[1],
-        x,
-        _series(rows, 'collect_mean_height_delta_reward'),
-        'height delta',
-        'Reward shaping components',
-    )
-    _plot_one(
-        axes[1],
-        x,
-        _series(rows, 'collect_mean_danger_penalty'),
-        'danger',
-        'Reward shaping components',
+        _series(rows, 'collect_mean_potential_shaping_reward'),
+        'potential shaping',
+        'Potential shaping and terminal component',
     )
     _plot_one(
         axes[1],
         x,
         _series(rows, 'collect_mean_terminal_penalty'),
         'terminal',
-        'Reward shaping components',
+        'Potential shaping and terminal component',
     )
 
     _plot_one(
         axes[2],
         x,
-        _series(rows, 'collect_mean_previous_height_ratio'),
+        _series(rows, 'collect_mean_previous_potential'),
         'previous',
-        'Height ratios used by reward',
+        'State potential',
     )
     _plot_one(
         axes[2],
         x,
-        _series(rows, 'collect_mean_next_height_ratio'),
+        _series(rows, 'collect_mean_next_potential'),
         'next',
-        'Height ratios used by reward',
+        'State potential',
     )
     _plot_one(
         axes[2],
         x,
-        _series(rows, 'collect_mean_height_delta_ratio'),
+        _series(rows, 'collect_mean_potential_delta'),
         'delta',
-        'Height ratios used by reward',
+        'State potential',
+    )
+
+    for metric_field, label in (
+            ('collect_mean_next_top_connected_capacity', 'capacity C'),
+            ('collect_mean_next_recoverability', 'recoverability R'),
+            ('collect_mean_next_chain_readiness', 'chain readiness K')):
+        _plot_one(
+            axes[3],
+            x,
+            _series(rows, metric_field),
+            label,
+            'Next-state potential components',
+        )
+    _plot_one(
+        axes[3],
+        x,
+        _series(rows, 'collect_p95_abs_potential_shaping_reward'),
+        'abs shaping p95',
+        'Next-state potential components',
     )
 
     for axis in axes:
@@ -1090,8 +1198,14 @@ def print_log(row):
         parts.append(f"best_eval={float(row['best_eval_score']):.1f}")
     if row.get('collect_mean_reward_total') not in ('', None):
         parts.append(f"r_total={float(row['collect_mean_reward_total']):+.3f}")
-        parts.append(f"r_score={float(row['collect_mean_score_reward']):+.3f}")
-        parts.append(f"r_danger={float(row['collect_mean_danger_penalty']):+.3f}")
+        parts.append(f"r_task={float(row['collect_mean_task_reward']):+.3f}")
+        parts.append(
+            f"r_phi={float(row['collect_mean_potential_shaping_reward']):+.3f}"
+        )
+        parts.append(
+            'phi_abs_p95='
+            f"{float(row['collect_p95_abs_potential_shaping_reward']):.3f}"
+        )
     if row.get('collect_seconds') not in ('', None):
         parts.append(f"collect={_format_ms(row['collect_seconds'])}(采集)")
         parts.append(f"env={_format_ms(row['collect_env_step_seconds'])}(环境)")
@@ -1101,6 +1215,20 @@ def print_log(row):
         parts.append(f"frames={float(row['collect_mean_physics_frames']):.1f}(物理帧)")
         parts.append(f"nodes={float(row['collect_mean_graph_nodes']):.1f}(节点)")
         parts.append(f"edges={float(row['collect_mean_graph_edges']):.1f}(边)")
+        if row.get('collect_mean_state_analysis_seconds') not in ('', None):
+            parts.append(
+                'analyze='
+                f"{_format_ms(row['collect_mean_state_analysis_seconds'])}"
+                '(状态分析)'
+            )
+            parts.append(
+                'analysis_cache='
+                f"{float(row['collect_state_analysis_cache_hit_rate']):.1%}"
+            )
+            parts.append(
+                'analysis_degraded='
+                f"{int(row['collect_state_analysis_degraded_count'])}"
+            )
 
     print(' | '.join(parts), flush=True)
 
@@ -1199,6 +1327,33 @@ def build_metric_row(
         if graph_cache_total > 0
         else ''
     )
+    state_analysis_calls = int(
+        getattr(collect_stats, 'state_analysis_calls', 0)
+    )
+    state_analysis_seconds = float(
+        getattr(collect_stats, 'state_analysis_seconds', 0.0)
+    )
+    state_analysis_cache_hits = int(
+        getattr(collect_stats, 'state_analysis_cache_hits', 0)
+    )
+    state_analysis_degraded_count = int(
+        getattr(collect_stats, 'state_analysis_degraded_count', 0)
+    )
+    state_analysis_cache_hit_rate = (
+        state_analysis_cache_hits / collect_stats.steps
+        if collect_stats.steps > 0
+        else ''
+    )
+    state_analysis_degraded_rate = (
+        state_analysis_degraded_count / state_analysis_calls
+        if state_analysis_calls > 0
+        else ''
+    )
+    mean_state_analysis_seconds = (
+        state_analysis_seconds / state_analysis_calls
+        if state_analysis_calls > 0
+        else ''
+    )
 
     row = {
         'update_step': update_step,
@@ -1229,6 +1384,22 @@ def build_metric_row(
         'collect_mean_graph_nodes': collect_stats.mean_graph_nodes,
         'collect_mean_graph_edges': collect_stats.mean_graph_edges,
         'collect_graph_cache_hit_rate': graph_cache_hit_rate,
+        'collect_p95_abs_potential_shaping_reward': getattr(
+            collect_stats,
+            'p95_abs_potential_shaping_reward',
+            0.0,
+        ),
+        'collect_state_analysis_calls': state_analysis_calls,
+        'collect_state_analysis_seconds': state_analysis_seconds,
+        'collect_mean_state_analysis_seconds': mean_state_analysis_seconds,
+        'collect_state_analysis_cache_hits': state_analysis_cache_hits,
+        'collect_state_analysis_cache_hit_rate': state_analysis_cache_hit_rate,
+        'collect_state_analysis_degraded_count': (
+            state_analysis_degraded_count
+        ),
+        'collect_state_analysis_degraded_rate': (
+            state_analysis_degraded_rate
+        ),
         'train_step_seconds': getattr(train_stats, 'train_step_seconds', ''),
         'replay_sample_seconds': getattr(train_stats, 'sample_seconds', ''),
         'current_collate_seconds': getattr(train_stats, 'current_collate_seconds', ''),
@@ -1296,6 +1467,10 @@ def train(args):
         target_update_interval=args.target_update_interval,
         grad_clip_norm=grad_clip_norm,
     )
+    if env_config.reward_config.gamma != trainer_config.gamma:
+        raise RuntimeError(
+            'Reward V2 gamma must exactly match DQN trainer gamma'
+        )
     trainer = DQNTrainer(
         online_model=online_model,
         target_model=target_model,

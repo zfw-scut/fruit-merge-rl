@@ -50,6 +50,9 @@ class RolloutStats:
     # 使用 `(字段名, 累计值)` 元组而不是裸 dict，避免 frozen dataclass 持有可变对象。
     reward_breakdown_totals: tuple = field(default_factory=tuple)
 
+    # 每一步 potential shaping 绝对值；日志窗口保留轻量标量以计算真实 p95。
+    potential_shaping_abs_values: tuple = field(default_factory=tuple)
+
     # 本次每个 transition 对应的稳定轨迹键；与采集顺序一一对齐。
     transition_keys: tuple = field(default_factory=tuple)
 
@@ -106,6 +109,16 @@ class RolloutStats:
 
     # 环境 step 累计耗时，包含投放、物理推进、状态快照和 reward 计算。
     env_step_seconds: float = 0.0
+
+    # StateAnalyzer 在当前采集窗口内的真实调用次数和累计耗时。
+    state_analysis_calls: int = 0
+    state_analysis_seconds: float = 0.0
+
+    # 命中上一动作 next_analysis 缓存的 step 数。
+    state_analysis_cache_hits: int = 0
+
+    # 新生成分析中被标记为 degraded 的数量；truncated 边界通常会计入。
+    state_analysis_degraded_count: int = 0
 
     # 环境实际推进的物理帧总数，用于判断 fast physics 是否生效。
     physics_frames_total: int = 0
@@ -169,6 +182,42 @@ class RolloutStats:
         if self.steps <= 0:
             return 0.0
         return self.physics_frames_total / self.steps
+
+    @property
+    def p95_abs_potential_shaping_reward(self):
+        """返回单步 potential shaping 绝对值的线性插值 p95。"""
+
+        values = tuple(
+            float(value)
+            for value in self.potential_shaping_abs_values
+        )
+        if not values:
+            return 0.0
+        ordered = sorted(values)
+        position = 0.95 * (len(ordered) - 1)
+        lower_index = int(position)
+        upper_index = min(lower_index + 1, len(ordered) - 1)
+        fraction = position - lower_index
+        return (
+            ordered[lower_index] * (1.0 - fraction)
+            + ordered[upper_index] * fraction
+        )
+
+    @property
+    def mean_state_analysis_ms(self):
+        """每次实际 StateAnalyzer 调用的平均毫秒数。"""
+
+        if self.state_analysis_calls <= 0:
+            return 0.0
+        return self.state_analysis_seconds * 1000.0 / self.state_analysis_calls
+
+    @property
+    def state_analysis_cache_hit_rate(self):
+        """按环境 step 统计的分析缓存命中率。"""
+
+        if self.steps <= 0:
+            return 0.0
+        return self.state_analysis_cache_hits / self.steps
 
     @property
     def mean_fruit_count(self):
@@ -399,10 +448,15 @@ class RolloutCollector:
             field_name: 0.0
             for field_name in REWARD_BREAKDOWN_FIELDS
         }
+        potential_shaping_abs_values = []
         graph_build_seconds = 0.0
         tensor_convert_seconds = 0.0
         action_select_seconds = 0.0
         env_step_seconds = 0.0
+        state_analysis_calls = 0
+        state_analysis_seconds = 0.0
+        state_analysis_cache_hits = 0
+        state_analysis_degraded_count = 0
         physics_frames_total = 0
         fruit_count_total = 0
         graph_node_count_total = 0
@@ -445,12 +499,36 @@ class RolloutCollector:
             transition_key = self.next_transition_key
 
             env_step_start = time.perf_counter()
-            next_obs, reward, terminated, truncated, next_info = self.env.step(action_offset)
+            next_obs, reward, terminated, truncated, next_info = self.env.step(
+                action_offset,
+                transition_key=transition_key,
+            )
             env_step_seconds += time.perf_counter() - env_step_start
             episode_done = terminated or truncated
-            self._accumulate_reward_breakdown(
+            breakdown_values = self._accumulate_reward_breakdown(
                 reward_breakdown_totals,
                 next_info.get('reward_breakdown'),
+            )
+            if breakdown_values:
+                potential_shaping_abs_values.append(abs(float(
+                    breakdown_values.get('potential_shaping_reward', 0.0)
+                )))
+            self._validate_state_analysis_info(
+                transition_key=transition_key,
+                terminated=terminated,
+                next_info=next_info,
+            )
+            state_analysis_calls += int(
+                next_info.get('state_analysis_calls', 0)
+            )
+            state_analysis_seconds += float(
+                next_info.get('state_analysis_seconds', 0.0)
+            )
+            state_analysis_cache_hits += int(bool(
+                next_info.get('state_analysis_cache_hit', False)
+            ))
+            state_analysis_degraded_count += int(
+                next_info.get('state_analysis_degraded_count', 0)
             )
             physics_frames_total += int(next_info.get('frames_simulated', 0))
             fruit_count_total += int(next_obs.fruit_count)
@@ -513,6 +591,9 @@ class RolloutCollector:
                 (field_name, reward_breakdown_totals[field_name])
                 for field_name in REWARD_BREAKDOWN_FIELDS
             ),
+            potential_shaping_abs_values=tuple(
+                potential_shaping_abs_values
+            ),
             transition_keys=tuple(transition_keys),
             episode_rewards=tuple(episode_rewards),
             episode_lengths=tuple(episode_lengths),
@@ -532,6 +613,10 @@ class RolloutCollector:
             tensor_convert_seconds=tensor_convert_seconds,
             action_select_seconds=action_select_seconds,
             env_step_seconds=env_step_seconds,
+            state_analysis_calls=state_analysis_calls,
+            state_analysis_seconds=state_analysis_seconds,
+            state_analysis_cache_hits=state_analysis_cache_hits,
+            state_analysis_degraded_count=state_analysis_degraded_count,
             physics_frames_total=physics_frames_total,
             fruit_count_total=fruit_count_total,
             graph_node_count_total=graph_node_count_total,
@@ -556,7 +641,7 @@ class RolloutCollector:
         """把环境返回的单步 reward 明细累加到当前采集统计里。"""
 
         if reward_breakdown is None:
-            return
+            return {}
 
         # 正式环境返回 RewardBreakdown 对象；测试或后续适配器也可以返回普通 dict。
         if hasattr(reward_breakdown, 'to_dict'):
@@ -571,6 +656,48 @@ class RolloutCollector:
 
         for field_name in REWARD_BREAKDOWN_FIELDS:
             totals[field_name] += float(values.get(field_name, 0.0))
+        return values
+
+    def _validate_state_analysis_info(
+            self,
+            *,
+            transition_key,
+            terminated,
+            next_info):
+        """确保环境分析身份与 collector 的唯一轨迹身份完全一致。"""
+
+        previous_analysis = next_info.get('previous_state_analysis')
+        next_analysis = next_info.get('next_state_analysis')
+        if previous_analysis is not None:
+            if previous_analysis.transition_key != transition_key:
+                raise RuntimeError(
+                    'environment previous StateAnalysis key does not match '
+                    'collector transition key'
+                )
+
+        if terminated:
+            if next_analysis is not None:
+                raise RuntimeError(
+                    'terminal transition must not return next StateAnalysis'
+                )
+            return
+
+        if next_analysis is not None:
+            expected_next_key = TransitionKey(
+                worker_id=transition_key.worker_id,
+                episode_id=transition_key.episode_id,
+                step_index=transition_key.step_index + 1,
+            )
+            if next_analysis.transition_key != expected_next_key:
+                raise RuntimeError(
+                    'environment next StateAnalysis key is not adjacent to '
+                    'collector transition key'
+                )
+            if next_analysis.incoming_transition_key != transition_key:
+                raise RuntimeError(
+                    'environment next StateAnalysis incoming key does not '
+                    'match collector transition key'
+                )
 
     def _select_action(self, graph, action_count, epsilon):
         """根据 epsilon-greedy 策略返回 `(action_offset, used_random)`。"""

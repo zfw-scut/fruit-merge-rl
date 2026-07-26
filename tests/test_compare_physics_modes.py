@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from daxigua.config import FPS
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig
 from daxigua_rl.scripts.compare_physics_modes import (
+    build_reward_config,
     build_mode_specs,
     parse_fast_fps_values,
     run_episode,
@@ -59,6 +60,25 @@ class ComparePhysicsModesTest(unittest.TestCase):
 
         self.assertEqual(env.game.fps, 30)
         self.assertEqual(env.game.space.iterations, 8)
+
+    def test_reward_config_uses_reward_v2_parameters(self):
+        """物理对比不能悄悄退回旧 score/高度奖励。"""
+
+        config = build_reward_config(SimpleNamespace(
+            gamma=0.87,
+            lambda_phi=0.4,
+            capacity_weight=0.5,
+            recoverability_weight=0.3,
+            chain_readiness_weight=0.2,
+            terminal_penalty=0.0,
+        ))
+
+        self.assertEqual(config.gamma, 0.87)
+        self.assertEqual(config.lambda_phi, 0.4)
+        self.assertEqual(config.capacity_weight, 0.5)
+        self.assertEqual(config.recoverability_weight, 0.3)
+        self.assertEqual(config.chain_readiness_weight, 0.2)
+        self.assertEqual(config.terminal_penalty, 0.0)
 
     def test_run_episode_returns_basic_metrics(self):
         """随机策略下单局对比应返回速度、分数和物理帧统计。"""

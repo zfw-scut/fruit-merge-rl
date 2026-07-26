@@ -3,7 +3,9 @@
 
 训练产生的 checkpoint 和 ReplayBuffer 往往很大，因此项目通过 ``.gitignore``
 忽略整个 ``runs/``。本脚本只读取这些本地产物，提取配置、进度、单局得分、
-reward breakdown、吞吐和文件体积等摘要，写入 ``docs/training_runs/``。
+reward breakdown、StateAnalyzer 性能、吞吐和文件体积等摘要，写入
+``docs/training_runs/``。Reward V2 和历史 Reward V1 使用不同指标列，导出时会
+分别识别并保留原始语义。
 
 生成目录不复制模型权重、ReplayBuffer 或完整 CSV。迁移后的开发者和 Agent
 可以先阅读摘要，再按 ``artifacts.md`` 决定需要另外搬运哪些大文件。
@@ -28,13 +30,49 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = PROJECT_ROOT / 'runs'
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / 'docs' / 'training_runs'
 
+# Reward V2 和历史 reward 使用不同的 CSV 列。这里同时登记两套语义名称，
+# 让新实验能完整导出 potential，旧实验也不会因为字段退役而丢失摘要。
 REWARD_METRIC_FIELDS = (
-    ('total', 'collect_mean_reward_total'),
-    ('score_reward', 'collect_mean_score_reward'),
-    ('survival_bonus', 'collect_mean_survival_bonus'),
-    ('height_delta_reward', 'collect_mean_height_delta_reward'),
-    ('danger_penalty', 'collect_mean_danger_penalty'),
-    ('terminal_penalty', 'collect_mean_terminal_penalty'),
+    ('total', ('collect_mean_reward_total',)),
+    ('task_reward', ('collect_mean_task_reward',)),
+    (
+        'potential_shaping_reward',
+        ('collect_mean_potential_shaping_reward',),
+    ),
+    ('terminal_penalty', ('collect_mean_terminal_penalty',)),
+    ('previous_potential', ('collect_mean_previous_potential',)),
+    ('next_potential', ('collect_mean_next_potential',)),
+    ('potential_delta', ('collect_mean_potential_delta',)),
+    (
+        'previous_top_connected_capacity',
+        ('collect_mean_previous_top_connected_capacity',),
+    ),
+    (
+        'next_top_connected_capacity',
+        ('collect_mean_next_top_connected_capacity',),
+    ),
+    (
+        'previous_recoverability',
+        ('collect_mean_previous_recoverability',),
+    ),
+    (
+        'next_recoverability',
+        ('collect_mean_next_recoverability',),
+    ),
+    (
+        'previous_chain_readiness',
+        ('collect_mean_previous_chain_readiness',),
+    ),
+    (
+        'next_chain_readiness',
+        ('collect_mean_next_chain_readiness',),
+    ),
+    ('merge_event_count', ('collect_mean_merge_event_count',)),
+    # Reward V1 历史字段。只用于读取旧训练，不代表当前训练仍会生成这些奖励。
+    ('score_reward', ('collect_mean_score_reward',)),
+    ('survival_bonus', ('collect_mean_survival_bonus',)),
+    ('height_delta_reward', ('collect_mean_height_delta_reward',)),
+    ('danger_penalty', ('collect_mean_danger_penalty',)),
 )
 
 KEY_CONFIG_FIELDS = (
@@ -63,11 +101,16 @@ KEY_CONFIG_FIELDS = (
     'space_iterations',
     'num_envs',
     'async_rollout',
+    'lambda_phi',
+    'capacity_weight',
+    'recoverability_weight',
+    'chain_readiness_weight',
+    'terminal_penalty',
+    # 以下字段只存在于 Reward V1 历史配置；保留用于解释旧训练。
     'score_scale',
     'survival_bonus',
     'height_delta_weight',
     'danger_height_weight',
-    'terminal_penalty',
 )
 
 
@@ -86,6 +129,7 @@ class RunSummary:
     run_id: str
     source_dir: Path
     status: str
+    reward_version: str
     config: dict[str, Any]
     config_args: dict[str, Any]
     final_metrics: dict[str, Any]
@@ -296,6 +340,57 @@ def weighted_metric_mean(rows: list[dict[str, str]], field: str) -> float | None
     return weighted_total / weight_total
 
 
+def first_metric_field(
+        rows: list[dict[str, str]],
+        candidates: Iterable[str]) -> str | None:
+    """返回 CSV 中实际存在的第一个候选字段。
+
+    当前候选 tuple 通常只有一个名字；保留别名能力可以兼容短期实验中曾经使用过、
+    但没有进入最终接口的列名，而无需复制整套汇总逻辑。
+    """
+
+    available = {
+        field
+        for row in rows
+        for field in row
+    }
+    return next(
+        (field for field in candidates if field in available),
+        None,
+    )
+
+
+def detect_reward_version(
+        config_args: dict[str, Any],
+        metric_rows: list[dict[str, str]]) -> str:
+    """根据配置和 CSV 字段区分当前 Reward V2 与历史奖励。
+
+    历史 ``config.json`` 没有显式版本号，因此优先识别 V2 的 task/potential 字段，
+    再退回旧 score/survival/height 字段；两类证据都没有时保持未知。
+    """
+
+    available = {
+        field
+        for row in metric_rows
+        for field in row
+    }
+    if (
+            'collect_mean_task_reward' in available
+            or 'collect_mean_potential_shaping_reward' in available
+            or 'lambda_phi' in config_args):
+        return 'Reward V2'
+    if any(
+            field in available
+            for field in (
+                'collect_mean_score_reward',
+                'collect_mean_survival_bonus',
+                'collect_mean_height_delta_reward',
+                'collect_mean_danger_penalty',
+            )):
+        return 'Reward V1（历史）'
+    return '未记录'
+
+
 def collect_final_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
     """提取训练结束或中断时的主要指标。"""
 
@@ -318,6 +413,15 @@ def collect_final_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
         'env_steps_per_second',
         'best_eval_score',
         'best_eval_update',
+        # Reward V2/StateAnalyzer 校准指标。旧 CSV 中不存在时自然得到 None。
+        'collect_p95_abs_potential_shaping_reward',
+        'collect_state_analysis_calls',
+        'collect_state_analysis_seconds',
+        'collect_mean_state_analysis_seconds',
+        'collect_state_analysis_cache_hits',
+        'collect_state_analysis_degraded_count',
+        'collect_state_analysis_cache_hit_rate',
+        'collect_state_analysis_degraded_rate',
     )
     result = {field: number(final_row.get(field)) for field in fields}
 
@@ -427,16 +531,17 @@ def build_run_summary(run_dir: Path) -> RunSummary | None:
     metric_rows = read_csv_rows(metrics_path)
     episode_rows = read_csv_rows(run_dir / 'episode_metrics.csv')
     final_metrics = collect_final_metrics(metric_rows)
-    reward_stats = {
-        name: weighted_metric_mean(metric_rows, field)
-        for name, field in REWARD_METRIC_FIELDS
-        if any(field in row for row in metric_rows)
-    }
+    reward_stats = {}
+    for name, field_candidates in REWARD_METRIC_FIELDS:
+        field = first_metric_field(metric_rows, field_candidates)
+        if field is not None:
+            reward_stats[name] = weighted_metric_mean(metric_rows, field)
 
     return RunSummary(
         run_id=run_dir.name,
         source_dir=run_dir,
         status=detect_status(config_args, final_metrics),
+        reward_version=detect_reward_version(config_args, metric_rows),
         config=config,
         config_args=config_args,
         final_metrics=final_metrics,
@@ -478,6 +583,7 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
     metrics_summary = {
         'run_id': summary.run_id,
         'status': summary.status,
+        'reward_version': summary.reward_version,
         'source_relative_path': f'runs/{summary.run_id}',
         'total_size_bytes': summary.total_size_bytes,
         'config': key_config(summary.config_args),
@@ -500,6 +606,7 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
         '| 字段 | 值 |',
         '| --- | ---: |',
         f'| 状态 | {markdown_cell(summary.status)} |',
+        f'| 奖励版本 | {markdown_cell(summary.reward_version)} |',
         f'| 创建时间 | {markdown_cell(created_at)} |',
         f'| 目标更新数 | {markdown_cell(integer(config.get("total_updates")))} |',
         f'| 实际更新数 | {markdown_cell(integer(final.get("update_step")))} |',
@@ -547,6 +654,24 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
     ):
         summary_lines.append(f'| `{field}` | {markdown_cell(final.get(field))} |')
 
+    reward_v2_calibration_fields = (
+        'collect_p95_abs_potential_shaping_reward',
+        'collect_state_analysis_calls',
+        'collect_state_analysis_seconds',
+        'collect_mean_state_analysis_seconds',
+        'collect_state_analysis_cache_hits',
+        'collect_state_analysis_degraded_count',
+        'collect_state_analysis_cache_hit_rate',
+        'collect_state_analysis_degraded_rate',
+    )
+    if any(
+            final.get(field) is not None
+            for field in reward_v2_calibration_fields):
+        for field in reward_v2_calibration_fields:
+            summary_lines.append(
+                f'| `{field}` | {markdown_cell(final.get(field))} |'
+            )
+
     summary_lines.extend(
         [
             '',
@@ -578,7 +703,10 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
             '',
             '## Reward Breakdown',
             '',
-            '以下数值按每行 `collect_steps` 加权，表示整个已记录训练区间内每次投放的平均贡献。',
+            f'识别版本：**{summary.reward_version}**。',
+            '',
+            '以下数值按每行 `collect_steps` 加权，表示整个已记录训练区间内每次投放的平均贡献。 '
+            'Reward V2 使用 task/potential 字段，历史 Reward V1 保留原 score/survival/height 字段。',
             '',
             '| 奖励项 | 每次投放平均贡献 |',
             '| --- | ---: |',
@@ -692,17 +820,18 @@ def write_index(output_dir: Path, summaries: list[RunSummary], other_outputs: li
         '',
         '## 训练实验',
         '',
-        '| Run | 状态 | Updates | Env Steps | Episodes | 平均分 | 中位数 | 最高分 | Eval 最佳 | 数据体积 |',
-        '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
+        '| Run | 状态 | Reward | Updates | Env Steps | Episodes | 平均分 | 中位数 | 最高分 | Eval 最佳 | 数据体积 |',
+        '| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |',
     ]
     for summary in summaries:
         final = summary.final_metrics
         episode = summary.episode_stats
         lines.append(
-            '| [{run}](runs/{run}/summary.md) | {status} | {updates} | {env_steps} | '
+            '| [{run}](runs/{run}/summary.md) | {status} | {reward_version} | {updates} | {env_steps} | '
             '{episodes} | {mean} | {median} | {maximum} | {best_eval} | {size} |'.format(
                 run=summary.run_id,
                 status=markdown_cell(summary.status),
+                reward_version=markdown_cell(summary.reward_version),
                 updates=markdown_cell(integer(final.get('update_step'))),
                 env_steps=markdown_cell(integer(final.get('env_steps'))),
                 episodes=markdown_cell(episode.get('count')),
@@ -800,6 +929,10 @@ python tools/export_training_catalog.py \\
 ## 数据解释限制
 
 - 早期训练版本没有 `episode_metrics.csv` 或 reward breakdown 时，对应字段会显示“未记录”。
+- 当前导出器同时识别 Reward V2 的 task/potential 指标与 Reward V1 的
+  score/survival/height 指标；旧字段只用于解释历史实验，不代表仍在当前训练中启用。
+- Reward V2 的 `StateAnalyzer` 性能、降级率和 shaping p95 只会出现在采用新版
+  `metrics.csv` 的实验中。
 - 历史 `config.json` 没有 Git commit 字段，因此不能可靠推断训练对应的源码提交。
 - 指标摘要来自已经落盘的 CSV；突然断电前尚未 flush 的最后几轮不会出现。
 """

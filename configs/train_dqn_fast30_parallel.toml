@@ -102,20 +102,20 @@ worker_sync_interval = 100
 async_rollout = true
 
 [reward]
-# 得分奖励：合成分数奖励的缩放系数。
-score_scale = 1.0
+# Reward V2 的状态塑形总权重。
+lambda_phi = 0.5
 
-# 存活奖励：未死亡 step 的小额奖励。
-survival_bonus = 0.05
+# 顶部可达投放容量 C(s) 的 potential 权重。
+capacity_weight = 0.6
 
-# 高度变化：堆叠变低给正反馈、变高给负反馈的权重。
-height_delta_weight = 0.02
+# 水果可恢复性 R(s) 的 potential 权重。
+recoverability_weight = 0.3
 
-# 危险惩罚：场上水果越靠近顶部，持续惩罚越大。
-danger_height_weight = 1.0
+# 连锁就绪度 K(s) 的 potential 权重；三项权重之和必须为 1。
+chain_readiness_weight = 0.1
 
-# 终局惩罚：游戏失败时给予的负奖励。
-terminal_penalty = -100.0
+# 真实终局的可选额外惩罚。Reward V2 默认关闭，失败代价由未来回报归零表达。
+terminal_penalty = 0.0
 
 [logging]
 # 训练日志：每多少次 update 写一行 metrics 并打印训练日志。

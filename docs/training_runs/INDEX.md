@@ -35,6 +35,8 @@
 ## 阅读说明
 
 - 比较模型效果时以真实 `episode score` 为准，不以 shaped reward 代替游戏分数。
+- 本页生成于 Reward V2 接入前，表中实验均按各自历史 `config.json` 和 CSV 解释；
+  下次重新导出后会新增 Reward 版本列并识别 V2 task/potential 指标。
 - `未完成或中断` 仅表示最后一行 update 小于配置目标，不能判断进程是手动停止还是异常退出。
 - Smoke/debug 运行主要验证代码链路，不应与正式长训直接比较。
 - 本目录没有复制 checkpoint 和 ReplayBuffer；需要时按各 Run 的 `artifacts.md` 单独迁移。
