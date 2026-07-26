@@ -20,6 +20,7 @@ __all__ = [
     'RolloutCollector',
     'RolloutStats',
     'TensorTransition',
+    'TransitionKey',
 ]
 
 
@@ -55,5 +56,10 @@ def __getattr__(name):
         from .tensor_transition import TensorTransition
 
         return TensorTransition
+
+    if name == 'TransitionKey':
+        from .identity import TransitionKey
+
+        return TransitionKey
 
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

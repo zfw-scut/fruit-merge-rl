@@ -58,6 +58,7 @@ def _worker_init(worker_index, env_config, model_config, seed):
         replay_buffer=local_buffer,
         model=_WORKER_MODEL,
         seed=_WORKER_SEED,
+        worker_id=worker_index,
     )
 
 
@@ -217,6 +218,10 @@ class ParallelRolloutCollector:
         worker_stats = []
         for transition_bytes, stats in results:
             transitions = _load_from_bytes(transition_bytes)
+            if len(transitions) != stats.steps or len(stats.transition_keys) != stats.steps:
+                raise RuntimeError(
+                    'parallel worker returned misaligned transitions, stats, or transition keys'
+                )
             all_transitions.extend(transitions)
             worker_stats.append(stats)
 
@@ -258,6 +263,7 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
     episode_rewards = []
     episode_lengths = []
     episode_scores = []
+    transition_keys = []
     episode_end_offsets = []
     episode_terminated_flags = []
     episode_truncated_flags = []
@@ -284,6 +290,7 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         episode_rewards.extend(stats.episode_rewards)
         episode_lengths.extend(stats.episode_lengths)
         episode_scores.extend(stats.episode_scores)
+        transition_keys.extend(stats.transition_keys)
         episode_end_offsets.extend(
             step_offset + int(offset)
             for offset in stats.episode_end_offsets
@@ -315,6 +322,7 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
             (field_name, reward_breakdown_totals[field_name])
             for field_name in REWARD_BREAKDOWN_FIELDS
         ),
+        transition_keys=tuple(transition_keys),
         episode_rewards=tuple(episode_rewards),
         episode_lengths=tuple(episode_lengths),
         episode_scores=tuple(episode_scores),

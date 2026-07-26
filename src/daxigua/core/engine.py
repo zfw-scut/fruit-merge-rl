@@ -282,6 +282,7 @@ class HeadlessGame:
 
         current_level = self.current_level()
         current_radius = fruit_radius(current_level)
+        current_physics_radius = dropped_fruit_physics_radius(current_level)
         left = self.wall_width + current_radius + 2
         right = self.width - self.wall_width - current_radius - 2
 
@@ -298,6 +299,7 @@ class HeadlessGame:
                 normalized_drop_x=0.0 if right == left else (position - left) / (right - left),
                 current_level=current_level,
                 current_radius=current_radius,
+                current_physics_radius=current_physics_radius,
             )
             for index, position in enumerate(positions)
         ]
@@ -330,7 +332,13 @@ class HeadlessGame:
     def advance_physics(self, max_frames=None, until_stable=True, stable_frames=15):
         """推进物理世界，直到稳定、失败或达到最大帧数。"""
 
-        frame_limit = max_frames or self.fps * 6
+        frame_limit = self.fps * 6 if max_frames is None else int(max_frames)
+        stable_frames = int(stable_frames)
+        if frame_limit <= 0:
+            raise ValueError('max_frames must be positive')
+        if until_stable and stable_frames <= 0:
+            raise ValueError('stable_frames must be positive')
+
         frames_simulated = 0
         stable_count = 0
         score_before = self.score
@@ -358,8 +366,19 @@ class HeadlessGame:
                 else:
                     stable_count = 0
 
-        stable = self._is_stable()
-        truncated = frames_simulated >= frame_limit and not stable and not self.is_done()
+        # `until_stable=True` 要求连续满足 stable_frames 帧；不能用最后一帧的
+        # 瞬时速度代替，否则恰好在帧上限首次静止时会漏报 truncated。
+        stable = (
+            stable_count >= stable_frames
+            if until_stable
+            else self._is_stable()
+        )
+        truncated = (
+            until_stable
+            and frames_simulated >= frame_limit
+            and not stable
+            and not self.is_done()
+        )
 
         return PhysicsResult(
             frames_simulated=frames_simulated,
@@ -415,13 +434,16 @@ class HeadlessGame:
         max_level = max((fruit.level for fruit in fruits), default=0)
 
         if fruits:
-            highest_top = min(fruit.y - fruit.radius for fruit in fruits)
+            highest_top = min(fruit.y - fruit.physics_radius for fruit in fruits)
             max_height = self.height - highest_top
         else:
             max_height = 0.0
 
         playable_area = max(1.0, self.width * (self.height - self.spawn_y))
-        fruit_area = sum(math.pi * fruit.radius * fruit.radius for fruit in fruits)
+        fruit_area = sum(
+            math.pi * fruit.physics_radius * fruit.physics_radius
+            for fruit in fruits
+        )
         empty_space_ratio = max(0.0, min(1.0, 1 - fruit_area / playable_area))
 
         return GameState(
@@ -451,6 +473,7 @@ class HeadlessGame:
         meta = self._meta_for(ball)
         level = meta.level
         radius = fruit_radius(level)
+        physics_radius = float(ball.radius)
         x, y = ball.body.position
         vx, vy = ball.body.velocity
         stable = (
@@ -470,8 +493,13 @@ class HeadlessGame:
             angular_velocity=float(ball.body.angular_velocity),
             age_frames=meta.age_frames,
             stable=stable,
-            distance_to_left_wall=float(x - (self.wall_width + radius)),
-            distance_to_right_wall=float((self.width - self.wall_width - radius) - x),
-            distance_to_floor=float((self.height - self.wall_width - radius) - y),
-            distance_to_danger_line=float((y - radius) - self.spawn_y),
+            distance_to_left_wall=float(x - (self.wall_width + physics_radius)),
+            distance_to_right_wall=float(
+                (self.width - self.wall_width - physics_radius) - x
+            ),
+            distance_to_floor=float(
+                (self.height - self.wall_width - physics_radius) - y
+            ),
+            distance_to_danger_line=float((y - physics_radius) - self.spawn_y),
+            physics_radius=physics_radius,
         )

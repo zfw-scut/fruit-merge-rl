@@ -20,6 +20,7 @@ import torch
 from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS
 from daxigua_rl.graph.tensor import graph_to_tensor
 
+from .identity import TransitionKey
 from .replay_buffer import ReplayBuffer
 from .tensor_transition import TensorTransition
 
@@ -48,6 +49,9 @@ class RolloutStats:
     # 本次采集中各 reward breakdown 字段的累计值。
     # 使用 `(字段名, 累计值)` 元组而不是裸 dict，避免 frozen dataclass 持有可变对象。
     reward_breakdown_totals: tuple = field(default_factory=tuple)
+
+    # 本次每个 transition 对应的稳定轨迹键；与采集顺序一一对齐。
+    transition_keys: tuple = field(default_factory=tuple)
 
     # 本次采集中每个已结束 episode 的累计 reward。
     episode_rewards: tuple = field(default_factory=tuple)
@@ -260,7 +264,8 @@ class RolloutCollector:
             replay_buffer,
             model=None,
             policy=None,
-            seed=None):
+            seed=None,
+            worker_id=0):
         """创建 rollout collector。
 
         参数：
@@ -270,6 +275,7 @@ class RolloutCollector:
         - `model`: 可选 Q 网络；当 `epsilon < 1.0` 时必须提供。
         - `policy`: 可选动作策略，默认使用 `EpsilonGreedyPolicy`。
         - `seed`: 默认策略随机种子。
+        - `worker_id`: 当前采集器在本次训练 run 内的稳定 worker 编号。
         """
 
         if not isinstance(replay_buffer, ReplayBuffer):
@@ -280,6 +286,9 @@ class RolloutCollector:
         self.replay_buffer = replay_buffer
         self.model = model
         self.policy = policy or EpsilonGreedyPolicy(seed=seed)
+        self.worker_id = int(worker_id)
+        if self.worker_id < 0:
+            raise ValueError('worker_id must be non-negative')
 
         # `_obs` 和 `_info` 保存当前 episode 的最新状态。
         # collect_steps 第一次调用时如果发现它们为空，会自动 reset。
@@ -288,6 +297,7 @@ class RolloutCollector:
         self._current_graph = None
         self._episode_reward = 0.0
         self._episode_length = 0
+        self._episode_id = -1
 
     def reset(self, seed=None, fruit_queue=None):
         """重置环境并开始一个新的 episode。
@@ -296,7 +306,9 @@ class RolloutCollector:
         普通情况下可以直接调用 `collect_steps()`，collector 会自动 reset。
         """
 
-        self._obs, self._info = self.env.reset(seed=seed, fruit_queue=fruit_queue)
+        obs, info = self.env.reset(seed=seed, fruit_queue=fruit_queue)
+        self._episode_id += 1
+        self._obs, self._info = obs, info
         self._current_graph = None
         self._episode_reward = 0.0
         self._episode_length = 0
@@ -307,6 +319,33 @@ class RolloutCollector:
         """collector 当前是否已经持有一个可继续采集的环境状态。"""
 
         return self._obs is not None and self._info is not None
+
+    @property
+    def current_episode_id(self):
+        """当前 worker-local episode 编号；尚未 reset 时返回 None。"""
+
+        if not self.has_state:
+            return None
+        return self._episode_id
+
+    @property
+    def next_transition_key(self):
+        """返回下一次动作将使用的稳定轨迹键。"""
+
+        if not self.has_state:
+            raise RuntimeError('collector must be reset before requesting a transition key')
+
+        step_index = int(self._obs.step_count)
+        if step_index != self._episode_length:
+            raise RuntimeError(
+                'collector episode length is out of sync with GameState.step_count: '
+                f'{self._episode_length} != {step_index}'
+            )
+        return TransitionKey(
+            worker_id=self.worker_id,
+            episode_id=self._episode_id,
+            step_index=step_index,
+        )
 
     def collect_steps(self, step_count, epsilon=1.0):
         """收集指定数量的 transition，并写入 replay buffer。
@@ -345,6 +384,7 @@ class RolloutCollector:
         collect_start = time.perf_counter()
         steps = 0
         total_reward = 0.0
+        transition_keys = []
         episode_rewards = []
         episode_lengths = []
         episode_scores = []
@@ -401,10 +441,13 @@ class RolloutCollector:
             )
             action_select_seconds += time.perf_counter() - action_select_start
 
+            # 身份必须在动作执行前生成，后续状态分析、谱系和事件都绑定到同一键。
+            transition_key = self.next_transition_key
+
             env_step_start = time.perf_counter()
             next_obs, reward, terminated, truncated, next_info = self.env.step(action_offset)
             env_step_seconds += time.perf_counter() - env_step_start
-            done = terminated or truncated
+            episode_done = terminated or truncated
             self._accumulate_reward_breakdown(
                 reward_breakdown_totals,
                 next_info.get('reward_breakdown'),
@@ -412,10 +455,9 @@ class RolloutCollector:
             physics_frames_total += int(next_info.get('frames_simulated', 0))
             fruit_count_total += int(next_obs.fruit_count)
 
-            # terminal/truncated transition 不 bootstrap，因此不强制构建 next_graph。
-            # 非终止 transition 需要下一状态图，后续 DQN target 要读取 max_next_q。
+            # 只有真实终止关闭 bootstrap；物理截断仍保留可信 final observation。
             next_graph = None
-            if not done:
+            if not terminated:
                 next_graph, build_seconds, convert_seconds = self._build_graph_tensor(
                     next_obs,
                     next_info['action_candidates'],
@@ -432,6 +474,7 @@ class RolloutCollector:
                 truncated=truncated,
             )
             self.replay_buffer.push(transition)
+            transition_keys.append(transition_key)
 
             steps += 1
             total_reward += reward
@@ -443,7 +486,7 @@ class RolloutCollector:
             else:
                 greedy_actions += 1
 
-            if done:
+            if episode_done:
                 episode_rewards.append(self._episode_reward)
                 episode_lengths.append(self._episode_length)
                 episode_scores.append(next_obs.score)
@@ -470,6 +513,7 @@ class RolloutCollector:
                 (field_name, reward_breakdown_totals[field_name])
                 for field_name in REWARD_BREAKDOWN_FIELDS
             ),
+            transition_keys=tuple(transition_keys),
             episode_rewards=tuple(episode_rewards),
             episode_lengths=tuple(episode_lengths),
             episode_scores=tuple(episode_scores),

@@ -7,7 +7,11 @@
 import math
 from dataclasses import dataclass
 
-from daxigua.core.rules import FRUIT_RADII, MAX_FRUIT_LEVEL, fruit_radius
+from daxigua.core.rules import (
+    FRUIT_RADII,
+    MAX_FRUIT_LEVEL,
+    dropped_fruit_physics_radius,
+)
 
 from .schema import (
     BOUNDARY_TYPES,
@@ -321,7 +325,7 @@ class GraphBuilder:
             'vx': self._signed(fruit.vx, self.config.velocity_scale),
             'vy': self._signed(fruit.vy, self.config.velocity_scale),
             'level': self._level(fruit.level),
-            'radius': self._radius(fruit.radius),
+            'radius': self._radius(self._fruit_physics_radius(fruit)),
             'stable': self._flag(fruit.stable),
             'distance_to_left_wall': self._signed(fruit.distance_to_left_wall, geometry.width),
             'distance_to_right_wall': self._signed(fruit.distance_to_right_wall, geometry.width),
@@ -337,7 +341,7 @@ class GraphBuilder:
 
         return {
             'level': self._level(level),
-            'radius': self._radius(fruit_radius(level)),
+            'radius': self._radius(dropped_fruit_physics_radius(level)),
             'queue_index': self._queue_index(queue_index, queue_length),
             'is_current_queue_fruit': self._flag(queue_index == 0),
         }
@@ -349,7 +353,7 @@ class GraphBuilder:
             'x': self._signed(action.drop_x, geometry.width),
             'action_index': self._queue_index(action_offset, action_count),
             'level': self._level(action.current_level),
-            'radius': self._radius(action.current_radius),
+            'radius': self._radius(self._action_physics_radius(action)),
         }
 
     def _global_features(self, state):
@@ -630,7 +634,10 @@ class GraphBuilder:
         dx = target.x - source.x
         dy = target.y - source.y
         distance = math.hypot(dx, dy)
-        radius_sum = source.radius + target.radius
+        radius_sum = (
+            self._fruit_physics_radius(source)
+            + self._fruit_physics_radius(target)
+        )
         level_diff = target.level - source.level
         relative_vx = target.vx - source.vx
         relative_vy = target.vy - source.vy
@@ -661,7 +668,11 @@ class GraphBuilder:
 
         horizontal_distance = abs(action.drop_x - fruit.x)  # 不带方向的水平距离，判断水果是否接近投放路径。
         vertical_distance = abs(fruit.y - geometry.spawn_y)  # 不带方向的垂直距离，判断水果位于投放起点下方多远。
-        radius_sum = action.current_radius + fruit.radius    # 两个水果横向接触所需的距离阈值。
+        # 两个水果横向接触所需的距离阈值必须使用真实碰撞半径。
+        radius_sum = (
+            self._action_physics_radius(action)
+            + self._fruit_physics_radius(fruit)
+        )
         path_overlap_margin = radius_sum - horizontal_distance
         level_diff = action.current_level - fruit.level      # 当前投放水果和场上水果的等级差。
 
@@ -700,8 +711,26 @@ class GraphBuilder:
         return {
             'distance_to_boundary': self._signed(distance, scale),
             # `distance` 已经是“水果外缘到边界”的距离，小于半径就说明比较贴近。
-            'is_near_boundary': self._flag(distance <= fruit.radius),
+            'is_near_boundary': self._flag(
+                distance <= self._fruit_physics_radius(fruit)
+            ),
         }
+
+    def _fruit_physics_radius(self, fruit):
+        """读取场上水果的碰撞半径，并兼容旧状态对象。"""
+
+        physics_radius = getattr(fruit, 'physics_radius', None)
+        return float(fruit.radius if physics_radius is None else physics_radius)
+
+    def _action_physics_radius(self, action):
+        """读取待投放水果的碰撞半径，并兼容旧动作对象。"""
+
+        physics_radius = getattr(action, 'current_physics_radius', None)
+        return float(
+            action.current_radius
+            if physics_radius is None
+            else physics_radius
+        )
 
     def _level(self, level):
         """归一化水果等级。"""

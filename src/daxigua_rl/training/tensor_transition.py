@@ -31,7 +31,8 @@ class TensorTransition:
     # 执行动作后的即时奖励。
     reward: float
 
-    # 下一状态图。terminal/truncated transition 可以为 None。
+    # 下一状态图。只有真实 terminal transition 可以为 None；
+    # truncated transition 仍需保存可信 final observation 供 bootstrap。
     next_graph: GraphTensor | None
 
     # 游戏规则意义上的终止。
@@ -63,12 +64,12 @@ class TensorTransition:
             )
 
         if self.next_graph is None:
-            if not self.done:
-                raise ValueError('non-terminal transition must provide next_graph')
+            if not self.terminated:
+                raise ValueError('non-terminated transition must provide next_graph')
             return
 
-        if not self.done and self.next_action_count <= 0:
-            raise ValueError('non-terminal next_graph must contain at least one action node')
+        if not self.terminated and self.next_action_count <= 0:
+            raise ValueError('non-terminated next_graph must contain at least one action node')
 
     @property
     def action_count(self):
@@ -106,4 +107,4 @@ class TensorTransition:
     def can_bootstrap(self):
         """DQN target 是否可以读取下一状态 Q 值。"""
 
-        return self.next_graph is not None and not self.done
+        return self.next_graph is not None and not self.terminated

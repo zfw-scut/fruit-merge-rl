@@ -26,6 +26,19 @@ class FruitState:
     distance_to_right_wall: float
     distance_to_floor: float
     distance_to_danger_line: float
+    physics_radius: float | None = None
+
+    def __post_init__(self):
+        """补齐真实碰撞半径，同时兼容旧调用方只传显示半径。"""
+
+        physics_radius = self.radius if self.physics_radius is None else self.physics_radius
+        object.__setattr__(self, 'radius', float(self.radius))
+        object.__setattr__(self, 'physics_radius', float(physics_radius))
+
+        if self.radius <= 0:
+            raise ValueError('radius must be positive')
+        if self.physics_radius <= 0:
+            raise ValueError('physics_radius must be positive')
 
 
 @dataclass(frozen=True)
@@ -48,6 +61,23 @@ class ActionCandidate:
     normalized_drop_x: float
     current_level: int
     current_radius: float
+    current_physics_radius: float | None = None
+
+    def __post_init__(self):
+        """补齐待投放水果碰撞半径，同时保留旧构造接口。"""
+
+        physics_radius = (
+            self.current_radius
+            if self.current_physics_radius is None
+            else self.current_physics_radius
+        )
+        object.__setattr__(self, 'current_radius', float(self.current_radius))
+        object.__setattr__(self, 'current_physics_radius', float(physics_radius))
+
+        if self.current_radius <= 0:
+            raise ValueError('current_radius must be positive')
+        if self.current_physics_radius <= 0:
+            raise ValueError('current_physics_radius must be positive')
 
 
 @dataclass(frozen=True)

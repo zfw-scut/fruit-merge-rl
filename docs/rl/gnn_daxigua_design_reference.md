@@ -63,7 +63,7 @@ is_boundary_node
 | vx | 水平速度 |
 | vy | 垂直速度 |
 | level | 水果等级 |
-| radius | 水果半径 |
+| radius | 水果真实碰撞半径；不是显示贴图半径 |
 | stable | 是否基本稳定 |
 | distance_to_left_wall | 到左墙距离 |
 | distance_to_right_wall | 到右墙距离 |
@@ -101,7 +101,7 @@ fruit_queue = [q0, q1, q2, q3]
 | 状态量 | 含义 |
 |---|---|
 | level | 水果等级 |
-| radius | 水果半径 |
+| radius | 该等级直接投放时使用的真实碰撞半径 |
 | queue_index | 队列位置 |
 | is_current_queue_fruit | 是否为 q0 |
 
@@ -118,7 +118,7 @@ fruit_queue = [q0, q1, q2, q3]
 | x | 候选投放横坐标 |
 | action_index | 动作编号 |
 | level | q0 的水果等级 |
-| radius | q0 的水果半径 |
+| radius | q0 直接投放时使用的真实碰撞半径 |
 
 ---
 
@@ -187,7 +187,7 @@ is_global_edge
 | distance | 中心距离 |
 | horizontal_distance | 横向距离绝对值 |
 | vertical_distance | 纵向距离绝对值 |
-| radius_sum | 半径和 |
+| radius_sum | 两个水果的真实碰撞半径和 |
 | overlap_margin | 半径和与中心距离之差 |
 | level_diff | 等级差 |
 | abs_level_diff | 等级差绝对值 |
@@ -207,7 +207,7 @@ is_global_edge
 | dy | 场上水果相对生成线的纵向有符号距离 |
 | horizontal_distance | 横向距离 |
 | vertical_distance | 纵向距离 |
-| radius_sum | q0 与已有水果半径和 |
+| radius_sum | q0 与已有水果的真实碰撞半径和 |
 | path_overlap_margin | 投放路径和场上水果横向范围的重叠余量 |
 | level_diff | q0 与已有水果等级差 |
 | abs_level_diff | 等级差绝对值 |

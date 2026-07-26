@@ -285,7 +285,8 @@ class DQNTrainer:
 
             reward + gamma * max_a' target_model(next_graph)[a']
 
-        terminal/truncated transition 不使用 bootstrap，target 直接等于 reward。
+        只有真实 terminated transition 不使用 bootstrap，target 直接等于 reward。
+        truncated transition 保留可信 final observation，仍计算下一状态 Q 值。
         """
 
         rewards = torch.tensor(

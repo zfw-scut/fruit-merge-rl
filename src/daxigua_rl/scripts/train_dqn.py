@@ -647,6 +647,7 @@ class CollectStatsWindow:
         self.steps = 0
         self.total_reward = 0.0
         self.episodes = 0
+        self.transition_keys = []
         self.episode_rewards = []
         self.episode_lengths = []
         self.episode_scores = []
@@ -682,6 +683,7 @@ class CollectStatsWindow:
         self.steps += stats.steps
         self.total_reward += stats.total_reward
         self.episodes += stats.episodes
+        self.transition_keys.extend(stats.transition_keys)
         self.episode_rewards.extend(stats.episode_rewards)
         self.episode_lengths.extend(stats.episode_lengths)
         self.episode_scores.extend(stats.episode_scores)
@@ -724,6 +726,7 @@ class CollectStatsWindow:
                 (field_name, self.reward_breakdown_totals[field_name])
                 for field_name in REWARD_BREAKDOWN_FIELDS
             ),
+            transition_keys=tuple(self.transition_keys),
             episode_rewards=tuple(self.episode_rewards),
             episode_lengths=tuple(self.episode_lengths),
             episode_scores=tuple(self.episode_scores),

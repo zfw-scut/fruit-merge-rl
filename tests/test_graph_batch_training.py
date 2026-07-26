@@ -234,14 +234,36 @@ class GraphBatchTrainingTest(unittest.TestCase):
         )
         try:
             collector.sync_model(model)
-            handle = collector.start_collect_steps(4, epsilon=1.0)
-            stats = collector.finish_collect_steps(handle)
+            first_handle = collector.start_collect_steps(4, epsilon=1.0)
+            first_stats = collector.finish_collect_steps(first_handle)
+            second_handle = collector.start_collect_steps(4, epsilon=1.0)
+            second_stats = collector.finish_collect_steps(second_handle)
         finally:
             collector.close()
 
-        self.assertEqual(stats.steps, 4)
-        self.assertEqual(len(replay_buffer), 4)
-        self.assertGreater(stats.collect_seconds, 0.0)
+        self.assertEqual(first_stats.steps, 4)
+        self.assertEqual(second_stats.steps, 4)
+        self.assertEqual(len(replay_buffer), 8)
+        self.assertGreater(first_stats.collect_seconds, 0.0)
+        self.assertEqual(len(first_stats.transition_keys), 4)
+        self.assertEqual(
+            {key.worker_id for key in first_stats.transition_keys},
+            {0, 1},
+        )
+        all_keys = first_stats.transition_keys + second_stats.transition_keys
+        self.assertEqual(len(set(all_keys)), 8)
+        for worker_id in (0, 1):
+            first_worker_keys = tuple(
+                key
+                for key in first_stats.transition_keys
+                if key.worker_id == worker_id
+            )
+            second_worker_keys = tuple(
+                key
+                for key in second_stats.transition_keys
+                if key.worker_id == worker_id
+            )
+            self.assertLess(max(first_worker_keys), min(second_worker_keys))
         self.assertIsInstance(replay_buffer.sample(1)[0], TensorTransition)
 
 

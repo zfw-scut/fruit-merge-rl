@@ -14,10 +14,12 @@ Current v0 interface:
 - `DaxiguaEnv`: gym-like wrapper around `daxigua.core.engine.HeadlessGame`.
 - `RewardConfig`: configurable reward shaping for score, survival, height, danger, and terminal penalty.
 - One RL `step(action_index)` means one fruit drop plus headless physics settling, not one rendered frame.
+- `FruitState` and `ActionCandidate` expose both display radius and the actual Pymunk collision radius; graph geometry uses the collision radius.
 - Training and environment code must not import `daxigua.app.Board`, pygame renderers, HUD, audio, or manual input code.
 - `TensorTransition`: current training-path experience record built from CPU `GraphTensor`; replay graph features are stored as float16 to reduce resident memory.
+- Only `terminated` transitions disable DQN bootstrap; `truncated` transitions keep their final observation and next graph.
 - `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling experience records.
-- `RolloutCollector`: single-process collector that plays the headless environment with epsilon-greedy actions and writes `TensorTransition` records into `ReplayBuffer`.
+- `RolloutCollector`: single-process collector that assigns `(worker_id, episode_id, step_index)` keys, plays the headless environment with epsilon-greedy actions, and writes `TensorTransition` records into `ReplayBuffer`.
 - `DQNTrainer`: standard DQN updater that samples tensor records, builds `GraphBatch`, computes TD loss, and updates the online Q network.
 - `daxigua_rl.scripts.train_dqn`: first full DQN training entrypoint with CSV metrics, checkpoints, greedy evaluation, and matplotlib curves.
 - `daxigua_rl.scripts.watch_dqn`: visual checkpoint viewer that drives the real pygame `Board` with a trained model.

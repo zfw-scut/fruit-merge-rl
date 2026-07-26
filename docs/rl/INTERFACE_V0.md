@@ -46,6 +46,10 @@ get_state()
 
 这两个参数用于后续 accurate/fast 训练模式对比。游戏表现层仍使用自己的渲染循环，不依赖 RL 对比脚本。
 
+当 `until_stable=True` 时，`PhysicsResult.stable` 只会在连续满足
+`stable_frames` 帧稳定条件后为真。达到 `max_frames` 但没有完成这段连续窗口时，
+返回 `truncated=True`，不能把最后一帧的瞬时静止当作已经稳定。
+
 ## RL 环境接口
 
 ### `DaxiguaEnv`
@@ -57,6 +61,14 @@ get_state()
 - `step(action_index) -> (GameState, reward, terminated, truncated, info)`
 
 这里的 `step(action_index)` 表示一次完整投放，不是一帧游戏画面。
+
+终止语义：
+
+- `terminated=True`: 游戏规则意义上的真实终局。
+- `truncated=True`: 物理推进达到上限但尚未稳定；这是采集 episode 边界，但不是
+  MDP 终态，返回的可信下一状态仍用于 potential 和 DQN bootstrap。
+- `truncated` 后 collector 会重置环境，后续归因 tracker 应把未确认事件标记为中断，
+  不能按真实终局规则确认。
 
 `DaxiguaEnvConfig` 中和物理速度相关的字段：
 
@@ -125,7 +137,23 @@ RewardConfig(
 - `geometry`: 场地宽高、生成线、墙体宽度、地板位置。
 - `max_height`、`fruit_count`、`max_level`、`empty_space_ratio`: 全局摘要状态。
 
-`FruitState` 包含位置、速度、等级、半径、年龄、稳定状态和到边界/危险线的距离。
+`FruitState` 同时保留：
+
+- `radius`: 显示半径。
+- `physics_radius`: 当前 Pymunk shape 的真实碰撞半径。
+
+同等级水果的真实半径可能因“直接投放”或“合成生成”而不同，不能只根据等级反推。
+到边界/危险线的距离、`max_height`、`empty_space_ratio` 和图中的几何关系均使用
+`physics_radius`。
+
+`distance_to_danger_line` 表示水果外缘到生成线的几何距离；当前游戏失败检测使用
+水果圆心是否持续越线，因此该字段不能直接当作精确的终止倒计时。
+
+`ActionCandidate.current_radius` 仍是显示半径，用于保持合法投放横坐标范围不变；
+`current_physics_radius` 是新投放水果将使用的碰撞半径。图的 `radius` 特征和
+碰撞/投放路径关系改用真实物理半径，但节点 28 维、边 26 维的结构不变。
+旧 checkpoint 的网络结构仍可加载，但 `radius` 输入语义会有轻微分布变化；第一次
+完整归因训练应从新配置重新训练。
 
 ## 图构建接口
 
@@ -183,6 +211,7 @@ Q 值在训练前没有策略意义。
 - `TensorTransition`: 张量化 DQN 经验记录，正式训练主链路使用它。
 - `ReplayBuffer`: 固定容量内存回放池。
 - `RolloutCollector`: 单进程 rollout 采集器。
+- `TransitionKey`: 一次训练 run 内的稳定轨迹身份。
 - `DQNTrainer`: 标准 DQN 单步更新器。
 
 字段含义：
@@ -190,7 +219,8 @@ Q 值在训练前没有策略意义。
 - `graph`: 当前状态图，也就是状态 `s`。
 - `action_offset`: 被选择动作在 `q_values` 中的下标，也就是训练 loss 读取 `q_values[action_offset]` 的位置。
 - `reward`: 执行动作后的即时奖励。
-- `next_graph`: 下一状态图，也就是状态 `s'`；terminal transition 可以为 `None`。
+- `next_graph`: 下一状态图，也就是状态 `s'`；只有真实 terminal transition 可以为
+  `None`，truncated transition 必须保存可信 final observation。
 - `terminated`: 游戏规则导致的结束。
 - `truncated`: 环境流程导致的截断，例如物理推进达到上限仍未稳定。
 
@@ -205,9 +235,13 @@ Q 值在训练前没有策略意义。
 
 ```text
 q_value = q_values[transition.action_offset]
-target = reward + gamma * max_next_q   # 仅当 transition.can_bootstrap 为 True
-target = reward                        # terminal/truncated transition
+target = reward + gamma * max_next_q   # 正常或 truncated transition
+target = reward                        # 仅 terminated transition
 ```
+
+`done = terminated or truncated` 只表示采集 episode 边界；bootstrap mask 只由
+`terminated` 决定。主 `TensorTransition` 和冷热 `ReplayBuffer` 不追加归因历史字段，
+后续因果样本继续走独立 `CausalReplayBuffer`。
 
 ### `ReplayBuffer`
 
@@ -239,7 +273,7 @@ from daxigua_rl.training import RolloutCollector
 
 第一版接口：
 
-- `RolloutCollector(env, graph_builder, replay_buffer, model=None, policy=None, seed=None)`: 创建单环境采集器。
+- `RolloutCollector(env, graph_builder, replay_buffer, model=None, policy=None, seed=None, worker_id=0)`: 创建单环境采集器。
 - `reset(seed=None, fruit_queue=None)`: 显式重置环境并开始新 episode。
 - `collect_steps(step_count, epsilon=1.0) -> RolloutStats`: 收集指定数量的 transition 并写入 replay buffer。
 
@@ -264,9 +298,23 @@ from daxigua_rl.training import RolloutCollector
 - episode 结束后 collector 会自动 `reset()` 并继续采集，直到达到指定 transition 数。
 - `RolloutCollector` 依赖 PyTorch，因此不会被 `daxigua_rl` 顶层自动导入。
 
+collector 会在动作执行前生成：
+
+```text
+TransitionKey(worker_id, episode_id, step_index)
+```
+
+- 单进程 `worker_id` 默认是 `0`，并行 worker 使用固定的 `worker_index`。
+- `episode_id` 在每个 worker 内随成功 reset 单调增加。
+- `step_index` 从 `0` 开始，并跨多次 `collect_steps()` 调用保持连续。
+- 键在一次训练 run 内唯一；跨 run 时由 run 目录或未来的 `run_id` 提供外层命名空间。
+- 键通过 `RolloutStats.transition_keys` 按采集顺序返回，供后续
+  `StateAnalyzer` / `AttributionTracker` 使用，不写入主 ReplayBuffer。
+
 `RolloutStats` 提供：
 
 - `steps`: 本次写入多少条 transition。
+- `transition_keys`: 与本次 transition 一一对齐的稳定轨迹键。
 - `episodes`: 本次完成多少局。
 - `total_reward`: 本次总 reward。
 - `episode_rewards`、`episode_lengths`、`episode_scores`: 本次已结束 episode 的统计。

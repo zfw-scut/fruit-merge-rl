@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 
-from daxigua.core.rules import fruit_radius
+from daxigua.core.rules import dropped_fruit_physics_radius, fruit_radius
 from daxigua.core.state import ActionCandidate, BoardGeometry, FruitState, GameState
 
 
@@ -32,6 +32,7 @@ def board_action_candidates(board, action_count=15):
 
     current_level = int(board.i)
     current_radius = float(fruit_radius(current_level))
+    current_physics_radius = float(dropped_fruit_physics_radius(current_level))
     wall_width = float(getattr(board, 'wall_width', 20))
     left = wall_width + current_radius + 2
     right = float(board.WIDTH) - wall_width - current_radius - 2
@@ -49,6 +50,7 @@ def board_action_candidates(board, action_count=15):
             normalized_drop_x=0.0 if right == left else float((position - left) / (right - left)),
             current_level=current_level,
             current_radius=current_radius,
+            current_physics_radius=current_physics_radius,
         )
         for index, position in enumerate(positions)
     )
@@ -61,13 +63,16 @@ def board_game_state(board):
     max_level = max((fruit.level for fruit in fruits), default=0)
 
     if fruits:
-        highest_top = min(fruit.y - fruit.radius for fruit in fruits)
+        highest_top = min(fruit.y - fruit.physics_radius for fruit in fruits)
         max_height = float(board.HEIGHT - highest_top)
     else:
         max_height = 0.0
 
     playable_area = max(1.0, float(board.WIDTH) * float(board.HEIGHT - board.init_y))
-    fruit_area = sum(math.pi * fruit.radius * fruit.radius for fruit in fruits)
+    fruit_area = sum(
+        math.pi * fruit.physics_radius * fruit.physics_radius
+        for fruit in fruits
+    )
     empty_space_ratio = max(0.0, min(1.0, 1 - fruit_area / playable_area))
 
     return GameState(
@@ -97,6 +102,7 @@ def _fruit_state(board, ball, index):
 
     level = int(ball.collision_type)
     radius = float(fruit_radius(level))
+    physics_radius = float(ball.radius)
     x, y = ball.body.position
     vx, vy = ball.body.velocity
     angular_velocity = float(ball.body.angular_velocity)
@@ -119,8 +125,13 @@ def _fruit_state(board, ball, index):
         angular_velocity=angular_velocity,
         age_frames=0,
         stable=stable,
-        distance_to_left_wall=float(x - (wall_width + radius)),
-        distance_to_right_wall=float((board.WIDTH - wall_width - radius) - x),
-        distance_to_floor=float((board.HEIGHT - wall_width - radius) - y),
-        distance_to_danger_line=float((y - radius) - board.init_y),
+        distance_to_left_wall=float(x - (wall_width + physics_radius)),
+        distance_to_right_wall=float(
+            (board.WIDTH - wall_width - physics_radius) - x
+        ),
+        distance_to_floor=float(
+            (board.HEIGHT - wall_width - physics_radius) - y
+        ),
+        distance_to_danger_line=float((y - physics_radius) - board.init_y),
+        physics_radius=physics_radius,
     )

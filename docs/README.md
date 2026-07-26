@@ -17,6 +17,10 @@
 - `rl/INTERFACE_V0.md`: 当前已经实现的 RL 环境、状态、经验和训练接口。
 - `rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md`: 当前训练吞吐优化和 fast 物理模式说明。
 
+完整状态归因实现顺序中的第一批基础已经落地：terminated/truncated bootstrap 语义、
+真实物理半径，以及 `(worker_id, episode_id, step_index)` 轨迹键。下一步从
+`StateAnalysis` schema 和状态分析器开始。
+
 ## 建议阅读顺序
 
 1. 先读 `project_map/PROJECT_FILE_INDEX.md`，了解项目有哪些文件、各自负责什么。
