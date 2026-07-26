@@ -155,6 +155,49 @@ RewardConfig(
 旧 checkpoint 的网络结构仍可加载，但 `radius` 输入语义会有轻微分布变化；第一次
 完整归因训练应从新配置重新训练。
 
+## 状态归因数据契约
+
+当前 `daxigua_rl.attribution` 包已经提供只读 schema：
+
+- `StateAnalysis`: 一个动作前稳定边界的完整分析快照。
+- `FruitAnalysis`: 单水果可达性、伙伴、支撑、埋藏和等级倒置摘要。
+- `QueueLaneAnalysis`: q0 到 q3 各自在 15 个动作列上的投放容量。
+- `SupportEdge`: 方向固定为 supporter -> supported fruit 的稳定约束。
+- `ContactInfluenceEdge`: 产生当前边界的前一动作所留下的压缩接触证据。
+- `PartnerComponent`、`ChainMotif`: 同级伙伴分量和局部连锁结构。
+- `StateAnalysisDiagnostics`: 稳定性、归因有效性、降级码和分析耗时。
+
+导入方式：
+
+```python
+from daxigua_rl.attribution import StateAnalysis, FruitAnalysis
+```
+
+当前契约固定以下语义：
+
+- `StateAnalysis.transition_key.step_index=t` 表示动作 `t` 执行前的边界；跨步变化比较
+  `analysis[t] -> analysis[t+1]`。
+- 如果状态携带前一动作的接触证据，`incoming_transition_key` 必须指向同 episode
+  的 `t-1`；初始边界没有 incoming key。
+- 动作 mask 固定为 15 位，并按 `action_offset` 编位。
+  `action_indices[offset]` 单独保存环境动作号，避免和 Q 值下标混淆。
+- q0 到 q3 各自保存 15 个 `drop_x_by_action`。水果半径不同会改变合法投放区间，
+  不能让后续队列槽复用 q0 的横坐标。
+- `FruitAnalysis.physics_radius` 是当前 shape 半径；
+  `probe_physics_radius` 是未来直接投放同级水果时用于路径膨胀的半径。
+- `probe_physics_radius` 和每个队列槽的 `physics_radius` 必须符合游戏本体当前等级的
+  直接投放半径规则；场上 `physics_radius` 仍保留真实 shape 值，不能按等级重算。
+- 所有数据类均为 frozen、slots、深 tuple 数据；mask/count、15 项数组、比例范围、
+  当前水果引用和支撑缓存会在构造时校验。
+- 场上水果等级限制为 1 到 11，队列槽等级限制为可直接投放的 1 到 4；每槽
+  `capacity` 和 q0-q3 聚合后的 `top_connected_capacity` 必须与 Reward V2 公式一致。
+- 不稳定的 truncated 边界可以保留诊断分析，但必须设置
+  `valid_for_attribution=False`，不能生成高置信归因事件。
+
+`StateAnalysis` 只在 rollout worker 内使用，当前没有写入 `TensorTransition`、
+`ReplayBuffer` 或 `RolloutStats`。本阶段也还没有实现几何分析算法；15 动作可达性、
+顶部连通容量、支撑检测和封闭空腔区域结构属于下一实现步骤。
+
 ## 图构建接口
 
 当前 `daxigua_rl.graph` 包提供：

@@ -261,12 +261,16 @@ V1 不使用 `age_frames` 计算负担。年龄受物理模式和稳定帧配置
 ```text
 StateAnalysis
 ├── transition_key
+├── incoming_transition_key
+├── action_indices
+├── action_drop_x_by_offset
 ├── fruit_analyses
 ├── support_edges
 ├── contact_influence_edges
 ├── partner_components
 ├── chain_motifs
 ├── queue_lane_analyses
+├── queue_decay
 ├── top_connected_capacity
 ├── recoverability
 ├── chain_readiness
@@ -281,6 +285,15 @@ StateAnalysis
 
 `fruit_id` 会在不同 episode 中重复，不能单独作为训练侧全局键。
 
+`transition_key.step_index=t` 固定表示“动作 `t` 执行前的稳定边界”。因此跨步状态变化
+统一比较 `analysis[t] -> analysis[t+1]`，真实终态也可以生成只供分析使用的 `t+1`
+边界键。`contact_influence_edges` 是产生当前边界的前一动作证据，不是静态几何属性；
+存在这类边时，`incoming_transition_key` 必须是同 worker、同 episode 的 `t-1`。
+
+所有 15 位动作 mask 均按 `action_offset` 编位，而不是直接按外部 `action_index`
+编位。`action_indices[a]` 保存 offset `a` 对应的环境动作号，
+`action_drop_x_by_offset[a]` 保存当前 q0 的真实投放横坐标。
+
 ### 5.2 `FruitAnalysis`
 
 每颗水果至少分析：
@@ -289,6 +302,7 @@ StateAnalysis
 fruit_id
 level
 physics_radius
+probe_physics_radius
 reachable_action_mask
 reachable_action_count
 top_visible_ratio
@@ -300,12 +314,43 @@ supported_child_ids
 burial_depth
 inversion_count
 connected_region_id
+reachable_partner_ids
+critical_blocker_ids
+inversion_blocker_ids
 ```
 
 `reachable_action_mask` 使用 15 位掩码。第 `a` 位为 1，表示一个同级水果从动作 `a` 对应的
 生成位置出发，在当前静态近似下仍能接近目标水果的可接触区域。
 
-### 5.3 四张基础图
+`physics_radius` 表示当前水果 shape 的真实半径；`probe_physics_radius` 表示未来
+直接投放的同级水果用于路径膨胀的半径。合成生成水果与直接投放水果即使等级相同，
+这两个半径也可能不同。`critical_blocker_ids` 和 `inversion_blocker_ids` 为负向规则
+归因保留可回溯对象；`partner_reachable=True` 允许表示“当前没有现存同级伙伴，但仍有
+形成伙伴的局部路径”，不能简单等同于 `bool(partner_ids)`。
+
+### 5.3 队列槽位容量
+
+q0 到 q3 分别生成 `QueueLaneAnalysis`：
+
+```text
+queue_index
+level
+physics_radius
+drop_x_by_action
+landing_depths_by_action
+safe_action_mask
+safe_action_count
+blocker_ids_by_action
+capacity
+```
+
+不同等级水果的合法横坐标范围不同，因此 q1 到 q3 必须保存各自的 15 个
+`drop_x_by_action`，不能复用 q0 的横坐标。按动作排列的 tuple 均恰好 15 项，
+mask 的 count 字段必须与 `bit_count()` 一致。schema 会校验每个槽位的
+`capacity` 符合 4.4 节的 0.7/0.3 公式，并使用对象记录的 `queue_decay` 重新聚合
+q0 到 q3，拒绝与 `top_connected_capacity` 不一致的重复真值。
+
+### 5.4 四张基础图
 
 #### 合成谱系图
 
@@ -1165,9 +1210,9 @@ tests/test_counterfactual.py
 
 ## 21. 实现顺序
 
-1. 修正 terminated/truncated 语义。
-2. 暴露真实物理半径和完整 episode/worker 键。
-3. 实现 `StateAnalysis` schema。
+1. 修正 terminated/truncated 语义。（已完成）
+2. 暴露真实物理半径和完整 episode/worker 键。（已完成）
+3. 实现 `StateAnalysis` schema。（已完成）
 4. 实现 15 动作可达性、顶部连通容量和支撑图。
 5. 实现 Reward V2。
 6. 实现谱系、正负归因事件和 pending 生命周期。
@@ -1198,6 +1243,7 @@ V1 不追求：
 | 可达性静态近似误判动态滚动 | 降低 placement confidence，交给少量反事实审计 |
 | fast30 与精确物理的事件分布不同 | 快照和反事实使用同一训练物理模式，并记录模式 |
 | 规则样本数量过多压过 TD | 分层限额、降低 `lambda_rule`、裁剪 margin |
+| 封闭空腔缺少稳定区域身份 | 在第 4 步确定栅格/可达算法时补充区域面积和边界结构，不在纯 schema 阶段伪造 |
 | 负封路标签过多 | 提高确认阈值，要求伙伴路径同时消失 |
 | 反事实队列积压 | 丢弃低价值任务，不阻塞 rollout |
 | 快照无法确定性复现 | 关闭反事实损失，保留规则归因继续训练 |

@@ -21,6 +21,10 @@ Current v0 interface:
 - `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling experience records.
 - `RolloutCollector`: single-process collector that assigns `(worker_id, episode_id, step_index)` keys, plays the headless environment with epsilon-greedy actions, and writes `TensorTransition` records into `ReplayBuffer`.
 - `DQNTrainer`: standard DQN updater that samples tensor records, builds `GraphBatch`, computes TD loss, and updates the online Q network.
+- `daxigua_rl.attribution`: frozen, tuple-only `StateAnalysis` contracts for
+  15-action reachability, support/contact evidence, queue capacity, partner
+  components and chain motifs. The analyzer itself is the next implementation
+  step; these objects remain worker-local and are not stored in the main replay.
 - `daxigua_rl.scripts.train_dqn`: first full DQN training entrypoint with CSV metrics, checkpoints, greedy evaluation, and matplotlib curves.
 - `daxigua_rl.scripts.watch_dqn`: visual checkpoint viewer that drives the real pygame `Board` with a trained model.
 

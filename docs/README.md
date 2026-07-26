@@ -17,9 +17,10 @@
 - `rl/INTERFACE_V0.md`: 当前已经实现的 RL 环境、状态、经验和训练接口。
 - `rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md`: 当前训练吞吐优化和 fast 物理模式说明。
 
-完整状态归因实现顺序中的第一批基础已经落地：terminated/truncated bootstrap 语义、
-真实物理半径，以及 `(worker_id, episode_id, step_index)` 轨迹键。下一步从
-`StateAnalysis` schema 和状态分析器开始。
+完整状态归因实现顺序中的前三步已经落地：terminated/truncated bootstrap 语义、
+真实物理半径、`(worker_id, episode_id, step_index)` 轨迹键，以及可跨 Windows
+spawn/pickle 的只读 `StateAnalysis` 数据契约。下一步实现 15 动作可达性、顶部连通
+容量、支撑图和封闭空腔区域表示。
 
 ## 建议阅读顺序
 

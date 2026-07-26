@@ -22,6 +22,8 @@
 | `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 `step(action_index)` 表示一次投放和无渲染物理稳定。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step()`、`action_candidates()` |
 | `src/daxigua_rl/reward.py` | 强化学习 reward shaping 逻辑。根据动作前后状态和物理结果计算奖励，并返回奖励明细。 | `RewardConfig`、`RewardBreakdown`、`compute_reward()` |
 | `src/daxigua_rl/playable_adapter.py` | 真实 pygame 游戏窗口到 RL 输入结构的适配层。把正在运行的 `Board` 转成 `GameState` 和 `ActionCandidate`，用于观看模型实际游玩。 | `board_game_state()`、`board_action_candidates()` |
+| `src/daxigua_rl/attribution/` | 完整状态归因模块。当前先提供 worker 内使用的纯只读数据契约，后续再接状态分析器、tracker 和因果 replay。 | `StateAnalysis`、`FruitAnalysis`、`QueueLaneAnalysis` |
+| `src/daxigua_rl/attribution/schema.py` | 固定 15 动作状态分析结构、时间语义、队列槽位对齐和廉价引用不变量；全部类型可 pickle/Windows spawn。 | `StateAnalysis`、`FruitAnalysis`、`SupportEdge`、`ContactInfluenceEdge`、`PartnerComponent`、`ChainMotif`、`QueueLaneAnalysis` |
 | `src/daxigua_rl/graph/` | GNN 图构建相关代码。负责把游戏状态和动作候选转换成模型输入图，并提供训练实验用的特征消融层。 | `GraphBuilder`、`GraphAblator` |
 | `src/daxigua_rl/graph/schema.py` | 框架无关的图数据结构和节点/边特征名。 | `GraphData`、`GraphNodeRef`、`GraphEdgeRef`、`NODE_FEATURE_NAMES`、`EDGE_FEATURE_NAMES` |
 | `src/daxigua_rl/graph/builder.py` | 从 `GameState` 和 `ActionCandidate` 构建 GNN 输入图；几何、接触和投放路径关系使用真实碰撞半径，图维度保持不变。 | `GraphBuilder.build()` |
@@ -70,6 +72,7 @@
 | --- | --- | --- |
 | `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向、next_graph 缓存、分层 replay、并行 collector 和 DQN 更新链路。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
 | `tests/test_attribution_foundations.py` | 完整状态归因基础语义测试。验证稳定窗口、truncated bootstrap、真实碰撞半径、图几何和 worker/episode/step 身份键。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
+| `tests/test_attribution_schema.py` | `StateAnalysis` 数据契约测试。验证深只读、15 位 mask、队列槽位、跨对象引用、时间语义、pickle 和真实 Windows spawn 往返。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
 | `tests/test_epsilon_schedule.py` | epsilon 衰减曲线测试。验证 smooth schedule 的关键锚点、单调性，以及 linear schedule 的旧行为。 | 使用标准库 `unittest`。 |
 | `tests/test_training_catalog.py` | 训练实验归档工具测试。验证新旧指标格式、奖励分解加权汇总、checkpoint 摘要和文档输出。 | 使用临时目录，不依赖本地 `runs/`。 |
 | `tests/test_training_metrics.py` | 训练指标测试。验证 episode 结束事件会逐局写入 `episode_metrics.csv`，并验证评估会返回最高/最低分。 | 使用标准库 `unittest`。 |
@@ -85,7 +88,7 @@
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
-| `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、测试和长训流程；实现顺序中的终止语义、物理半径和轨迹键基础已经落地。 |
+| `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、测试和长训流程；实现顺序中的终止语义、物理半径、轨迹键和 `StateAnalysis` schema 已经落地。 |
 | `docs/rl/gnn_daxigua_design_reference.md` | GNN 状态图节点、边和特征语义参考。 | 当前 `radius` 节点特征和相关几何边特征均表示真实碰撞半径。 |
 | `docs/rl/INTERFACE_V0.md` | RL v0 接口说明。 | 记录 `HeadlessGame`、`DaxiguaEnv`、状态数据和边界规则。 |
 | `docs/rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md` | 训练速度优化计划。 | 记录 profiling、next_graph 缓存、并行采样、fast physics、图构建优化和日志频率等优化顺序。 |
@@ -132,6 +135,9 @@
 - `watch_dqn.py`：第一版模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `export_training_catalog.py`：扫描被 Git 忽略的训练输出，生成配置快照、指标摘要、产物清单和跨实验索引，方便迁移后复盘训练数据。
 - `compare_physics_modes.py`：物理模式对比入口，用已有 checkpoint 或随机策略比较 accurate 与 fast 模式的速度、分数、局长、物理帧、合成频率和截断率。
+- `StateAnalysis`：worker 内的完整状态归因快照。15 位 mask 按 `action_offset`
+  编位，保存 q0-q3 独立投放横坐标、真实/探针物理半径、支撑/接触证据、伙伴分量和
+  连锁 motif；不写入主 replay。
 - `configs/train_dqn_fast30_parallel.toml`：正式 DQN 训练参数配置，集中维护 run 目录、训练规模、replay、epsilon、模型、并行采样、reward、评估保存和进度参数。
 - `scripts/train_dqn.sh`：TOML 配置启动器，默认读取 `configs/train_dqn_fast30_parallel.toml`，也可以传入其它配置文件路径。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
