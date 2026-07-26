@@ -10,6 +10,13 @@
 - `CODING_STYLE.md`: 记录项目源码注释和编码风格，当前强调教学型详细注释。
 - `rl/`: 存放后续强化学习模型、环境接口和算法方案的设计参考文档。
 
+## 当前 RL 开发入口
+
+- `rl/CAUSAL_ATTRIBUTION_V1.md`: 第一次大规模训练采用的 Reward V2、完整状态归因、
+  因果 Q 排序和稀疏反事实实现规格。
+- `rl/INTERFACE_V0.md`: 当前已经实现的 RL 环境、状态、经验和训练接口。
+- `rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md`: 当前训练吞吐优化和 fast 物理模式说明。
+
 ## 建议阅读顺序
 
 1. 先读 `project_map/PROJECT_FILE_INDEX.md`，了解项目有哪些文件、各自负责什么。

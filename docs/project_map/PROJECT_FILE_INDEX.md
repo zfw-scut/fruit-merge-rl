@@ -1,6 +1,6 @@
 # 项目文件索引
 
-最后更新：2026-07-20
+最后更新：2026-07-27
 
 ## 项目定位
 
@@ -83,6 +83,7 @@
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
+| `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、测试和长训流程；对应功能尚待实现。 |
 | `docs/rl/INTERFACE_V0.md` | RL v0 接口说明。 | 记录 `HeadlessGame`、`DaxiguaEnv`、状态数据和边界规则。 |
 | `docs/rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md` | 训练速度优化计划。 | 记录 profiling、next_graph 缓存、并行采样、fast physics、图构建优化和日志频率等优化顺序。 |
 

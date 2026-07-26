@@ -23,6 +23,9 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Temporary local infrastructure credentials
+docs/CLOUD_SERVER_LOCAL.md
+
 # Runtime/debug output
 *.log
 *.tmp
