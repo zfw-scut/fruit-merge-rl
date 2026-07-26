@@ -10,7 +10,7 @@ from __future__ import annotations
 import multiprocessing
 import time
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 
 from daxigua_rl.env import DaxiguaEnv
@@ -34,6 +34,17 @@ class ParallelCollectHandle:
     futures: tuple
     counts: tuple
     started_at: float
+    worker_indices: tuple = ()
+
+
+@dataclass(frozen=True)
+class WorkerAttributionFinalization:
+    """一个 worker 关闭时被审查并取消的未确认归因摘要。"""
+
+    worker_id: int
+    cancelled_pending_count: int
+    event_type_counts: tuple = ()
+    resolution_reason_counts: tuple = ()
 
 
 def _worker_init(worker_index, env_config, model_config, seed):
@@ -92,6 +103,26 @@ def _worker_collect(step_count, epsilon):
     return _save_to_bytes(local_buffer.to_tuple()), stats
 
 
+def _worker_finalize_attribution():
+    """在进程退出前显式取消 pending，并只返回轻量计数。"""
+
+    if _WORKER_COLLECTOR is None:
+        raise RuntimeError('parallel rollout worker is not initialized')
+    events = _WORKER_COLLECTOR.close()
+    counts = {}
+    reason_counts = {}
+    for event in events:
+        counts[event.event_type] = counts.get(event.event_type, 0) + 1
+        reason = event.resolution_reason or 'unknown'
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return WorkerAttributionFinalization(
+        worker_id=_WORKER_COLLECTOR.worker_id,
+        cancelled_pending_count=len(events),
+        event_type_counts=tuple(sorted(counts.items())),
+        resolution_reason_counts=tuple(sorted(reason_counts.items())),
+    )
+
+
 class ParallelRolloutCollector:
     """主进程侧的多 worker rollout 调度器。
 
@@ -132,6 +163,8 @@ class ParallelRolloutCollector:
         self.seed = int(seed)
         self._closed = False
         self._model_synced = False
+        self.attribution_finalization_summaries = ()
+        self._worker_pending_event_counts = [0] * worker_count
 
         # 使用 spawn 而不是 Linux 默认 fork，避免主进程已经初始化 CUDA 后 fork 出
         # worker 导致 CUDA/驱动状态异常。worker 只在 CPU 上做采样推理。
@@ -150,10 +183,21 @@ class ParallelRolloutCollector:
         """关闭 worker 进程池。"""
 
         if self._closed:
-            return
-        for executor in self._executors:
-            executor.shutdown(wait=True, cancel_futures=True)
-        self._closed = True
+            return self.attribution_finalization_summaries
+        try:
+            futures = tuple(
+                executor.submit(_worker_finalize_attribution)
+                for executor in self._executors
+            )
+            self.attribution_finalization_summaries = tuple(
+                future.result()
+                for future in futures
+            )
+        finally:
+            for executor in self._executors:
+                executor.shutdown(wait=True, cancel_futures=True)
+            self._closed = True
+        return self.attribution_finalization_summaries
 
     def sync_model(self, model=None):
         """把主进程模型参数同步到所有 worker。"""
@@ -196,15 +240,24 @@ class ParallelRolloutCollector:
             raise RuntimeError('parallel worker model must be synced before greedy collection')
 
         counts = self._split_step_count(step_count)
-        futures = tuple(
-            self._executors[worker_index].submit(_worker_collect, count, epsilon)
+        worker_indices = tuple(
+            worker_index
             for worker_index, count in enumerate(counts)
             if count > 0
+        )
+        futures = tuple(
+            self._executors[worker_index].submit(
+                _worker_collect,
+                counts[worker_index],
+                epsilon,
+            )
+            for worker_index in worker_indices
         )
         return ParallelCollectHandle(
             futures=futures,
             counts=tuple(count for count in counts if count > 0),
             started_at=time.perf_counter(),
+            worker_indices=worker_indices,
         )
 
     def finish_collect_steps(self, handle):
@@ -216,7 +269,9 @@ class ParallelRolloutCollector:
 
         all_transitions = []
         worker_stats = []
-        for transition_bytes, stats in results:
+        for worker_index, (transition_bytes, stats) in zip(
+                handle.worker_indices,
+                results):
             transitions = _load_from_bytes(transition_bytes)
             if len(transitions) != stats.steps or len(stats.transition_keys) != stats.steps:
                 raise RuntimeError(
@@ -224,12 +279,21 @@ class ParallelRolloutCollector:
                 )
             all_transitions.extend(transitions)
             worker_stats.append(stats)
+            self._worker_pending_event_counts[worker_index] = int(
+                stats.attribution_pending_event_count
+            )
 
         self.replay_buffer.extend(all_transitions)
-        return _merge_rollout_stats(
+        merged = _merge_rollout_stats(
             worker_stats=worker_stats,
             buffer_size=len(self.replay_buffer),
             collect_seconds=wall_seconds,
+        )
+        return replace(
+            merged,
+            attribution_pending_event_count=sum(
+                self._worker_pending_event_counts
+            ),
         )
 
     def _split_step_count(self, step_count):
@@ -280,6 +344,18 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
     state_analysis_seconds = 0.0
     state_analysis_cache_hits = 0
     state_analysis_degraded_count = 0
+    attribution_tracker_calls = 0
+    attribution_tracker_seconds = 0.0
+    attribution_events_created = 0
+    attribution_events_confirmed = 0
+    attribution_events_cancelled = 0
+    attribution_events_interrupted = 0
+    attribution_pending_event_count = 0
+    attribution_lineage_merge_count = 0
+    attribution_chain_merge_count = 0
+    attribution_max_chain_depth = 0
+    attribution_event_status_counts = {}
+    attribution_delays = []
     physics_frames_total = 0
     fruit_count_total = 0
     graph_node_count_total = 0
@@ -319,6 +395,35 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         state_analysis_seconds += stats.state_analysis_seconds
         state_analysis_cache_hits += stats.state_analysis_cache_hits
         state_analysis_degraded_count += stats.state_analysis_degraded_count
+        attribution_tracker_calls += stats.attribution_tracker_calls
+        attribution_tracker_seconds += stats.attribution_tracker_seconds
+        attribution_events_created += stats.attribution_events_created
+        attribution_events_confirmed += stats.attribution_events_confirmed
+        attribution_events_cancelled += stats.attribution_events_cancelled
+        attribution_events_interrupted += (
+            stats.attribution_events_interrupted
+        )
+        attribution_pending_event_count += (
+            stats.attribution_pending_event_count
+        )
+        attribution_lineage_merge_count += (
+            stats.attribution_lineage_merge_count
+        )
+        attribution_chain_merge_count += (
+            stats.attribution_chain_merge_count
+        )
+        attribution_max_chain_depth = max(
+            attribution_max_chain_depth,
+            stats.attribution_max_chain_depth,
+        )
+        for event_type, status, count in (
+                stats.attribution_event_status_counts):
+            key = event_type, status
+            attribution_event_status_counts[key] = (
+                attribution_event_status_counts.get(key, 0)
+                + int(count)
+            )
+        attribution_delays.extend(stats.attribution_delays)
         physics_frames_total += stats.physics_frames_total
         fruit_count_total += stats.fruit_count_total
         graph_node_count_total += stats.graph_node_count_total
@@ -358,6 +463,36 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         state_analysis_seconds=state_analysis_seconds,
         state_analysis_cache_hits=state_analysis_cache_hits,
         state_analysis_degraded_count=state_analysis_degraded_count,
+        attribution_tracker_calls=attribution_tracker_calls,
+        attribution_tracker_seconds=attribution_tracker_seconds,
+        attribution_events_created=attribution_events_created,
+        attribution_events_confirmed=attribution_events_confirmed,
+        attribution_events_cancelled=attribution_events_cancelled,
+        attribution_events_interrupted=(
+            attribution_events_interrupted
+        ),
+        attribution_pending_event_count=(
+            attribution_pending_event_count
+        ),
+        attribution_lineage_merge_count=(
+            attribution_lineage_merge_count
+        ),
+        attribution_chain_merge_count=(
+            attribution_chain_merge_count
+        ),
+        attribution_max_chain_depth=(
+            attribution_max_chain_depth
+        ),
+        attribution_event_status_counts=tuple(
+            (
+                event_type,
+                status,
+                count,
+            )
+            for (event_type, status), count
+            in sorted(attribution_event_status_counts.items())
+        ),
+        attribution_delays=tuple(attribution_delays),
         physics_frames_total=physics_frames_total,
         fruit_count_total=fruit_count_total,
         graph_node_count_total=graph_node_count_total,

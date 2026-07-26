@@ -29,6 +29,7 @@ import torch
 
 from daxigua.config import FPS
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder, ReplayBuffer
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS, RewardConfig
 from daxigua_rl.training import (
@@ -116,6 +117,20 @@ METRIC_FIELDS = (
     'collect_state_analysis_cache_hit_rate',
     'collect_state_analysis_degraded_count',
     'collect_state_analysis_degraded_rate',
+    'collect_attribution_tracker_calls',
+    'collect_attribution_tracker_seconds',
+    'collect_mean_attribution_tracker_seconds',
+    'collect_attribution_events_created',
+    'collect_attribution_events_confirmed',
+    'collect_attribution_events_cancelled',
+    'collect_attribution_events_interrupted',
+    'collect_attribution_pending_event_count',
+    'collect_attribution_lineage_merge_count',
+    'collect_attribution_chain_merge_count',
+    'collect_attribution_max_chain_depth',
+    'collect_mean_attribution_delay',
+    'collect_p95_attribution_delay',
+    'collect_attribution_event_status_counts',
     'train_step_seconds',
     'replay_sample_seconds',
     'current_collate_seconds',
@@ -338,6 +353,11 @@ def validate_args(args):
     for field_name in positive_int_fields:
         if int(getattr(args, field_name)) <= 0:
             raise ValueError(f'--{field_name.replace("_", "-")} must be positive')
+    if int(args.action_count) != ANALYSIS_ACTION_COUNT:
+        raise ValueError(
+            'full state attribution requires '
+            f'--action-count {ANALYSIS_ACTION_COUNT}'
+        )
 
     non_negative_intervals = ('save_interval', 'eval_interval', 'plot_interval')
     for field_name in non_negative_intervals:
@@ -743,6 +763,18 @@ class CollectStatsWindow:
         self.state_analysis_seconds = 0.0
         self.state_analysis_cache_hits = 0
         self.state_analysis_degraded_count = 0
+        self.attribution_tracker_calls = 0
+        self.attribution_tracker_seconds = 0.0
+        self.attribution_events_created = 0
+        self.attribution_events_confirmed = 0
+        self.attribution_events_cancelled = 0
+        self.attribution_events_interrupted = 0
+        self.attribution_pending_event_count = 0
+        self.attribution_lineage_merge_count = 0
+        self.attribution_chain_merge_count = 0
+        self.attribution_max_chain_depth = 0
+        self.attribution_event_status_counts = {}
+        self.attribution_delays = []
         self.reward_breakdown_totals = {
             field_name: 0.0
             for field_name in REWARD_BREAKDOWN_FIELDS
@@ -798,6 +830,68 @@ class CollectStatsWindow:
             'state_analysis_degraded_count',
             0,
         )
+        self.attribution_tracker_calls += getattr(
+            stats,
+            'attribution_tracker_calls',
+            0,
+        )
+        self.attribution_tracker_seconds += getattr(
+            stats,
+            'attribution_tracker_seconds',
+            0.0,
+        )
+        self.attribution_events_created += getattr(
+            stats,
+            'attribution_events_created',
+            0,
+        )
+        self.attribution_events_confirmed += getattr(
+            stats,
+            'attribution_events_confirmed',
+            0,
+        )
+        self.attribution_events_cancelled += getattr(
+            stats,
+            'attribution_events_cancelled',
+            0,
+        )
+        self.attribution_events_interrupted += getattr(
+            stats,
+            'attribution_events_interrupted',
+            0,
+        )
+        self.attribution_pending_event_count = getattr(
+            stats,
+            'attribution_pending_event_count',
+            self.attribution_pending_event_count,
+        )
+        self.attribution_lineage_merge_count += getattr(
+            stats,
+            'attribution_lineage_merge_count',
+            0,
+        )
+        self.attribution_chain_merge_count += getattr(
+            stats,
+            'attribution_chain_merge_count',
+            0,
+        )
+        self.attribution_max_chain_depth = max(
+            self.attribution_max_chain_depth,
+            getattr(stats, 'attribution_max_chain_depth', 0),
+        )
+        for event_type, status, count in getattr(
+                stats,
+                'attribution_event_status_counts',
+                ()):
+            key = event_type, status
+            self.attribution_event_status_counts[key] = (
+                self.attribution_event_status_counts.get(key, 0)
+                + int(count)
+            )
+        self.attribution_delays.extend(
+            int(delay)
+            for delay in getattr(stats, 'attribution_delays', ())
+        )
 
         totals = stats.reward_breakdown_totals_dict
         for field_name in REWARD_BREAKDOWN_FIELDS:
@@ -846,6 +940,42 @@ class CollectStatsWindow:
             state_analysis_seconds=self.state_analysis_seconds,
             state_analysis_cache_hits=self.state_analysis_cache_hits,
             state_analysis_degraded_count=self.state_analysis_degraded_count,
+            attribution_tracker_calls=self.attribution_tracker_calls,
+            attribution_tracker_seconds=self.attribution_tracker_seconds,
+            attribution_events_created=self.attribution_events_created,
+            attribution_events_confirmed=(
+                self.attribution_events_confirmed
+            ),
+            attribution_events_cancelled=(
+                self.attribution_events_cancelled
+            ),
+            attribution_events_interrupted=(
+                self.attribution_events_interrupted
+            ),
+            attribution_pending_event_count=(
+                self.attribution_pending_event_count
+            ),
+            attribution_lineage_merge_count=(
+                self.attribution_lineage_merge_count
+            ),
+            attribution_chain_merge_count=(
+                self.attribution_chain_merge_count
+            ),
+            attribution_max_chain_depth=(
+                self.attribution_max_chain_depth
+            ),
+            attribution_event_status_counts=tuple(
+                (
+                    event_type,
+                    status,
+                    count,
+                )
+                for (event_type, status), count
+                in sorted(
+                    self.attribution_event_status_counts.items()
+                )
+            ),
+            attribution_delays=tuple(self.attribution_delays),
         )
 
 
@@ -859,6 +989,213 @@ def write_config(run_dir, args):
     }
     path = run_dir / 'config.json'
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def write_attribution_shutdown_summary(
+        run_dir,
+        collector,
+        finalized):
+    """持久化训练退出时被取消的 pending，避免 worker 静默丢事件。"""
+
+    event_type_counts = {}
+    resolution_reason_counts = {}
+    workers = []
+    if isinstance(collector, ParallelRolloutCollector):
+        for summary in finalized or ():
+            workers.append({
+                'worker_id': summary.worker_id,
+                'cancelled_pending_count': (
+                    summary.cancelled_pending_count
+                ),
+                'event_type_counts': dict(summary.event_type_counts),
+                'resolution_reason_counts': dict(
+                    summary.resolution_reason_counts
+                ),
+            })
+            for event_type, count in summary.event_type_counts:
+                event_type_counts[event_type] = (
+                    event_type_counts.get(event_type, 0)
+                    + int(count)
+                )
+            for reason, count in summary.resolution_reason_counts:
+                resolution_reason_counts[reason] = (
+                    resolution_reason_counts.get(reason, 0)
+                    + int(count)
+                )
+    else:
+        events = tuple(finalized or ())
+        for event in events:
+            event_type_counts[event.event_type] = (
+                event_type_counts.get(event.event_type, 0) + 1
+            )
+            reason = event.resolution_reason or 'unknown'
+            resolution_reason_counts[reason] = (
+                resolution_reason_counts.get(reason, 0) + 1
+            )
+        workers.append({
+            'worker_id': getattr(collector, 'worker_id', 0),
+            'cancelled_pending_count': len(events),
+            'event_type_counts': dict(sorted(
+                event_type_counts.items()
+            )),
+            'resolution_reason_counts': dict(sorted(
+                resolution_reason_counts.items()
+            )),
+        })
+
+    payload = {
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'cancelled_pending_count': sum(
+            item['cancelled_pending_count']
+            for item in workers
+        ),
+        'event_type_counts': dict(sorted(event_type_counts.items())),
+        'resolution_reason_counts': dict(sorted(
+            resolution_reason_counts.items()
+        )),
+        'workers': workers,
+    }
+    path = run_dir / 'attribution_shutdown.json'
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+
+
+def write_attribution_warmup_summary(run_dir, stats):
+    """单独记录 warmup 归因，避免与首个训练指标窗口混在一起。"""
+
+    event_status_counts = {}
+    for event_type, status, count in getattr(
+            stats,
+            'attribution_event_status_counts',
+            ()):
+        event_status_counts.setdefault(event_type, {})[status] = int(
+            count
+        )
+    delays = tuple(
+        float(delay)
+        for delay in getattr(stats, 'attribution_delays', ())
+    )
+    calls = int(getattr(stats, 'attribution_tracker_calls', 0))
+    seconds = float(
+        getattr(stats, 'attribution_tracker_seconds', 0.0)
+    )
+    payload = {
+        'created_at': datetime.now().isoformat(timespec='seconds'),
+        'phase': 'warmup',
+        'steps': int(stats.steps),
+        'attribution_tracker_calls': calls,
+        'attribution_tracker_seconds': seconds,
+        'mean_attribution_tracker_seconds': (
+            seconds / calls if calls > 0 else None
+        ),
+        'events_created': int(getattr(
+            stats,
+            'attribution_events_created',
+            0,
+        )),
+        'events_confirmed': int(getattr(
+            stats,
+            'attribution_events_confirmed',
+            0,
+        )),
+        'events_cancelled': int(getattr(
+            stats,
+            'attribution_events_cancelled',
+            0,
+        )),
+        'events_interrupted': int(getattr(
+            stats,
+            'attribution_events_interrupted',
+            0,
+        )),
+        'pending_event_count_at_end': int(getattr(
+            stats,
+            'attribution_pending_event_count',
+            0,
+        )),
+        'lineage_merge_count': int(getattr(
+            stats,
+            'attribution_lineage_merge_count',
+            0,
+        )),
+        'chain_merge_count': int(getattr(
+            stats,
+            'attribution_chain_merge_count',
+            0,
+        )),
+        'max_chain_depth': int(getattr(
+            stats,
+            'attribution_max_chain_depth',
+            0,
+        )),
+        'mean_attribution_delay': (
+            sum(delays) / len(delays) if delays else None
+        ),
+        'p95_attribution_delay': (
+            _linear_percentile(delays, 0.95)
+            if delays
+            else None
+        ),
+        'event_status_counts': {
+            event_type: dict(sorted(status_counts.items()))
+            for event_type, status_counts
+            in sorted(event_status_counts.items())
+        },
+    }
+    path = run_dir / 'attribution_warmup.json'
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding='utf-8',
+    )
+
+
+def close_training_resources(
+        *,
+        run_dir,
+        replay_buffer,
+        collector,
+        metrics,
+        episode_metrics,
+        suppress_errors=False):
+    """尽最大努力关闭所有资源，并保证 tracker finalize 不被 flush 阻断。"""
+
+    errors = []
+    finalized_attribution = ()
+
+    try:
+        if hasattr(collector, 'close'):
+            finalized_attribution = collector.close()
+    except BaseException as exc:
+        errors.append(('collector.close', exc))
+
+    try:
+        write_attribution_shutdown_summary(
+            run_dir,
+            collector,
+            finalized_attribution,
+        )
+    except BaseException as exc:
+        errors.append(('attribution shutdown summary', exc))
+
+    for label, operation in (
+            ('replay_buffer.flush', replay_buffer.flush),
+            ('metrics.close', metrics.close),
+            ('episode_metrics.close', episode_metrics.close)):
+        try:
+            operation()
+        except BaseException as exc:
+            errors.append((label, exc))
+
+    if errors:
+        labels = ', '.join(label for label, _exc in errors)
+        message = f'training resource cleanup failed: {labels}'
+        if suppress_errors:
+            print(f'warning={message}', file=sys.stderr, flush=True)
+        else:
+            raise RuntimeError(message) from errors[0][1]
+    return finalized_attribution
 
 
 def save_checkpoint(
@@ -1171,6 +1508,23 @@ def _mean(values):
     return sum(values) / len(values)
 
 
+def _linear_percentile(values, quantile):
+    """按线性插值计算分位数；空序列返回空值以便写入 CSV。"""
+
+    values = tuple(float(value) for value in values)
+    if not values:
+        return ''
+    ordered = sorted(values)
+    position = float(quantile) * (len(ordered) - 1)
+    lower_index = int(position)
+    upper_index = min(lower_index + 1, len(ordered) - 1)
+    fraction = position - lower_index
+    return (
+        ordered[lower_index] * (1.0 - fraction)
+        + ordered[upper_index] * fraction
+    )
+
+
 def print_log(row):
     """打印一行紧凑训练日志。"""
 
@@ -1228,6 +1582,23 @@ def print_log(row):
             parts.append(
                 'analysis_degraded='
                 f"{int(row['collect_state_analysis_degraded_count'])}"
+            )
+        if row.get('collect_attribution_tracker_calls', 0):
+            parts.append(
+                'attribute='
+                f"{_format_ms(row['collect_mean_attribution_tracker_seconds'])}"
+                '(状态归因)'
+            )
+            parts.append(
+                'attr_events='
+                f"{int(row['collect_attribution_events_created'])}/"
+                f"{int(row['collect_attribution_events_confirmed'])}/"
+                f"{int(row['collect_attribution_events_cancelled'])}"
+                '(新建/确认/取消)'
+            )
+            parts.append(
+                'attr_pending='
+                f"{int(row['collect_attribution_pending_event_count'])}"
             )
 
     print(' | '.join(parts), flush=True)
@@ -1354,6 +1725,42 @@ def build_metric_row(
         if state_analysis_calls > 0
         else ''
     )
+    attribution_tracker_calls = int(
+        getattr(collect_stats, 'attribution_tracker_calls', 0)
+    )
+    attribution_tracker_seconds = float(
+        getattr(collect_stats, 'attribution_tracker_seconds', 0.0)
+    )
+    mean_attribution_tracker_seconds = (
+        attribution_tracker_seconds / attribution_tracker_calls
+        if attribution_tracker_calls > 0
+        else ''
+    )
+    attribution_delays = tuple(
+        float(delay)
+        for delay in getattr(collect_stats, 'attribution_delays', ())
+    )
+    mean_attribution_delay = (
+        sum(attribution_delays) / len(attribution_delays)
+        if attribution_delays
+        else ''
+    )
+    p95_attribution_delay = _linear_percentile(
+        attribution_delays,
+        0.95,
+    )
+    attribution_event_status_counts = {}
+    for event_type, status, count in getattr(
+            collect_stats,
+            'attribution_event_status_counts',
+            ()):
+        status_counts = attribution_event_status_counts.setdefault(
+            event_type,
+            {},
+        )
+        status_counts[status] = (
+            status_counts.get(status, 0) + int(count)
+        )
 
     row = {
         'update_step': update_step,
@@ -1399,6 +1806,62 @@ def build_metric_row(
         ),
         'collect_state_analysis_degraded_rate': (
             state_analysis_degraded_rate
+        ),
+        'collect_attribution_tracker_calls': attribution_tracker_calls,
+        'collect_attribution_tracker_seconds': attribution_tracker_seconds,
+        'collect_mean_attribution_tracker_seconds': (
+            mean_attribution_tracker_seconds
+        ),
+        'collect_attribution_events_created': int(getattr(
+            collect_stats,
+            'attribution_events_created',
+            0,
+        )),
+        'collect_attribution_events_confirmed': int(getattr(
+            collect_stats,
+            'attribution_events_confirmed',
+            0,
+        )),
+        'collect_attribution_events_cancelled': int(getattr(
+            collect_stats,
+            'attribution_events_cancelled',
+            0,
+        )),
+        'collect_attribution_events_interrupted': int(getattr(
+            collect_stats,
+            'attribution_events_interrupted',
+            0,
+        )),
+        'collect_attribution_pending_event_count': int(getattr(
+            collect_stats,
+            'attribution_pending_event_count',
+            0,
+        )),
+        'collect_attribution_lineage_merge_count': int(getattr(
+            collect_stats,
+            'attribution_lineage_merge_count',
+            0,
+        )),
+        'collect_attribution_chain_merge_count': int(getattr(
+            collect_stats,
+            'attribution_chain_merge_count',
+            0,
+        )),
+        'collect_attribution_max_chain_depth': int(getattr(
+            collect_stats,
+            'attribution_max_chain_depth',
+            0,
+        )),
+        'collect_mean_attribution_delay': mean_attribution_delay,
+        'collect_p95_attribution_delay': p95_attribution_delay,
+        'collect_attribution_event_status_counts': json.dumps(
+            {
+                event_type: dict(sorted(status_counts.items()))
+                for event_type, status_counts
+                in sorted(attribution_event_status_counts.items())
+            },
+            ensure_ascii=False,
+            separators=(',', ':'),
         ),
         'train_step_seconds': getattr(train_stats, 'train_step_seconds', ''),
         'replay_sample_seconds': getattr(train_stats, 'sample_seconds', ''),
@@ -1524,32 +1987,58 @@ def train(args):
     warmup_done = 0
     warmup_total_reward = 0.0
     warmup_chunk_size = max(1, min(100, args.warmup_steps))
-
-    while warmup_done < args.warmup_steps:
-        chunk_size = min(warmup_chunk_size, args.warmup_steps - warmup_done)
-        chunk_start_env_steps = env_steps
-        warmup_stats = collector.collect_steps(chunk_size, epsilon=1.0)
-        warmup_done += warmup_stats.steps
-        env_steps += warmup_stats.steps
-        warmup_total_reward += warmup_stats.total_reward
-        episode_metrics.log_collect_stats(
-            warmup_stats,
-            phase='warmup',
-            update_step=0,
-            start_env_steps=chunk_start_env_steps,
-            epsilon=1.0,
+    warmup_metric_window = CollectStatsWindow()
+    warmup_complete = False
+    try:
+        while warmup_done < args.warmup_steps:
+            chunk_size = min(
+                warmup_chunk_size,
+                args.warmup_steps - warmup_done,
+            )
+            chunk_start_env_steps = env_steps
+            warmup_stats = collector.collect_steps(
+                chunk_size,
+                epsilon=1.0,
+            )
+            warmup_metric_window.add(warmup_stats)
+            warmup_done += warmup_stats.steps
+            env_steps += warmup_stats.steps
+            warmup_total_reward += warmup_stats.total_reward
+            episode_metrics.log_collect_stats(
+                warmup_stats,
+                phase='warmup',
+                update_step=0,
+                start_env_steps=chunk_start_env_steps,
+                epsilon=1.0,
+            )
+            last_progress_at = maybe_print_progress(
+                args=args,
+                last_progress_at=last_progress_at,
+                phase='warmup',
+                current=warmup_done,
+                total=args.warmup_steps,
+                env_steps=env_steps,
+                buffer_size=len(replay_buffer),
+                epsilon=1.0,
+                elapsed=time.perf_counter() - start_time,
+            )
+        write_attribution_warmup_summary(
+            run_dir,
+            warmup_metric_window.to_rollout_stats(
+                buffer_size=len(replay_buffer),
+            ),
         )
-        last_progress_at = maybe_print_progress(
-            args=args,
-            last_progress_at=last_progress_at,
-            phase='warmup',
-            current=warmup_done,
-            total=args.warmup_steps,
-            env_steps=env_steps,
-            buffer_size=len(replay_buffer),
-            epsilon=1.0,
-            elapsed=time.perf_counter() - start_time,
-        )
+        warmup_complete = True
+    finally:
+        if not warmup_complete:
+            close_training_resources(
+                run_dir=run_dir,
+                replay_buffer=replay_buffer,
+                collector=collector,
+                metrics=metrics,
+                episode_metrics=episode_metrics,
+                suppress_errors=sys.exc_info()[0] is not None,
+            )
 
     print(
         f'warmup done | env_steps={env_steps} | buffer={len(replay_buffer)} '
@@ -1733,11 +2222,14 @@ def train(args):
         )
         maybe_plot_metrics(run_dir, metrics.rows, episode_metrics.rows)
     finally:
-        replay_buffer.flush()
-        if isinstance(collector, ParallelRolloutCollector):
-            collector.close()
-        metrics.close()
-        episode_metrics.close()
+        close_training_resources(
+            run_dir=run_dir,
+            replay_buffer=replay_buffer,
+            collector=collector,
+            metrics=metrics,
+            episode_metrics=episode_metrics,
+            suppress_errors=sys.exc_info()[0] is not None,
+        )
 
     print(f'training finished | run_dir={run_dir} | env_steps={env_steps}', flush=True)
     return run_dir

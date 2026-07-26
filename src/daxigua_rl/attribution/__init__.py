@@ -1,27 +1,43 @@
 """完整状态归因的公开入口。
 
-当前导出只读状态契约和静态 ``StateAnalyzer``。跨步 tracker、因果 replay 与
-反事实模块仍会按规格分别实现，避免状态分析反向依赖训练设施。
+当前导出只读状态契约、静态 ``StateAnalyzer`` 和 worker-local
+``AttributionTracker``。因果 replay 与反事实模块仍会按规格分别实现，避免状态
+分析反向依赖训练设施。
 """
 
 from .schema import (
     ANALYSIS_ACTION_COUNT,
+    ATTRIBUTION_EVENT_SCHEMA_VERSION,
+    ATTRIBUTION_EVENT_STATUSES,
+    ATTRIBUTION_EVENT_TYPES,
+    CONTRIBUTOR_ROLES,
     DEFAULT_QUEUE_DECAY,
     FULL_ACTION_MASK,
     LANDING_DEPTH_WEIGHT,
+    NEGATIVE_ATTRIBUTION_EVENT_TYPES,
+    POSITIVE_ATTRIBUTION_EVENT_TYPES,
     QUEUE_LOOKAHEAD_COUNT,
     SAFE_ACTION_WEIGHT,
     STATE_ANALYSIS_SCHEMA_VERSION,
     SUPPORT_BOUNDARIES,
     SUPPORT_RELATIONS,
+    AttributionEvent,
+    AttributionEventKey,
+    AttributionEvidence,
+    AttributionStepResult,
     ChainMotif,
     ContactInfluenceEdge,
+    Contributor,
     FreeSpaceRegionAnalysis,
     FruitAnalysis,
+    FruitLineageRecord,
+    MergeLineageRecord,
+    MergeValueKey,
     PartnerComponent,
     QueueLaneAnalysis,
     StateAnalysis,
     StateAnalysisDiagnostics,
+    StructureOriginRecord,
     SupportEdge,
 )
 from .state_analyzer import (
@@ -29,28 +45,51 @@ from .state_analyzer import (
     StateAnalyzerConfig,
     drop_x_positions_for_level,
 )
+from .tracker import (
+    AttributionTracker,
+    AttributionTrackerConfig,
+    TrackerTransitionInput,
+)
 
 
 __all__ = [
     'ANALYSIS_ACTION_COUNT',
+    'ATTRIBUTION_EVENT_SCHEMA_VERSION',
+    'ATTRIBUTION_EVENT_STATUSES',
+    'ATTRIBUTION_EVENT_TYPES',
+    'CONTRIBUTOR_ROLES',
     'DEFAULT_QUEUE_DECAY',
     'FULL_ACTION_MASK',
     'LANDING_DEPTH_WEIGHT',
+    'NEGATIVE_ATTRIBUTION_EVENT_TYPES',
+    'POSITIVE_ATTRIBUTION_EVENT_TYPES',
     'QUEUE_LOOKAHEAD_COUNT',
     'SAFE_ACTION_WEIGHT',
     'STATE_ANALYSIS_SCHEMA_VERSION',
     'SUPPORT_BOUNDARIES',
     'SUPPORT_RELATIONS',
+    'AttributionEvent',
+    'AttributionEventKey',
+    'AttributionEvidence',
+    'AttributionStepResult',
+    'AttributionTracker',
+    'AttributionTrackerConfig',
     'ChainMotif',
     'ContactInfluenceEdge',
+    'Contributor',
     'FreeSpaceRegionAnalysis',
     'FruitAnalysis',
+    'FruitLineageRecord',
+    'MergeLineageRecord',
+    'MergeValueKey',
     'PartnerComponent',
     'QueueLaneAnalysis',
     'StateAnalysis',
     'StateAnalysisDiagnostics',
     'StateAnalyzer',
     'StateAnalyzerConfig',
+    'StructureOriginRecord',
     'SupportEdge',
+    'TrackerTransitionInput',
     'drop_x_positions_for_level',
 ]

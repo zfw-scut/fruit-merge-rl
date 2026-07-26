@@ -15,12 +15,14 @@ __all__ = [
     'DQNTrainerConfig',
     'DQNTrainStats',
     'EpsilonGreedyPolicy',
+    'ParallelCollectHandle',
     'ParallelRolloutCollector',
     'ReplayBuffer',
     'RolloutCollector',
     'RolloutStats',
     'TensorTransition',
     'TransitionKey',
+    'WorkerAttributionFinalization',
 ]
 
 
@@ -37,10 +39,24 @@ def __getattr__(name):
         }
         return exports[name]
 
-    if name == 'ParallelRolloutCollector':
-        from .parallel_collector import ParallelRolloutCollector
+    if name in {
+            'ParallelCollectHandle',
+            'ParallelRolloutCollector',
+            'WorkerAttributionFinalization'}:
+        from .parallel_collector import (
+            ParallelCollectHandle,
+            ParallelRolloutCollector,
+            WorkerAttributionFinalization,
+        )
 
-        return ParallelRolloutCollector
+        exports = {
+            'ParallelCollectHandle': ParallelCollectHandle,
+            'ParallelRolloutCollector': ParallelRolloutCollector,
+            'WorkerAttributionFinalization': (
+                WorkerAttributionFinalization
+            ),
+        }
+        return exports[name]
 
     if name in {'DQNTrainer', 'DQNTrainerConfig', 'DQNTrainStats'}:
         from .dqn import DQNTrainer, DQNTrainerConfig, DQNTrainStats

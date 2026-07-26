@@ -78,6 +78,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
             replay_buffer=replay_buffer,
             model=model,
             seed=2,
+            attribution_tracker=False,
         )
         collector.collect_steps(16, epsilon=1.0)
 
@@ -111,6 +112,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
             replay_buffer=replay_buffer,
             model=GNNQNetwork(hidden_dim=32, message_layers=2),
             seed=6,
+            attribution_tracker=False,
         )
 
         stats = collector.collect_steps(6, epsilon=1.0)
@@ -140,6 +142,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
             replay_buffer=replay_buffer,
             model=model,
             seed=4,
+            attribution_tracker=False,
         )
         collector.collect_steps(16, epsilon=1.0)
 
@@ -184,6 +187,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
                 replay_buffer=replay_buffer,
                 model=model,
                 seed=8,
+                attribution_tracker=False,
             )
             collector.collect_steps(16, epsilon=1.0)
 
@@ -216,7 +220,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
         collector = ParallelRolloutCollector(
             worker_count=2,
             env_config=DaxiguaEnvConfig(
-                action_count=5,
+                action_count=15,
                 physics_fps=30,
                 max_physics_frames=80,
                 stable_frames=3,

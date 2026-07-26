@@ -17,6 +17,11 @@ from dataclasses import dataclass, field
 
 import torch
 
+from daxigua_rl.attribution import (
+    ANALYSIS_ACTION_COUNT,
+    AttributionTracker,
+    TrackerTransitionInput,
+)
 from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS
 from daxigua_rl.graph.tensor import graph_to_tensor
 
@@ -119,6 +124,23 @@ class RolloutStats:
 
     # 新生成分析中被标记为 degraded 的数量；truncated 边界通常会计入。
     state_analysis_degraded_count: int = 0
+
+    # AttributionTracker 每个真实 transition 调用一次；完整事件仍只留在 worker。
+    attribution_tracker_calls: int = 0
+    attribution_tracker_seconds: float = 0.0
+
+    # 事件生命周期轻量汇总。created 包含 pending 和即时 confirmed；
+    # confirmed/cancelled 只在事件真正解决时各计一次。
+    attribution_events_created: int = 0
+    attribution_events_confirmed: int = 0
+    attribution_events_cancelled: int = 0
+    attribution_events_interrupted: int = 0
+    attribution_pending_event_count: int = 0
+    attribution_lineage_merge_count: int = 0
+    attribution_chain_merge_count: int = 0
+    attribution_max_chain_depth: int = 0
+    attribution_event_status_counts: tuple = field(default_factory=tuple)
+    attribution_delays: tuple = field(default_factory=tuple)
 
     # 环境实际推进的物理帧总数，用于判断 fast physics 是否生效。
     physics_frames_total: int = 0
@@ -314,7 +336,8 @@ class RolloutCollector:
             model=None,
             policy=None,
             seed=None,
-            worker_id=0):
+            worker_id=0,
+            attribution_tracker=None):
         """创建 rollout collector。
 
         参数：
@@ -338,6 +361,34 @@ class RolloutCollector:
         self.worker_id = int(worker_id)
         if self.worker_id < 0:
             raise ValueError('worker_id must be non-negative')
+        if attribution_tracker is False:
+            attribution_tracker = None
+        elif attribution_tracker is None:
+            attribution_tracker = AttributionTracker()
+        if (
+                attribution_tracker is not None
+                and not isinstance(
+                    attribution_tracker,
+                    AttributionTracker)):
+            raise TypeError(
+                'attribution_tracker must be AttributionTracker, '
+                'False, or None'
+            )
+        env_action_count = getattr(
+            getattr(env, 'config', None),
+            'action_count',
+            None,
+        )
+        if (
+                attribution_tracker is not None
+                and env_action_count is not None
+                and int(env_action_count) != ANALYSIS_ACTION_COUNT):
+            raise ValueError(
+                'AttributionTracker requires exactly '
+                f'{ANALYSIS_ACTION_COUNT} environment actions; pass '
+                'attribution_tracker=False only for non-attribution tests'
+            )
+        self.attribution_tracker = attribution_tracker
 
         # `_obs` 和 `_info` 保存当前 episode 的最新状态。
         # collect_steps 第一次调用时如果发现它们为空，会自动 reset。
@@ -347,6 +398,26 @@ class RolloutCollector:
         self._episode_reward = 0.0
         self._episode_length = 0
         self._episode_id = -1
+        self._carried_attribution_resolutions = []
+        self.attribution_finalization_events = ()
+        self._closed = False
+
+    def close(self):
+        """显式收口 worker-local pending，绝不在退出时静默确认。"""
+
+        if self._closed:
+            return self.attribution_finalization_events
+        events = list(self._carried_attribution_resolutions)
+        self._carried_attribution_resolutions.clear()
+        if (
+                self.attribution_tracker is not None
+                and self.attribution_tracker.episode_active):
+            events.extend(self.attribution_tracker.finalize_episode(
+                reason='worker_shutdown'
+            ))
+        self.attribution_finalization_events = tuple(events)
+        self._closed = True
+        return self.attribution_finalization_events
 
     def reset(self, seed=None, fruit_queue=None):
         """重置环境并开始一个新的 episode。
@@ -355,8 +426,24 @@ class RolloutCollector:
         普通情况下可以直接调用 `collect_steps()`，collector 会自动 reset。
         """
 
+        if self._closed:
+            raise RuntimeError('rollout collector is closed')
+        if (
+                self.attribution_tracker is not None
+                and self.attribution_tracker.episode_active):
+            self._carried_attribution_resolutions.extend(
+                self.attribution_tracker.finalize_episode(
+                    reason='manual_reset'
+                )
+            )
+
         obs, info = self.env.reset(seed=seed, fruit_queue=fruit_queue)
         self._episode_id += 1
+        if self.attribution_tracker is not None:
+            self.attribution_tracker.begin_episode(
+                self.worker_id,
+                self._episode_id,
+            )
         self._obs, self._info = obs, info
         self._current_graph = None
         self._episode_reward = 0.0
@@ -404,6 +491,8 @@ class RolloutCollector:
         指定 transition 数量。
         """
 
+        if self._closed:
+            raise RuntimeError('rollout collector is closed')
         step_count = int(step_count)
         if step_count <= 0:
             raise ValueError('step_count must be positive')
@@ -457,12 +546,46 @@ class RolloutCollector:
         state_analysis_seconds = 0.0
         state_analysis_cache_hits = 0
         state_analysis_degraded_count = 0
+        attribution_tracker_calls = 0
+        attribution_tracker_seconds = 0.0
+        attribution_events_created = 0
+        attribution_events_confirmed = 0
+        attribution_events_cancelled = 0
+        attribution_events_interrupted = 0
+        attribution_pending_event_count = (
+            self.attribution_tracker.pending_event_count
+            if self.attribution_tracker is not None
+            else 0
+        )
+        attribution_lineage_merge_count = 0
+        attribution_chain_merge_count = 0
+        attribution_max_chain_depth = 0
+        attribution_event_status_counts = {}
+        attribution_delays = []
         physics_frames_total = 0
         fruit_count_total = 0
         graph_node_count_total = 0
         graph_edge_count_total = 0
         graph_cache_hits = 0
         graph_cache_misses = 0
+
+        for event in self._carried_attribution_resolutions:
+            attribution_events_cancelled += int(
+                event.status == 'cancelled'
+            )
+            attribution_events_interrupted += int(
+                event.resolution_reason in {
+                    'manual_reset',
+                    'worker_shutdown',
+                }
+            )
+            key = event.event_type, event.status
+            attribution_event_status_counts[key] = (
+                attribution_event_status_counts.get(key, 0) + 1
+            )
+            if event.delay is not None:
+                attribution_delays.append(event.delay)
+        self._carried_attribution_resolutions.clear()
 
         while steps < step_count:
             candidates = tuple(self._info['action_candidates'])
@@ -518,6 +641,72 @@ class RolloutCollector:
                 terminated=terminated,
                 next_info=next_info,
             )
+            if self.attribution_tracker is not None:
+                tracker_result = (
+                    self.attribution_tracker.observe_transition(
+                        TrackerTransitionInput(
+                            transition_key=transition_key,
+                            action_offset=action_offset,
+                            action_index=next_info[
+                                'action'
+                            ].action_index,
+                            previous_state=self._obs,
+                            next_state=next_obs,
+                            previous_analysis=next_info[
+                                'previous_state_analysis'
+                            ],
+                            next_analysis=next_info.get(
+                                'post_action_state_analysis',
+                                next_info['next_state_analysis'],
+                            ),
+                            drop_result=next_info['drop_result'],
+                            physics_result=next_info[
+                                'physics_result'
+                            ],
+                        )
+                    )
+                )
+                attribution_tracker_calls += 1
+                attribution_tracker_seconds += (
+                    tracker_result.tracker_seconds
+                )
+                attribution_events_created += len(
+                    tracker_result.created_events
+                )
+                attribution_events_confirmed += len(
+                    tracker_result.confirmed_events
+                )
+                attribution_events_cancelled += len(
+                    tracker_result.cancelled_events
+                )
+                attribution_events_interrupted += (
+                    tracker_result.interrupted_pending_count
+                )
+                attribution_pending_event_count = (
+                    tracker_result.pending_event_count
+                )
+                attribution_lineage_merge_count += len(
+                    tracker_result.merge_records
+                )
+                attribution_chain_merge_count += (
+                    tracker_result.chain_merge_count
+                )
+                attribution_max_chain_depth = max(
+                    attribution_max_chain_depth,
+                    tracker_result.max_transition_chain_depth,
+                )
+                for event in (
+                        tracker_result.created_events
+                        + tracker_result.resolved_events):
+                    status_key = event.event_type, event.status
+                    attribution_event_status_counts[status_key] = (
+                        attribution_event_status_counts.get(
+                            status_key,
+                            0,
+                        ) + 1
+                    )
+                    if event.delay is not None:
+                        attribution_delays.append(event.delay)
             state_analysis_calls += int(
                 next_info.get('state_analysis_calls', 0)
             )
@@ -617,6 +806,34 @@ class RolloutCollector:
             state_analysis_seconds=state_analysis_seconds,
             state_analysis_cache_hits=state_analysis_cache_hits,
             state_analysis_degraded_count=state_analysis_degraded_count,
+            attribution_tracker_calls=attribution_tracker_calls,
+            attribution_tracker_seconds=attribution_tracker_seconds,
+            attribution_events_created=attribution_events_created,
+            attribution_events_confirmed=attribution_events_confirmed,
+            attribution_events_cancelled=attribution_events_cancelled,
+            attribution_events_interrupted=attribution_events_interrupted,
+            attribution_pending_event_count=(
+                attribution_pending_event_count
+            ),
+            attribution_lineage_merge_count=(
+                attribution_lineage_merge_count
+            ),
+            attribution_chain_merge_count=(
+                attribution_chain_merge_count
+            ),
+            attribution_max_chain_depth=(
+                attribution_max_chain_depth
+            ),
+            attribution_event_status_counts=tuple(
+                (
+                    event_type,
+                    status,
+                    count,
+                )
+                for (event_type, status), count
+                in sorted(attribution_event_status_counts.items())
+            ),
+            attribution_delays=tuple(attribution_delays),
             physics_frames_total=physics_frames_total,
             fruit_count_total=fruit_count_total,
             graph_node_count_total=graph_node_count_total,
@@ -668,6 +885,10 @@ class RolloutCollector:
 
         previous_analysis = next_info.get('previous_state_analysis')
         next_analysis = next_info.get('next_state_analysis')
+        post_action_analysis = next_info.get(
+            'post_action_state_analysis',
+            next_analysis,
+        )
         if previous_analysis is not None:
             if previous_analysis.transition_key != transition_key:
                 raise RuntimeError(
@@ -680,22 +901,25 @@ class RolloutCollector:
                 raise RuntimeError(
                     'terminal transition must not return next StateAnalysis'
                 )
-            return
 
-        if next_analysis is not None:
+        if post_action_analysis is not None:
             expected_next_key = TransitionKey(
                 worker_id=transition_key.worker_id,
                 episode_id=transition_key.episode_id,
                 step_index=transition_key.step_index + 1,
             )
-            if next_analysis.transition_key != expected_next_key:
+            if post_action_analysis.transition_key != expected_next_key:
                 raise RuntimeError(
-                    'environment next StateAnalysis key is not adjacent to '
+                    'environment post-action StateAnalysis key is not '
+                    'adjacent to '
                     'collector transition key'
                 )
-            if next_analysis.incoming_transition_key != transition_key:
+            if (
+                    post_action_analysis.incoming_transition_key
+                    != transition_key):
                 raise RuntimeError(
-                    'environment next StateAnalysis incoming key does not '
+                    'environment post-action StateAnalysis incoming key '
+                    'does not '
                     'match collector transition key'
                 )
 

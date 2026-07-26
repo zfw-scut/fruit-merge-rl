@@ -184,7 +184,7 @@ class _CountingAnalyzer(StateAnalyzer):
 class RewardV2EnvironmentIntegrationTest(unittest.TestCase):
     """验证 StateAnalyzer 缓存、相邻 key、terminal 与 truncated。"""
 
-    def test_consecutive_steps_reuse_next_analysis_and_skip_terminal_analysis(self):
+    def test_terminal_keeps_reward_none_but_builds_attribution_analysis(self):
         analyzer = _CountingAnalyzer()
         env = DaxiguaEnv(
             config=DaxiguaEnvConfig(
@@ -217,9 +217,9 @@ class RewardV2EnvironmentIntegrationTest(unittest.TestCase):
         self.assertFalse(second_truncated)
         self.assertEqual(first_info['state_analysis_calls'], 2)
         self.assertFalse(first_info['state_analysis_cache_hit'])
-        self.assertEqual(second_info['state_analysis_calls'], 0)
+        self.assertEqual(second_info['state_analysis_calls'], 1)
         self.assertTrue(second_info['state_analysis_cache_hit'])
-        self.assertEqual(len(analyzer.calls), 2)
+        self.assertEqual(len(analyzer.calls), 3)
         self.assertEqual(
             analyzer.calls,
             [
@@ -231,6 +231,13 @@ class RewardV2EnvironmentIntegrationTest(unittest.TestCase):
                     True,
                     first_key,
                 ),
+                (
+                    2,
+                    ANALYSIS_ACTION_COUNT,
+                    TransitionKey(7, 3, 2),
+                    True,
+                    second_key,
+                ),
             ],
         )
         self.assertIs(
@@ -238,6 +245,12 @@ class RewardV2EnvironmentIntegrationTest(unittest.TestCase):
             first_info['next_state_analysis'],
         )
         self.assertIsNone(second_info['next_state_analysis'])
+        self.assertEqual(
+            second_info[
+                'post_action_state_analysis'
+            ].transition_key,
+            TransitionKey(7, 3, 2),
+        )
         self.assertAlmostEqual(first_reward, -0.0045, places=12)
         self.assertAlmostEqual(second_reward, -0.45, places=12)
 
@@ -342,6 +355,9 @@ class RewardV2CollectorIntegrationTest(unittest.TestCase):
             replay_buffer=replay_buffer,
             seed=0,
             worker_id=9,
+            # 该空盘脚本刻意不创建 drop_result 对应的水果，只测试 Reward V2
+            # 分析缓存；真实谱系测试使用满足物理身份不变量的专用 fixture。
+            attribution_tracker=False,
         )
 
         stats = collector.collect_steps(2, epsilon=1.0)
@@ -350,7 +366,7 @@ class RewardV2CollectorIntegrationTest(unittest.TestCase):
             tuple(key.as_tuple() for key in stats.transition_keys),
             ((9, 0, 0), (9, 0, 1)),
         )
-        self.assertEqual(stats.state_analysis_calls, 2)
+        self.assertEqual(stats.state_analysis_calls, 3)
         self.assertEqual(stats.state_analysis_cache_hits, 1)
         self.assertEqual(stats.state_analysis_degraded_count, 0)
         self.assertGreaterEqual(stats.state_analysis_seconds, 0.0)

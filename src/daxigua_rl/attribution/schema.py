@@ -26,12 +26,63 @@ ANALYSIS_ACTION_COUNT = 15
 QUEUE_LOOKAHEAD_COUNT = 4
 FULL_ACTION_MASK = (1 << ANALYSIS_ACTION_COUNT) - 1
 STATE_ANALYSIS_SCHEMA_VERSION = 2
+ATTRIBUTION_EVENT_SCHEMA_VERSION = 1
 LANDING_DEPTH_WEIGHT = 0.7
 SAFE_ACTION_WEIGHT = 0.3
 DEFAULT_QUEUE_DECAY = 0.5
 
 SUPPORT_BOUNDARIES = ('floor', 'left_wall', 'right_wall')
 SUPPORT_RELATIONS = ('supports', 'wall_constraint', 'caps', 'bridges')
+
+ATTRIBUTION_EVENT_STATUSES = ('pending', 'confirmed', 'cancelled')
+CONTRIBUTOR_ROLES = (
+    'material',
+    'trigger',
+    'mechanical_trigger',
+    'support',
+    'path_opener',
+    'path_blocker',
+    'motif_creator',
+    'motif_breaker',
+    'rescuer',
+    'victim_drop',
+)
+POSITIVE_ATTRIBUTION_EVENT_TYPES = (
+    'MERGE_LINEAGE',
+    'DIRECT_TRIGGER',
+    'MECHANICAL_TRIGGER',
+    'CHAIN_TRIGGER',
+    'REALIZED_ADJACENCY',
+    'REALIZED_LADDER',
+    'WALL_ANCHOR_REALIZED',
+    'SUPPORT_PATH_REALIZED',
+    'PARTNER_CONNECTED',
+    'FRUIT_RESCUED',
+    'CORRIDOR_OPENED_USED',
+    'INVERSION_RESOLVED',
+    'BLOCKER_CLEARED',
+)
+NEGATIVE_ATTRIBUTION_EVENT_TYPES = (
+    'BORN_BURIED',
+    'REACHABILITY_SEALED',
+    'PUSHED_BURIED',
+    'MERGE_EXPANSION_BLOCK',
+    'CORNER_CAPPED',
+    'ROOF_BRIDGE_CREATED',
+    'SEALED_CAVITY_CREATED',
+    'PARTNER_ISOLATED',
+    'PAIR_SCATTERED',
+    'LAST_LANE_BLOCKED',
+    'CHAIN_MOTIF_BROKEN',
+    'LARGE_BLOCKER_CREATED',
+    'INVERSION_CREATED',
+    'TERMINAL_SUPPORT_CREATED',
+    'DEAD_LOW_FRUIT_CONFIRMED',
+)
+ATTRIBUTION_EVENT_TYPES = (
+    POSITIVE_ATTRIBUTION_EVENT_TYPES
+    + NEGATIVE_ATTRIBUTION_EVENT_TYPES
+)
 
 
 def _integer(name, value, *, minimum=0):
@@ -172,6 +223,29 @@ def _code_tuple(name, values):
     if len(set(result)) != len(result):
         raise ValueError(f'{name} must not contain duplicates')
     return tuple(sorted(result))
+
+
+def _episode_key(name, value):
+    """规范化 worker/episode 二元身份。"""
+
+    result = tuple(value)
+    if len(result) != 2:
+        raise ValueError(f'{name} must contain worker_id and episode_id')
+    return (
+        _integer(f'{name}.worker_id', result[0]),
+        _integer(f'{name}.episode_id', result[1]),
+    )
+
+
+def _non_empty_string(name, value):
+    """读取去除首尾空白后的非空字符串。"""
+
+    if not isinstance(value, str):
+        raise TypeError(f'{name} must be str')
+    result = value.strip()
+    if not result:
+        raise ValueError(f'{name} must not be empty')
+    return result
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1429,23 +1503,1030 @@ class StateAnalysis:
         )
 
 
+@dataclass(frozen=True, order=True, slots=True)
+class AttributionEventKey:
+    """一次训练 run 内全局唯一、且不依赖随机 hash 的事件身份。"""
+
+    worker_id: int
+    episode_id: int
+    event_index: int
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            'worker_id',
+            _integer('worker_id', self.worker_id),
+        )
+        object.__setattr__(
+            self,
+            'episode_id',
+            _integer('episode_id', self.episode_id),
+        )
+        object.__setattr__(
+            self,
+            'event_index',
+            _integer('event_index', self.event_index),
+        )
+
+    @property
+    def episode_key(self):
+        return self.worker_id, self.episode_id
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class MergeValueKey:
+    """一个真实 ``MergeEvent`` 的唯一任务价值包身份。"""
+
+    transition_key: TransitionKey
+    event_offset: int
+
+    def __post_init__(self):
+        if not isinstance(self.transition_key, TransitionKey):
+            raise TypeError('transition_key must be TransitionKey')
+        object.__setattr__(
+            self,
+            'event_offset',
+            _integer('event_offset', self.event_offset),
+        )
+
+    @property
+    def episode_key(self):
+        return (
+            self.transition_key.worker_id,
+            self.transition_key.episode_id,
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Contributor:
+    """一个历史动作对归因事件的压缩贡献证据。
+
+    ``action_offset`` 是模型 Q 数组下标，``action_index`` 是环境公开动作号。
+    当前两者通常相同，但契约仍显式区分，避免后续非均匀动作集合发生歧义。
+    """
+
+    transition_key: TransitionKey
+    action_offset: int
+    action_index: int
+    fruit_id: int
+    evidence_type: str
+    raw_evidence_weight: float
+    contribution_weight: float
+    role: str
+
+    def __post_init__(self):
+        if not isinstance(self.transition_key, TransitionKey):
+            raise TypeError('transition_key must be TransitionKey')
+        for field_name in ('action_offset', 'action_index'):
+            object.__setattr__(
+                self,
+                field_name,
+                _integer(field_name, getattr(self, field_name)),
+            )
+        object.__setattr__(
+            self,
+            'fruit_id',
+            _integer('fruit_id', self.fruit_id, minimum=1),
+        )
+        object.__setattr__(
+            self,
+            'evidence_type',
+            _non_empty_string('evidence_type', self.evidence_type),
+        )
+        object.__setattr__(
+            self,
+            'raw_evidence_weight',
+            _finite_float(
+                'raw_evidence_weight',
+                self.raw_evidence_weight,
+                minimum=0.0,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'contribution_weight',
+            _unit_float(
+                'contribution_weight',
+                self.contribution_weight,
+            ),
+        )
+        if self.role not in CONTRIBUTOR_ROLES:
+            raise ValueError(
+                f'role must be one of {CONTRIBUTOR_ROLES!r}'
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FruitLineageRecord:
+    """一颗历史水果的来源、父节点和根投放材料。"""
+
+    episode_key: tuple[int, int]
+    fruit_id: int
+    level: int
+    source_kind: str
+    root_material_weights: tuple[tuple[int, float], ...]
+    created_transition_key: TransitionKey | None = None
+    action_offset: int | None = None
+    action_index: int | None = None
+    parent_fruit_ids: tuple[int, ...] = ()
+    merge_value_key: MergeValueKey | None = None
+    chain_depth: int = 0
+
+    def __post_init__(self):
+        episode_key = _episode_key('episode_key', self.episode_key)
+        object.__setattr__(self, 'episode_key', episode_key)
+        fruit_id = _integer('fruit_id', self.fruit_id, minimum=1)
+        object.__setattr__(self, 'fruit_id', fruit_id)
+        object.__setattr__(
+            self,
+            'level',
+            _fruit_level('level', self.level),
+        )
+        if self.source_kind not in {'drop', 'merge', 'preexisting'}:
+            raise ValueError(
+                'source_kind must be "drop", "merge", or "preexisting"'
+            )
+
+        if self.created_transition_key is not None:
+            if not isinstance(self.created_transition_key, TransitionKey):
+                raise TypeError(
+                    'created_transition_key must be TransitionKey or None'
+                )
+            if (
+                    self.created_transition_key.worker_id,
+                    self.created_transition_key.episode_id,
+            ) != episode_key:
+                raise ValueError(
+                    'created_transition_key must belong to episode_key'
+                )
+
+        action_values = self.action_offset, self.action_index
+        if (action_values[0] is None) != (action_values[1] is None):
+            raise ValueError(
+                'action_offset and action_index must be provided together'
+            )
+        if action_values[0] is not None:
+            object.__setattr__(
+                self,
+                'action_offset',
+                _integer('action_offset', action_values[0]),
+            )
+            object.__setattr__(
+                self,
+                'action_index',
+                _integer('action_index', action_values[1]),
+            )
+
+        parent_ids = _id_tuple(
+            'parent_fruit_ids',
+            self.parent_fruit_ids,
+            own_id=fruit_id,
+            sort_values=False,
+        )
+        object.__setattr__(self, 'parent_fruit_ids', parent_ids)
+
+        root_weights = tuple(
+            (
+                _integer(
+                    f'root_material_weights[{offset}].fruit_id',
+                    root_id,
+                    minimum=1,
+                ),
+                _finite_float(
+                    f'root_material_weights[{offset}].weight',
+                    weight,
+                    minimum=0.0,
+                ),
+            )
+            for offset, (root_id, weight)
+            in enumerate(self.root_material_weights)
+        )
+        if not root_weights:
+            raise ValueError('root_material_weights must not be empty')
+        root_ids = tuple(root_id for root_id, _weight in root_weights)
+        if len(set(root_ids)) != len(root_ids):
+            raise ValueError(
+                'root_material_weights must not contain duplicate roots'
+            )
+        if tuple(sorted(root_ids)) != root_ids:
+            raise ValueError(
+                'root_material_weights must be sorted by root fruit ID'
+            )
+        if not math.isclose(
+                sum(weight for _root_id, weight in root_weights),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9):
+            raise ValueError('root material weights must sum to 1')
+        object.__setattr__(
+            self,
+            'root_material_weights',
+            root_weights,
+        )
+
+        if self.merge_value_key is not None:
+            if not isinstance(self.merge_value_key, MergeValueKey):
+                raise TypeError(
+                    'merge_value_key must be MergeValueKey or None'
+                )
+            if self.merge_value_key.episode_key != episode_key:
+                raise ValueError(
+                    'merge_value_key must belong to episode_key'
+                )
+
+        object.__setattr__(
+            self,
+            'chain_depth',
+            _integer('chain_depth', self.chain_depth),
+        )
+
+        if self.source_kind == 'drop':
+            if (
+                    self.created_transition_key is None
+                    or self.action_offset is None
+                    or parent_ids
+                    or self.merge_value_key is not None
+                    or root_weights != ((fruit_id, 1.0),)
+                    or self.chain_depth != 0):
+                raise ValueError('drop lineage record fields are inconsistent')
+        elif self.source_kind == 'merge':
+            if (
+                    self.created_transition_key is None
+                    or self.action_offset is None
+                    or len(parent_ids) != 2
+                    or self.merge_value_key is None
+                    or self.merge_value_key.transition_key
+                    != self.created_transition_key
+                    or self.chain_depth < 1):
+                raise ValueError('merge lineage record fields are inconsistent')
+        else:
+            if (
+                    self.created_transition_key is not None
+                    or self.action_offset is not None
+                    or parent_ids
+                    or self.merge_value_key is not None
+                    or root_weights != ((fruit_id, 1.0),)
+                    or self.chain_depth != 0):
+                raise ValueError(
+                    'preexisting lineage record fields are inconsistent'
+                )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MergeLineageRecord:
+    """一个真实合成事件的拓扑记录和唯一价值包。"""
+
+    value_key: MergeValueKey
+    source_fruit_ids: tuple[int, int]
+    new_fruit_id: int
+    new_level: int
+    utility: float
+    root_material_weights: tuple[tuple[int, float], ...]
+    chain_depth: int
+
+    def __post_init__(self):
+        if not isinstance(self.value_key, MergeValueKey):
+            raise TypeError('value_key must be MergeValueKey')
+        source_ids = _id_tuple(
+            'source_fruit_ids',
+            self.source_fruit_ids,
+            minimum_length=2,
+            sort_values=False,
+        )
+        if len(source_ids) != 2:
+            raise ValueError('source_fruit_ids must contain exactly two IDs')
+        object.__setattr__(self, 'source_fruit_ids', source_ids)
+        new_fruit_id = _integer(
+            'new_fruit_id',
+            self.new_fruit_id,
+            minimum=1,
+        )
+        if new_fruit_id in source_ids:
+            raise ValueError('new_fruit_id must differ from source_fruit_ids')
+        object.__setattr__(self, 'new_fruit_id', new_fruit_id)
+        object.__setattr__(
+            self,
+            'new_level',
+            _fruit_level('new_level', self.new_level),
+        )
+        object.__setattr__(
+            self,
+            'utility',
+            _finite_float('utility', self.utility, minimum=0.0),
+        )
+        root_weights = tuple(
+            (
+                _integer(
+                    f'root_material_weights[{offset}].fruit_id',
+                    root_id,
+                    minimum=1,
+                ),
+                _finite_float(
+                    f'root_material_weights[{offset}].weight',
+                    weight,
+                    minimum=0.0,
+                ),
+            )
+            for offset, (root_id, weight)
+            in enumerate(self.root_material_weights)
+        )
+        if not root_weights:
+            raise ValueError('root_material_weights must not be empty')
+        if tuple(sorted(root_id for root_id, _ in root_weights)) != tuple(
+                root_id for root_id, _ in root_weights):
+            raise ValueError(
+                'root_material_weights must be sorted by root fruit ID'
+            )
+        if len({root_id for root_id, _ in root_weights}) != len(root_weights):
+            raise ValueError(
+                'root_material_weights must not contain duplicate roots'
+            )
+        if not math.isclose(
+                sum(weight for _root_id, weight in root_weights),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9):
+            raise ValueError('root material weights must sum to 1')
+        object.__setattr__(
+            self,
+            'root_material_weights',
+            root_weights,
+        )
+        object.__setattr__(
+            self,
+            'chain_depth',
+            _integer('chain_depth', self.chain_depth, minimum=1),
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StructureOriginRecord:
+    """后来可被真实合成兑现的一条轻量结构来源。"""
+
+    structure_type: str
+    structure_key: str
+    transition_key: TransitionKey
+    action_offset: int
+    action_index: int
+    fruit_id: int
+    target_fruit_ids: tuple[int, ...]
+    evidence_weight: float = 1.0
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            'structure_type',
+            _non_empty_string('structure_type', self.structure_type),
+        )
+        object.__setattr__(
+            self,
+            'structure_key',
+            _non_empty_string('structure_key', self.structure_key),
+        )
+        if not isinstance(self.transition_key, TransitionKey):
+            raise TypeError('transition_key must be TransitionKey')
+        for field_name in ('action_offset', 'action_index'):
+            object.__setattr__(
+                self,
+                field_name,
+                _integer(field_name, getattr(self, field_name)),
+            )
+        object.__setattr__(
+            self,
+            'fruit_id',
+            _integer('fruit_id', self.fruit_id, minimum=1),
+        )
+        object.__setattr__(
+            self,
+            'target_fruit_ids',
+            _id_tuple(
+                'target_fruit_ids',
+                self.target_fruit_ids,
+                minimum_length=1,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'evidence_weight',
+            _finite_float(
+                'evidence_weight',
+                self.evidence_weight,
+                minimum=0.0,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttributionEvidence:
+    """事件共享的、无任意 dict 的压缩证据。"""
+
+    reason_codes: tuple[str, ...] = ()
+    value_package_keys: tuple[MergeValueKey, ...] = ()
+    primary_event_key: AttributionEventKey | None = None
+    source_fruit_ids: tuple[int, ...] = ()
+    blocker_fruit_ids: tuple[int, ...] = ()
+    contact_path_fruit_ids: tuple[int, ...] = ()
+    lost_action_mask: int = 0
+    gained_action_mask: int = 0
+    previous_reachable_count: int | None = None
+    next_reachable_count: int | None = None
+    previous_partner_reachable: bool | None = None
+    next_partner_reachable: bool | None = None
+    previous_burial_depth: float | None = None
+    next_burial_depth: float | None = None
+    stable_unreachable_steps: int = 0
+    structure_key: str | None = None
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            'reason_codes',
+            _code_tuple('reason_codes', self.reason_codes),
+        )
+        value_keys = tuple(self.value_package_keys)
+        if any(not isinstance(key, MergeValueKey) for key in value_keys):
+            raise TypeError(
+                'value_package_keys must contain MergeValueKey values'
+            )
+        if len(set(value_keys)) != len(value_keys):
+            raise ValueError('value_package_keys must not contain duplicates')
+        object.__setattr__(
+            self,
+            'value_package_keys',
+            tuple(sorted(value_keys)),
+        )
+        if (
+                self.primary_event_key is not None
+                and not isinstance(
+                    self.primary_event_key,
+                    AttributionEventKey,
+                )):
+            raise TypeError(
+                'primary_event_key must be AttributionEventKey or None'
+            )
+        for field_name in (
+                'source_fruit_ids',
+                'blocker_fruit_ids',
+                'contact_path_fruit_ids'):
+            object.__setattr__(
+                self,
+                field_name,
+                _id_tuple(
+                    field_name,
+                    getattr(self, field_name),
+                    sort_values=field_name != 'contact_path_fruit_ids',
+                ),
+            )
+        for field_name in ('lost_action_mask', 'gained_action_mask'):
+            object.__setattr__(
+                self,
+                field_name,
+                _action_mask(field_name, getattr(self, field_name)),
+            )
+        for field_name in (
+                'previous_reachable_count',
+                'next_reachable_count'):
+            value = getattr(self, field_name)
+            if value is not None:
+                count = _integer(field_name, value)
+                if count > ANALYSIS_ACTION_COUNT:
+                    raise ValueError(
+                        f'{field_name} must be <= {ANALYSIS_ACTION_COUNT}'
+                    )
+                object.__setattr__(self, field_name, count)
+        for field_name in (
+                'previous_partner_reachable',
+                'next_partner_reachable'):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _boolean(field_name, value),
+                )
+        for field_name in (
+                'previous_burial_depth',
+                'next_burial_depth'):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(
+                    self,
+                    field_name,
+                    _unit_float(field_name, value),
+                )
+        object.__setattr__(
+            self,
+            'stable_unreachable_steps',
+            _integer(
+                'stable_unreachable_steps',
+                self.stable_unreachable_steps,
+            ),
+        )
+        if self.structure_key is not None:
+            object.__setattr__(
+                self,
+                'structure_key',
+                _non_empty_string('structure_key', self.structure_key),
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttributionEvent:
+    """一条 pending、confirmed 或 cancelled 历史贡献事件。"""
+
+    event_id: AttributionEventKey
+    episode_key: tuple[int, int]
+    attribution_version: str
+    tracker_config_fingerprint: str
+    detected_step: int
+    resolved_step: int | None
+    event_type: str
+    status: str
+    sign: int
+    target_fruit_ids: tuple[int, ...]
+    contributors: tuple[Contributor, ...]
+    utility: float
+    link_confidence: float
+    placement_confidence: float
+    evidence: AttributionEvidence
+    budget_key: AttributionEventKey | MergeValueKey
+    resolution_reason: str | None = None
+    delay: int | None = None
+    schema_version: int = ATTRIBUTION_EVENT_SCHEMA_VERSION
+
+    def __post_init__(self):
+        if not isinstance(self.event_id, AttributionEventKey):
+            raise TypeError('event_id must be AttributionEventKey')
+        episode_key = _episode_key('episode_key', self.episode_key)
+        object.__setattr__(self, 'episode_key', episode_key)
+        if self.event_id.episode_key != episode_key:
+            raise ValueError('event_id must belong to episode_key')
+        object.__setattr__(
+            self,
+            'attribution_version',
+            _non_empty_string(
+                'attribution_version',
+                self.attribution_version,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'tracker_config_fingerprint',
+            _non_empty_string(
+                'tracker_config_fingerprint',
+                self.tracker_config_fingerprint,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'detected_step',
+            _integer('detected_step', self.detected_step),
+        )
+
+        if self.event_type not in ATTRIBUTION_EVENT_TYPES:
+            raise ValueError(
+                f'event_type must be one of {ATTRIBUTION_EVENT_TYPES!r}'
+            )
+        if self.status not in ATTRIBUTION_EVENT_STATUSES:
+            raise ValueError(
+                f'status must be one of {ATTRIBUTION_EVENT_STATUSES!r}'
+            )
+        expected_sign = (
+            1
+            if self.event_type in POSITIVE_ATTRIBUTION_EVENT_TYPES
+            else -1
+        )
+        if isinstance(self.sign, bool) or self.sign != expected_sign:
+            raise ValueError(
+                f'sign must be {expected_sign} for {self.event_type}'
+            )
+
+        target_ids = _id_tuple(
+            'target_fruit_ids',
+            self.target_fruit_ids,
+            minimum_length=1,
+        )
+        object.__setattr__(self, 'target_fruit_ids', target_ids)
+        contributors = tuple(self.contributors)
+        if any(
+                not isinstance(contributor, Contributor)
+                for contributor in contributors):
+            raise TypeError(
+                'contributors must contain Contributor values'
+            )
+        contributor_keys = tuple(
+            (
+                item.transition_key,
+                item.action_offset,
+                item.action_index,
+                item.fruit_id,
+            )
+            for item in contributors
+        )
+        if len(set(contributor_keys)) != len(contributor_keys):
+            raise ValueError(
+                'contributors must be aggregated per action and fruit'
+            )
+        for contributor in contributors:
+            if (
+                    contributor.transition_key.worker_id,
+                    contributor.transition_key.episode_id,
+            ) != episode_key:
+                raise ValueError(
+                    'contributors must belong to event episode_key'
+                )
+        if contributors and not math.isclose(
+                sum(item.contribution_weight for item in contributors),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9):
+            raise ValueError(
+                'contributor contribution weights must sum to 1'
+            )
+        object.__setattr__(
+            self,
+            'contributors',
+            tuple(sorted(
+                contributors,
+                key=lambda item: (
+                    item.transition_key,
+                    item.action_offset,
+                    item.fruit_id,
+                ),
+            )),
+        )
+        object.__setattr__(
+            self,
+            'utility',
+            _finite_float('utility', self.utility, minimum=0.0),
+        )
+        for field_name in ('link_confidence', 'placement_confidence'):
+            object.__setattr__(
+                self,
+                field_name,
+                _unit_float(field_name, getattr(self, field_name)),
+            )
+        if not isinstance(self.evidence, AttributionEvidence):
+            raise TypeError('evidence must be AttributionEvidence')
+        if not isinstance(
+                self.budget_key,
+                (AttributionEventKey, MergeValueKey)):
+            raise TypeError(
+                'budget_key must be AttributionEventKey or MergeValueKey'
+            )
+        if self.budget_key.episode_key != episode_key:
+            raise ValueError('budget_key must belong to episode_key')
+        if (
+                self.evidence.primary_event_key is not None
+                and self.evidence.primary_event_key.episode_key
+                != episode_key):
+            raise ValueError(
+                'evidence primary_event_key must belong to episode_key'
+            )
+        if any(
+                key.episode_key != episode_key
+                for key in self.evidence.value_package_keys):
+            raise ValueError(
+                'evidence value packages must belong to episode_key'
+            )
+
+        if self.status == 'pending':
+            if (
+                    self.resolved_step is not None
+                    or self.resolution_reason is not None
+                    or self.delay is not None):
+                raise ValueError(
+                    'pending event cannot have resolution fields'
+                )
+        else:
+            resolved_step = _integer(
+                'resolved_step',
+                self.resolved_step,
+            )
+            if resolved_step < self.detected_step:
+                raise ValueError(
+                    'resolved_step must not precede detected_step'
+                )
+            object.__setattr__(self, 'resolved_step', resolved_step)
+            resolution_reason = _non_empty_string(
+                'resolution_reason',
+                self.resolution_reason,
+            )
+            object.__setattr__(
+                self,
+                'resolution_reason',
+                resolution_reason,
+            )
+            expected_delay = resolved_step - self.detected_step
+            if self.delay is None:
+                object.__setattr__(self, 'delay', expected_delay)
+            else:
+                delay = _integer('delay', self.delay)
+                if delay != expected_delay:
+                    raise ValueError(
+                        'delay must equal resolved_step - detected_step'
+                    )
+                object.__setattr__(self, 'delay', delay)
+
+        version = _integer(
+            'schema_version',
+            self.schema_version,
+            minimum=1,
+        )
+        if version != ATTRIBUTION_EVENT_SCHEMA_VERSION:
+            raise ValueError(
+                'unsupported attribution event schema_version '
+                f'{version}; expected '
+                f'{ATTRIBUTION_EVENT_SCHEMA_VERSION}'
+            )
+        object.__setattr__(self, 'schema_version', version)
+
+    @property
+    def confidence_tier(self):
+        """按规格返回 A/B/C 规则训练路由。"""
+
+        if self.link_confidence >= 0.90 and self.placement_confidence >= 0.80:
+            return 'A'
+        if self.link_confidence >= 0.75 and self.placement_confidence >= 0.55:
+            return 'B'
+        return 'C'
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AttributionStepResult:
+    """tracker 对一个 transition 的不可变输出摘要。"""
+
+    transition_key: TransitionKey
+    created_events: tuple[AttributionEvent, ...] = ()
+    resolved_events: tuple[AttributionEvent, ...] = ()
+    lineage_records: tuple[FruitLineageRecord, ...] = ()
+    merge_records: tuple[MergeLineageRecord, ...] = ()
+    pending_event_count: int = 0
+    interrupted_pending_count: int = 0
+    tracker_seconds: float = 0.0
+    diagnostic_codes: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not isinstance(self.transition_key, TransitionKey):
+            raise TypeError('transition_key must be TransitionKey')
+        episode_key = (
+            self.transition_key.worker_id,
+            self.transition_key.episode_id,
+        )
+        typed_fields = (
+            ('created_events', AttributionEvent),
+            ('resolved_events', AttributionEvent),
+            ('lineage_records', FruitLineageRecord),
+            ('merge_records', MergeLineageRecord),
+        )
+        for field_name, item_type in typed_fields:
+            values = tuple(getattr(self, field_name))
+            if any(not isinstance(value, item_type) for value in values):
+                raise TypeError(
+                    f'{field_name} must contain {item_type.__name__} values'
+                )
+            object.__setattr__(self, field_name, values)
+        for event in self.created_events + self.resolved_events:
+            if event.episode_key != episode_key:
+                raise ValueError(
+                    'step events must belong to transition episode'
+                )
+        for record in self.lineage_records:
+            if record.episode_key != episode_key:
+                raise ValueError(
+                    'lineage records must belong to transition episode'
+                )
+        for record in self.merge_records:
+            if record.value_key.episode_key != episode_key:
+                raise ValueError(
+                    'merge records must belong to transition episode'
+                )
+        all_events = self.created_events + self.resolved_events
+        created_by_id = {
+            event.event_id: event
+            for event in self.created_events
+        }
+        resolved_by_id = {
+            event.event_id: event
+            for event in self.resolved_events
+        }
+        if len(created_by_id) != len(self.created_events):
+            raise ValueError(
+                'created_events must not contain duplicate event IDs'
+            )
+        if len(resolved_by_id) != len(self.resolved_events):
+            raise ValueError(
+                'resolved_events must not contain duplicate event IDs'
+            )
+        for event_id in created_by_id.keys() & resolved_by_id.keys():
+            created = created_by_id[event_id]
+            resolved = resolved_by_id[event_id]
+            if (
+                    created.status != 'pending'
+                    or resolved.status
+                    not in {'confirmed', 'cancelled'}
+                    or created.episode_key != resolved.episode_key
+                    or created.attribution_version
+                    != resolved.attribution_version
+                    or created.tracker_config_fingerprint
+                    != resolved.tracker_config_fingerprint
+                    or created.event_type != resolved.event_type
+                    or created.sign != resolved.sign
+                    or created.detected_step != resolved.detected_step
+                    or created.target_fruit_ids
+                    != resolved.target_fruit_ids
+                    or created.contributors != resolved.contributors
+                    or created.utility != resolved.utility
+                    or created.link_confidence
+                    != resolved.link_confidence
+                    or created.placement_confidence
+                    != resolved.placement_confidence
+                    or created.budget_key != resolved.budget_key
+                    or created.schema_version
+                    != resolved.schema_version):
+                raise ValueError(
+                    'an event ID may cross created/resolved only as '
+                    'one consistent pending lifecycle'
+                )
+        lineage_ids = tuple(
+            record.fruit_id
+            for record in self.lineage_records
+        )
+        if len(set(lineage_ids)) != len(lineage_ids):
+            raise ValueError(
+                'lineage records must not contain duplicate fruit IDs'
+            )
+        merge_value_keys = tuple(
+            record.value_key
+            for record in self.merge_records
+        )
+        if len(set(merge_value_keys)) != len(merge_value_keys):
+            raise ValueError(
+                'merge records must not contain duplicate value keys'
+            )
+        merge_records_by_key = {
+            record.value_key: record
+            for record in self.merge_records
+        }
+        non_merge_value_event_ids = {}
+        for event in all_events:
+            if (
+                    isinstance(event.budget_key, MergeValueKey)
+                    and event.utility > 0.0
+                    and event.budget_key not in merge_records_by_key):
+                raise ValueError(
+                    'nonzero merge utility must belong to this step merge'
+                )
+            if (
+                    isinstance(event.budget_key, AttributionEventKey)
+                    and event.utility > 0.0):
+                if event.event_id != event.budget_key:
+                    raise ValueError(
+                        'nonzero event utility must be owned by its '
+                        'primary event ID'
+                    )
+                non_merge_value_event_ids.setdefault(
+                    event.budget_key,
+                    set(),
+                ).add(event.event_id)
+        if any(
+                len(event_ids) != 1
+                for event_ids in non_merge_value_event_ids.values()):
+            raise ValueError(
+                'each non-merge value package must have one logical '
+                'nonzero event'
+            )
+        for value_key, record in merge_records_by_key.items():
+            valued_events = tuple(
+                event
+                for event in all_events
+                if event.budget_key == value_key and event.utility > 0.0
+            )
+            if (
+                    len(valued_events) != 1
+                    or valued_events[0].event_type != 'MERGE_LINEAGE'
+                    or not math.isclose(
+                        valued_events[0].utility,
+                        record.utility,
+                        rel_tol=0.0,
+                        abs_tol=1e-9,
+                    )):
+                raise ValueError(
+                    'each merge value package must have exactly one '
+                    'matching nonzero MERGE_LINEAGE event'
+                )
+        object.__setattr__(
+            self,
+            'pending_event_count',
+            _integer(
+                'pending_event_count',
+                self.pending_event_count,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'interrupted_pending_count',
+            _integer(
+                'interrupted_pending_count',
+                self.interrupted_pending_count,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'tracker_seconds',
+            _finite_float(
+                'tracker_seconds',
+                self.tracker_seconds,
+                minimum=0.0,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'diagnostic_codes',
+            _code_tuple('diagnostic_codes', self.diagnostic_codes),
+        )
+
+    @property
+    def confirmed_events(self):
+        return tuple(
+            event
+            for event in self.created_events + self.resolved_events
+            if event.status == 'confirmed'
+        )
+
+    @property
+    def cancelled_events(self):
+        return tuple(
+            event
+            for event in self.resolved_events
+            if event.status == 'cancelled'
+        )
+
+    @property
+    def chain_merge_count(self):
+        """同一步中以本步新合成水果为 parent 的后续合成数量。"""
+
+        created_ids = set()
+        count = 0
+        for record in self.merge_records:
+            if any(
+                    source_id in created_ids
+                    for source_id in record.source_fruit_ids):
+                count += 1
+            created_ids.add(record.new_fruit_id)
+        return count
+
+    @property
+    def max_transition_chain_depth(self):
+        """返回当前物理稳定过程内的最大连锁深度。"""
+
+        local_depths = {}
+        maximum = 0
+        for record in self.merge_records:
+            depth = 1 + max(
+                (
+                    local_depths.get(source_id, 0)
+                    for source_id in record.source_fruit_ids
+                ),
+                default=0,
+            )
+            local_depths[record.new_fruit_id] = depth
+            maximum = max(maximum, depth)
+        return maximum
+
+
 __all__ = [
     'ANALYSIS_ACTION_COUNT',
+    'ATTRIBUTION_EVENT_SCHEMA_VERSION',
+    'ATTRIBUTION_EVENT_STATUSES',
+    'ATTRIBUTION_EVENT_TYPES',
+    'CONTRIBUTOR_ROLES',
     'DEFAULT_QUEUE_DECAY',
     'FULL_ACTION_MASK',
     'LANDING_DEPTH_WEIGHT',
+    'NEGATIVE_ATTRIBUTION_EVENT_TYPES',
+    'POSITIVE_ATTRIBUTION_EVENT_TYPES',
     'QUEUE_LOOKAHEAD_COUNT',
     'SAFE_ACTION_WEIGHT',
     'STATE_ANALYSIS_SCHEMA_VERSION',
     'SUPPORT_BOUNDARIES',
     'SUPPORT_RELATIONS',
+    'AttributionEvent',
+    'AttributionEventKey',
+    'AttributionEvidence',
+    'AttributionStepResult',
     'ChainMotif',
     'ContactInfluenceEdge',
+    'Contributor',
     'FreeSpaceRegionAnalysis',
     'FruitAnalysis',
+    'FruitLineageRecord',
+    'MergeLineageRecord',
+    'MergeValueKey',
     'PartnerComponent',
     'QueueLaneAnalysis',
     'StateAnalysis',
     'StateAnalysisDiagnostics',
+    'StructureOriginRecord',
     'SupportEdge',
 ]

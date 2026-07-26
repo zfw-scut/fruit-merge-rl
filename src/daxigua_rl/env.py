@@ -141,22 +141,27 @@ class DaxiguaEnv:
         terminated = physics_result.done
         truncated = physics_result.truncated
 
-        next_analysis = None
-        if not terminated:
-            next_key = TransitionKey(
-                worker_id=transition_key.worker_id,
-                episode_id=transition_key.episode_id,
-                step_index=transition_key.step_index + 1,
-            )
-            next_analysis = self._analyze_state(
-                obs,
-                next_key,
-                stable_boundary=physics_result.stable,
-                incoming_transition_key=transition_key,
-            )
-            analysis_calls += 1
-            analysis_seconds += next_analysis.diagnostics.analysis_seconds
-            degraded_count += int(next_analysis.diagnostics.degraded)
+        next_key = TransitionKey(
+            worker_id=transition_key.worker_id,
+            episode_id=transition_key.episode_id,
+            step_index=transition_key.step_index + 1,
+        )
+        post_action_analysis = self._analyze_state(
+            obs,
+            next_key,
+            # 真实终局是吸收边界；即使物理循环因终局提前停止，该快照也不会再推进。
+            stable_boundary=bool(physics_result.stable or terminated),
+            incoming_transition_key=transition_key,
+        )
+        analysis_calls += 1
+        analysis_seconds += (
+            post_action_analysis.diagnostics.analysis_seconds
+        )
+        degraded_count += int(
+            post_action_analysis.diagnostics.degraded
+        )
+        # Reward V2 的 terminal next potential 仍必须为 0；终局分析只供归因器使用。
+        next_analysis = None if terminated else post_action_analysis
 
         reward, reward_breakdown = compute_reward(
             previous_analysis=previous_analysis,
@@ -176,9 +181,11 @@ class DaxiguaEnv:
         info = {
             'action': action,
             'drop_result': drop_result,
+            'physics_result': physics_result,
             'reward_breakdown': reward_breakdown,
             'previous_state_analysis': previous_analysis,
             'next_state_analysis': next_analysis,
+            'post_action_state_analysis': post_action_analysis,
             'state_analysis_calls': analysis_calls,
             'state_analysis_seconds': float(analysis_seconds),
             'state_analysis_cache_hit': cache_hit,

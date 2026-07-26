@@ -9,8 +9,9 @@ reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
 当前提供无渲染游戏接口、带 StateAnalyzer/Reward V2 的 RL 环境壳层、GNN 图构建
-基础设施、GNN-Q 前向模型、`Transition` / `TensorTransition` 经验记录、基础
-`ReplayBuffer`、单/多进程 collector、标准 `DQNTrainer` 和第一版 DQN 训练入口。
+基础设施、GNN-Q 前向模型、`TensorTransition` 经验记录、基础 `ReplayBuffer`、
+worker-local `AttributionTracker`、单/多进程 collector、标准 `DQNTrainer` 和
+第一版 DQN 训练入口。
 
 ## 边界
 
@@ -122,7 +123,9 @@ RewardConfig(
 - 存活时间、最高水果高度、绝对危险高度和固定 `-100` 终局惩罚已经删除。
 
 真实 terminal 的有效 next potential 强制为 0，而且
-`info["next_state_analysis"]` 为 `None`。truncated 不是 MDP 终态：
+`info["next_state_analysis"]` 为 `None`。环境同时生成只供归因使用的
+`info["post_action_state_analysis"]`，使 tracker 能检查终局动作后的解封、新封路和
+终局支撑；它不进入 reward、DQN bootstrap 或主 replay。truncated 不是 MDP 终态：
 它会生成同 episode 的 `analysis[t+1]`，保留 next potential 和 bootstrap；
 该不稳定分析标记为 degraded、不能产生高置信归因，并在 reset 时丢弃缓存。
 
@@ -134,6 +137,8 @@ RewardConfig(
 
 - `reward_breakdown`: `RewardBreakdown`；
 - `previous_state_analysis` / `next_state_analysis`: worker-local 前后分析；
+- `post_action_state_analysis`: 动作后的分析；非终局时与 `next_state_analysis`
+  是同一对象，真实终局时仅供 AttributionTracker 使用；
 - `state_analysis_calls` / `state_analysis_seconds`: 本 step 真正新增的分析次数和耗时；
 - `state_analysis_cache_hit`: 是否复用前一轮 next analysis；
 - `state_analysis_degraded_count`: 本 step 新分析中的降级数量。
@@ -153,9 +158,37 @@ RewardConfig(
 - `collect_mean_merge_event_count`
 - `collect_p95_abs_potential_shaping_reward`
 
-同一 CSV 还记录 StateAnalyzer 调用次数、总/平均耗时、缓存命中率和降级率。
+同一 CSV 还记录 StateAnalyzer 调用次数、总/平均耗时、缓存命中率和降级率，以及
+AttributionTracker 调用/耗时、事件 created/confirmed/cancelled/interrupted、
+pending 数量、谱系合成数、同一步最大连锁深度、平均/p95 延迟和事件状态 JSON。
 `plots/reward_breakdown_curves.png` 会分别绘制 task/shaping、potential 分量和
 next-state C/R/K，供短跑校准 shaping 是否压过真实合成效用。
+
+### `AttributionTracker`
+
+`daxigua_rl.attribution.AttributionTracker` 在每个 rollout worker 内独立维护：
+
+- drop 与 ordered `MergeEvent` 的完整水果谱系和根材料权重；
+- 每个真实合成唯一的 `MergeValueKey`，只有对应 `MERGE_LINEAGE` 可持有非零任务
+  价值，其它触发/铺垫事件共享预算且 utility 为 0；
+- `BORN_BURIED` / `REACHABILITY_SEALED` pending、12 个稳定边界确认、恢复或进入
+  合成谱系时撤销；
+- 渐进通道损失责任、后续真实合成兑现的邻接/阶梯/墙锚/支撑/伙伴/营救事件；
+- 终局后状态归因、truncated/reset/shutdown 中断收口和轻量统计。
+
+事件键包含 `(worker_id, episode_id, event_index)`，贡献动作使用完整
+`TransitionKey`。`AttributionEvent` 还保存 `attribution_version` 和 tracker 配置
+指纹。tracker 对象、事件、谱系和 pending 状态均可 pickle，兼容 Windows spawn。
+归因动作必须和规范 15 列分析一一对应；正式训练固定 `action_count=15`，tracker 会
+拒绝其它动作数或与分析列不一致的 action index/drop x，避免把责任写到错误 Q 下标。
+
+只有显式接触路径才能产生 `MECHANICAL_TRIGGER`、接触型 motif 破坏等机械归因。
+当前 `HeadlessGame` 尚未生成逐帧 `ContactInfluenceEdge`，因此这些类型不会从静态
+几何推测；`CORRIDOR_OPENED_USED` 也在缺少真实路径使用证据时保持禁用。
+
+`FruitLineageRecord.chain_depth` 表示跨投放的谱系深度；训练日志中的
+`attribution_max_chain_depth` 则由当前一次物理稳定过程内的 merge DAG 单独计算，
+二者不能混用。
 
 ## 状态数据
 
@@ -251,8 +284,8 @@ analysis = analyzer.analyze(
 压缩好的 `ContactInfluenceEdge` 和对应 `incoming_transition_key` 一并交给分析器，
 但当前分析器不会自行采集逐帧碰撞日志。`DaxiguaEnv` 已把相邻分析接入 Reward V2，
 collector 负责提供稳定轨迹键并汇总分析性能；分析对象仍不写入
-`TensorTransition` / 主 `ReplayBuffer`。`AttributionTracker`、接触证据采集和
-独立因果 replay 尚未实现。
+`TensorTransition` / 主 `ReplayBuffer`。`AttributionTracker` 已实现并由
+collector 接入；物理引擎的逐帧接触证据采集和独立因果 replay 尚未实现。
 
 ## 图构建接口
 
@@ -372,7 +405,7 @@ from daxigua_rl.training import RolloutCollector
 
 第一版接口：
 
-- `RolloutCollector(env, graph_builder, replay_buffer, model=None, policy=None, seed=None, worker_id=0)`: 创建单环境采集器。
+- `RolloutCollector(env, graph_builder, replay_buffer, model=None, policy=None, seed=None, worker_id=0, attribution_tracker=None)`: 创建单环境采集器；`None` 使用默认 tracker，显式 `False` 只用于不满足真实物理身份不变量的测试环境。
 - `reset(seed=None, fruit_queue=None)`: 显式重置环境并开始新 episode。
 - `collect_steps(step_count, epsilon=1.0) -> RolloutStats`: 收集指定数量的 transition 并写入 replay buffer。
 
@@ -386,6 +419,7 @@ from daxigua_rl.training import RolloutCollector
 -> 生成 TransitionKey
 -> DaxiguaEnv.step(action_offset, transition_key=...)
 -> StateAnalyzer 前后边界 + Reward V2
+-> AttributionTracker.observe_transition(...)
 -> 构建 next_graph
 -> TensorTransition(...)
 -> ReplayBuffer.push(...)
@@ -427,6 +461,17 @@ TransitionKey(worker_id, episode_id, step_index)
 - `state_analysis_calls` / `state_analysis_seconds`: 真正执行的状态分析次数和总耗时。
 - `state_analysis_cache_hits`: 复用上一轮 next analysis 的次数。
 - `state_analysis_degraded_count`: truncated 等不稳定边界产生的降级分析数。
+- `attribution_tracker_calls` / `attribution_tracker_seconds`: tracker 调用次数和耗时。
+- `attribution_events_created/confirmed/cancelled/interrupted`: 事件生命周期计数。
+- `attribution_pending_event_count`: 当前 worker（并行时为所有 worker 最新快照之和）
+  尚未解决的事件数量。
+- `attribution_lineage_merge_count` / `attribution_chain_merge_count` /
+  `attribution_max_chain_depth`: 谱系合成和同一物理过程连锁统计。
+- `attribution_event_status_counts` / `attribution_delays`: 按类型/状态计数和归因延迟。
+
+完整事件与谱系不会写入 `TensorTransition`。collector 关闭时会先让每个 worker
+finalize pending；真实解封/进入谱系与 truncated/reset/shutdown 中断通过
+`resolution_reason` 区分。
 
 ### `DQNTrainer`
 
@@ -531,6 +576,8 @@ runs/dqn_YYYYMMDD_HHMMSS/
 ├── config.json
 ├── metrics.csv
 ├── episode_metrics.csv
+├── attribution_warmup.json
+├── attribution_shutdown.json
 ├── checkpoints/
 │   ├── latest.pt
 │   ├── best.pt
@@ -546,8 +593,15 @@ runs/dqn_YYYYMMDD_HHMMSS/
 - 采集阶段 episode 统计，以及 Reward V2 的 task、potential shaping、C/R/K 和
   merge event 数量。
 - shaping 绝对值 p95，以及 StateAnalyzer 调用次数、耗时、缓存命中率和降级率。
+- AttributionTracker 调用耗时、事件生命周期、pending、谱系/连锁、延迟和
+  event/status JSON。
 - greedy 评估均分、最高分、最低分、历史最高分、平均 reward、平均 episode 长度。
 - 采样和训练速度。
+
+`attribution_warmup.json` 单独汇总随机 warmup 的归因事件和期末 pending，避免将
+warmup 混进第一行训练曲线；`attribution_shutdown.json` 记录各 worker 在退出时因
+`worker_shutdown` 或此前 `manual_reset` 收口的 pending。即使 replay flush 失败，
+训练清理仍会尝试 finalize tracker、写 sidecar 并关闭日志。
 
 `episode_metrics.csv` 按 episode 结束事件逐行记录训练过程中每局完整游戏的分数：
 

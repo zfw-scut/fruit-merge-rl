@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import csv
+import io
+import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,9 +16,12 @@ from daxigua_rl.scripts.train_dqn import (
     EpisodeLogger,
     build_env_config,
     build_metric_row,
+    close_training_resources,
     evaluate_policy,
     load_config_defaults,
     parse_args,
+    validate_args,
+    write_attribution_warmup_summary,
 )
 from daxigua_rl.training.collector import RolloutStats
 
@@ -119,6 +125,22 @@ class TrainingMetricsTest(unittest.TestCase):
             state_analysis_seconds=0.06,
             state_analysis_cache_hits=2,
             state_analysis_degraded_count=1,
+            attribution_tracker_calls=4,
+            attribution_tracker_seconds=0.02,
+            attribution_events_created=5,
+            attribution_events_confirmed=2,
+            attribution_events_cancelled=1,
+            attribution_events_interrupted=1,
+            attribution_pending_event_count=3,
+            attribution_lineage_merge_count=6,
+            attribution_chain_merge_count=2,
+            attribution_max_chain_depth=3,
+            attribution_event_status_counts=(
+                ('BORN_BURIED', 'cancelled', 1),
+                ('MERGE_LINEAGE', 'confirmed', 2),
+                ('REACHABILITY_SEALED', 'pending', 2),
+            ),
+            attribution_delays=(1, 2, 4, 8),
             buffer_size=32,
         )
         train_stats = SimpleNamespace(
@@ -167,6 +189,109 @@ class TrainingMetricsTest(unittest.TestCase):
             row['collect_mean_state_analysis_seconds'],
             0.01,
         )
+        self.assertEqual(row['collect_attribution_tracker_calls'], 4)
+        self.assertAlmostEqual(
+            row['collect_mean_attribution_tracker_seconds'],
+            0.005,
+        )
+        self.assertEqual(row['collect_attribution_events_created'], 5)
+        self.assertEqual(row['collect_attribution_events_confirmed'], 2)
+        self.assertEqual(row['collect_attribution_events_cancelled'], 1)
+        self.assertEqual(row['collect_attribution_events_interrupted'], 1)
+        self.assertEqual(row['collect_attribution_pending_event_count'], 3)
+        self.assertEqual(row['collect_attribution_lineage_merge_count'], 6)
+        self.assertEqual(row['collect_attribution_chain_merge_count'], 2)
+        self.assertEqual(row['collect_attribution_max_chain_depth'], 3)
+        self.assertAlmostEqual(
+            row['collect_mean_attribution_delay'],
+            3.75,
+        )
+        self.assertAlmostEqual(
+            row['collect_p95_attribution_delay'],
+            7.4,
+        )
+        self.assertEqual(
+            row['collect_attribution_event_status_counts'],
+            '{"BORN_BURIED":{"cancelled":1},'
+            '"MERGE_LINEAGE":{"confirmed":2},'
+            '"REACHABILITY_SEALED":{"pending":2}}',
+        )
+
+    def test_warmup_attribution_summary_is_kept_separate(self):
+        stats = RolloutStats(
+            steps=8,
+            episodes=0,
+            total_reward=0.0,
+            attribution_tracker_calls=8,
+            attribution_tracker_seconds=0.04,
+            attribution_events_created=3,
+            attribution_events_confirmed=1,
+            attribution_events_cancelled=1,
+            attribution_pending_event_count=1,
+            attribution_event_status_counts=(
+                ('MERGE_LINEAGE', 'confirmed', 1),
+                ('REACHABILITY_SEALED', 'pending', 1),
+            ),
+            attribution_delays=(2, 4),
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            write_attribution_warmup_summary(run_dir, stats)
+            payload = json.loads(
+                (run_dir / 'attribution_warmup.json').read_text(
+                    encoding='utf-8',
+                )
+            )
+
+        self.assertEqual(payload['phase'], 'warmup')
+        self.assertEqual(payload['steps'], 8)
+        self.assertEqual(payload['events_created'], 3)
+        self.assertEqual(payload['pending_event_count_at_end'], 1)
+        self.assertEqual(payload['mean_attribution_delay'], 3.0)
+        self.assertEqual(
+            payload['event_status_counts'],
+            {
+                'MERGE_LINEAGE': {'confirmed': 1},
+                'REACHABILITY_SEALED': {'pending': 1},
+            },
+        )
+
+    def test_cleanup_still_closes_tracker_when_replay_flush_fails(self):
+        calls = []
+
+        def failing_flush():
+            calls.append('flush')
+            raise OSError('simulated flush failure')
+
+        collector = SimpleNamespace(
+            worker_id=0,
+            close=lambda: calls.append('collector') or (),
+        )
+        replay = SimpleNamespace(flush=failing_flush)
+        metrics = SimpleNamespace(
+            close=lambda: calls.append('metrics')
+        )
+        episode_metrics = SimpleNamespace(
+            close=lambda: calls.append('episodes')
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with redirect_stderr(io.StringIO()):
+                close_training_resources(
+                    run_dir=Path(tmp_dir),
+                    replay_buffer=replay,
+                    collector=collector,
+                    metrics=metrics,
+                    episode_metrics=episode_metrics,
+                    suppress_errors=True,
+                )
+            self.assertTrue(
+                (Path(tmp_dir) / 'attribution_shutdown.json').exists()
+            )
+
+        self.assertEqual(
+            calls,
+            ['collector', 'flush', 'metrics', 'episodes'],
+        )
 
     def test_reward_and_dqn_use_the_same_gamma(self):
         """训练入口只能从同一个 gamma 构造 TD target 和 Reward V2。"""
@@ -189,6 +314,14 @@ class TrainingMetricsTest(unittest.TestCase):
         self.assertEqual(args.gamma, 0.87)
         self.assertEqual(env_config.reward_config.gamma, args.gamma)
         self.assertEqual(env_config.reward_config.lambda_phi, 0.4)
+
+    def test_training_rejects_noncanonical_action_count_for_attribution(self):
+        args = parse_args(('--action-count', '7'))
+
+        with self.assertRaisesRegex(
+                ValueError,
+                'full state attribution requires'):
+            validate_args(args)
 
     def test_toml_config_loads_defaults_and_cli_can_override(self):
         """TOML 配置应能提供默认参数，命令行显式参数应优先。"""

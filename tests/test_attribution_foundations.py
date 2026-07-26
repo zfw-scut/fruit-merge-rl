@@ -217,6 +217,7 @@ class TerminationSemanticsTest(unittest.TestCase):
             replay_buffer=replay_buffer,
             seed=0,
             worker_id=7,
+            attribution_tracker=False,
         )
 
         stats = collector.collect_steps(2, epsilon=1.0)
@@ -464,6 +465,7 @@ class TransitionIdentityTest(unittest.TestCase):
             replay_buffer=ReplayBuffer(capacity=4, seed=0),
             seed=0,
             worker_id=5,
+            attribution_tracker=False,
         )
 
         first = collector.collect_steps(1, epsilon=1.0)

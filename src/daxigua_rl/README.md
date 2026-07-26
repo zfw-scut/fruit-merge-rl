@@ -25,16 +25,25 @@ Current v0 interface:
 - `ReplayBuffer`: fixed-capacity in-memory buffer for storing and uniformly sampling experience records.
 - `RolloutCollector`: single-process collector that assigns `(worker_id, episode_id, step_index)` keys, plays the headless environment with epsilon-greedy actions, and writes `TensorTransition` records into `ReplayBuffer`.
 - `DQNTrainer`: standard DQN updater that samples tensor records, builds `GraphBatch`, computes TD loss, and updates the online Q network.
-- `daxigua_rl.attribution`: frozen, tuple-only `StateAnalysis` contracts plus a
-  read-only `StateAnalyzer`. It uses analytic circular vertical drop columns for
-  15-action fruit/queue reachability and blockers, a canonical minimum-fruit
-  probe grid for top-connected space and sealed cavities, and static
-  support/partner/motif analysis. `DaxiguaEnv` caches adjacent analyses inside
-  each worker and uses them for Reward V2; full analysis objects remain
-  worker-local and are not written to the main replay.
+- `daxigua_rl.attribution`: frozen, tuple-only state/event contracts,
+  `StateAnalyzer`, and worker-local `AttributionTracker`. The analyzer computes
+  15-action reachability, top-connected space, support/partner/motif structure;
+  the tracker consumes actual drop/merge transitions, keeps exact fruit
+  lineage, enforces one value package per merge, resolves delayed burial
+  incidents, and emits realized setup/rescue/terminal-support events.
+  Full analyses, lineage, and events remain worker-local and are not written to
+  the main replay.
 - `DaxiguaEnv.step(..., transition_key=...)` accepts the collector's stable
   `(worker_id, episode_id, step_index)` identity. Direct callers may omit it and
   use the environment-local worker-0 identity.
+- Reward computation keeps terminal `next_state_analysis=None`, while
+  `post_action_state_analysis` is retained only for terminal causal
+  attribution.
+- Full attribution requires the canonical 15 environment actions so action
+  offsets, analyzed drop columns, and Q-value indices remain identical.
+- Training writes attribution metrics to `metrics.csv`, a separate
+  `attribution_warmup.json`, and an `attribution_shutdown.json` pending-event
+  audit.
 - `daxigua_rl.scripts.train_dqn`: first full DQN training entrypoint with CSV metrics, checkpoints, greedy evaluation, and matplotlib curves.
 - `daxigua_rl.scripts.watch_dqn`: visual checkpoint viewer that drives the real pygame `Board` with a trained model.
 

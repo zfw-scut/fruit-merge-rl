@@ -19,12 +19,13 @@
 | `src/daxigua/core/rules.py` | 纯规则常量和辅助函数。集中维护水果半径、队列长度、随机生成范围、合成分数和物理半径。 | `FRUIT_RADII`、`FRUIT_QUEUE_LENGTH`、`fruit_radius()`、`merge_score()` |
 | `src/daxigua/core/state.py` | 训练友好的纯数据状态结构；水果和动作候选同时公开显示半径与真实碰撞半径。 | `GameState`、`FruitState`、`ActionCandidate`、`DropResult`、`PhysicsResult` |
 | `src/daxigua_rl/` | 自动游玩/RL 相关代码。游戏本体不得 import 它。训练主链路通过 `HeadlessGame` 访问游戏；观看脚本可在 RL 侧懒加载真实 `Board`。 | `DaxiguaEnv`、`DaxiguaEnvConfig`、`README.md` 中记录边界规则 |
-| `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 step 表示一次投放和无渲染物理稳定；根据 `DaxiguaEnvConfig.state_analyzer_config` 在 worker 内创建分析器、缓存相邻 `StateAnalysis`，接收 collector 的 `TransitionKey` 并计算 Reward V2。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step(action_index, transition_key=...)`、`action_candidates()` |
+| `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 step 表示一次投放和无渲染物理稳定；在 worker 内缓存相邻 `StateAnalysis`、接收 collector 的 `TransitionKey` 并计算 Reward V2；真实终局额外生成只供归因的 post-action analysis。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step(action_index, transition_key=...)`、`action_candidates()` |
 | `src/daxigua_rl/reward.py` | Reward V2 纯计算层。按合成等级计算指数 task utility，并以相邻 `StateAnalysis` 的 C/R/K potential 差完成 shaping。 | `RewardConfig`、`RewardBreakdown`、`merge_utility()`、`compute_state_potential()`、`compute_reward()` |
 | `src/daxigua_rl/playable_adapter.py` | 真实 pygame 游戏窗口到 RL 输入结构的适配层。把正在运行的 `Board` 转成 `GameState` 和 `ActionCandidate`，用于观看模型实际游玩。 | `board_game_state()`、`board_action_candidates()` |
-| `src/daxigua_rl/attribution/` | 完整状态归因模块。当前提供 worker 内使用的纯只读数据契约和静态状态分析器；分析结果已接 Reward V2，后续再接 tracker 和因果 replay。 | `StateAnalyzer`、`StateAnalysis`、`FruitAnalysis`、`FreeSpaceRegionAnalysis` |
-| `src/daxigua_rl/attribution/schema.py` | 固定 15 动作状态分析结构、时间语义、队列槽位、自由空间区域和廉价引用不变量；全部类型可 pickle/Windows spawn。 | `StateAnalysis`、`FruitAnalysis`、`FreeSpaceRegionAnalysis`、`SupportEdge`、`ContactInfluenceEdge`、`PartnerComponent`、`ChainMotif`、`QueueLaneAnalysis` |
+| `src/daxigua_rl/attribution/` | 完整状态归因模块。提供 worker 内使用的只读状态/事件契约、静态分析器和历史归因器；完整对象不进入主 replay。 | `StateAnalyzer`、`AttributionTracker`、`StateAnalysis`、`AttributionEvent` |
+| `src/daxigua_rl/attribution/schema.py` | 固定 15 动作状态分析结构、时间语义、队列槽位、自由空间、谱系、贡献者、事件预算和 pending 结果不变量；全部类型可 pickle/Windows spawn。 | `StateAnalysis`、`AttributionEvent`、`AttributionStepResult`、`FruitLineageRecord`、`MergeLineageRecord` |
 | `src/daxigua_rl/attribution/state_analyzer.py` | 在动作前边界执行只读静态分析：解析圆形竖直列计算 15 动作可达性/队列容量，规范最小水果探针栅格计算顶部连通空间和空腔，并构建支撑、伙伴与基础连锁结构。 | `StateAnalyzer`、`StateAnalyzerConfig` |
+| `src/daxigua_rl/attribution/tracker.py` | worker-local 因果归因状态机。按真实 drop/ordered merge 建立谱系和唯一价值包，追踪铺垫兑现、渐进通道损失、pending 封路/埋死、终局确认与 reset/truncated/shutdown 中断。 | `AttributionTracker`、`AttributionTrackerConfig`、`TrackerTransitionInput` |
 | `src/daxigua_rl/graph/` | GNN 图构建相关代码。负责把游戏状态和动作候选转换成模型输入图，并提供训练实验用的特征消融层。 | `GraphBuilder`、`GraphAblator` |
 | `src/daxigua_rl/graph/schema.py` | 框架无关的图数据结构和节点/边特征名。 | `GraphData`、`GraphNodeRef`、`GraphEdgeRef`、`NODE_FEATURE_NAMES`、`EDGE_FEATURE_NAMES` |
 | `src/daxigua_rl/graph/builder.py` | 从 `GameState` 和 `ActionCandidate` 构建 GNN 输入图；几何、接触和投放路径关系使用真实碰撞半径，图维度保持不变。 | `GraphBuilder.build()` |
@@ -36,11 +37,11 @@
 | `src/daxigua_rl/training/identity.py` | 定义一次训练 run 内稳定、可哈希、可跨进程序列化的轨迹身份。 | `TransitionKey(worker_id, episode_id, step_index)` |
 | `src/daxigua_rl/training/tensor_transition.py` | DQN 张量化经验记录。保存 CPU `GraphTensor`，用于正式训练主链路和 GraphBatch 拼接。 | `TensorTransition` |
 | `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。小实验默认纯内存；大容量训练可使用热内存 + 冷磁盘分层存储，并对冷段中的共享图做去重。 | `ReplayBuffer` |
-| `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。生成并向环境传递稳定 `TransitionKey`，累计 Reward V2/shaping p95 与 StateAnalyzer 性能，保留 truncated bootstrap，并把 CPU `TensorTransition` 写入 replay。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
-| `src/daxigua_rl/training/parallel_collector.py` | 多进程 rollout 调度器。每个 Windows spawn worker 独立持有环境、StateAnalyzer 和 CPU 模型；主进程只回收 transition 与聚合 reward/分析统计，不传完整分析对象。 | `ParallelRolloutCollector` |
+| `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。生成稳定 `TransitionKey`，在 replay 写入前调用 worker-local AttributionTracker，累计 Reward V2、分析器、事件生命周期和归因延迟统计，并保留 truncated bootstrap。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
+| `src/daxigua_rl/training/parallel_collector.py` | 多进程 rollout 调度器。每个 Windows spawn worker 独立持有环境、StateAnalyzer、AttributionTracker 和 CPU 模型；主进程只回收 transition 与轻量聚合统计，关闭时逐 worker finalize pending。 | `ParallelRolloutCollector`、`WorkerAttributionFinalization` |
 | `src/daxigua_rl/training/dqn.py` | 标准 DQN 单步更新器。从 `ReplayBuffer` 采样，拼接 `GraphBatch`，计算 TD target 和 SmoothL1Loss，更新 online Q 网络，并记录训练阶段 profiling。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
 | `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、观看、导出等入口。 | `train_dqn.py`、`watch_dqn.py` |
-| `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和曲线；Reward V2 与 DQN 共用 gamma，并记录 task/potential、shaping p95 和分析器性能。 | `python -m daxigua_rl.scripts.train_dqn`；输出 `metrics.csv`、`episode_metrics.csv`、`plots/training_curves.png`、`plots/reward_breakdown_curves.png`。 |
+| `src/daxigua_rl/scripts/train_dqn.py` | 第一版正式 DQN 训练入口。组合 collector、replay buffer、DQN trainer、epsilon 衰减、日志、checkpoint、评估和曲线；记录 Reward V2、StateAnalyzer、AttributionTracker 指标，并独立审计 warmup 与 shutdown pending。 | `python -m daxigua_rl.scripts.train_dqn`；新增输出 `attribution_warmup.json`、`attribution_shutdown.json`。 |
 | `src/daxigua_rl/scripts/watch_dqn.py` | 第一版 DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。用于测试降低 fps、最大物理帧、稳定帧和 Pymunk 迭代次数后的速度收益与游戏分布偏移。 | `python -m daxigua_rl.scripts.compare_physics_modes --checkpoint ...`；输出 `summary.csv`、`episode_metrics.csv` 和 `plots/physics_mode_comparison.png`。 |
 | `configs/` | 项目配置文件目录。用于存放训练、实验或运行参数配置。 | `train_dqn_fast30_parallel.toml` |
@@ -77,6 +78,8 @@
 | `tests/test_state_analyzer.py` | `StateAnalyzer` 人工几何场景测试。验证空棋盘、解析投放列与并列 blocker、支撑方向、伙伴/merge/ladder motif、封闭空腔、输入降级和左右镜像。 | 使用标准库 `unittest`，不依赖 Pymunk 随机稳定过程。 |
 | `tests/test_reward_v2.py` | Reward V2 纯公式和契约测试。验证指数合成效用、potential 权重、轨迹望远镜关系、相邻分析身份以及 terminal/truncated 差异。 | 不推进真实 Pymunk 物理。 |
 | `tests/test_reward_v2_integration.py` | Reward V2 环境与采集集成测试。验证 StateAnalysis 缓存、worker/episode/step 键、terminal/truncated、统计合并及 Windows spawn 边界。 | 使用标准库 `unittest`。 |
+| `tests/attribution_fixtures.py` | AttributionTracker 的确定性状态、分析、支撑、接触和 merge transition 构造器。 | 人工场景不依赖随机 Pymunk 稳定过程。 |
+| `tests/test_attribution_tracker.py` | 历史归因器测试。验证单/多级谱系、价值包去重、触发证据、渐进封路、恢复/确认/终局/截断、结构兑现、pickle 和 worker/episode 隔离。 | 使用标准库 `unittest`。 |
 | `tests/test_epsilon_schedule.py` | epsilon 衰减曲线测试。验证 smooth schedule 的关键锚点、单调性，以及 linear schedule 的旧行为。 | 使用标准库 `unittest`。 |
 | `tests/test_training_catalog.py` | 训练实验归档工具测试。验证新旧指标格式、奖励分解加权汇总、checkpoint 摘要和文档输出。 | 使用临时目录，不依赖本地 `runs/`。 |
 | `tests/test_training_metrics.py` | 训练指标测试。验证 Reward V2 breakdown、shaping p95、StateAnalyzer 性能、gamma 同源、TOML 参数和 episode 指标。 | 使用标准库 `unittest`。 |
@@ -93,7 +96,7 @@
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
-| `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、测试和长训流程；前五步基础语义、分析器和 Reward V2 已经落地。 |
+| `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、测试和长训流程；前六步基础语义、分析器、Reward V2 和 AttributionTracker 已经落地。 |
 | `docs/rl/gnn_daxigua_design_reference.md` | GNN 状态图节点、边和特征语义参考。 | 当前 `radius` 节点特征和相关几何边特征均表示真实碰撞半径。 |
 | `docs/rl/INTERFACE_V0.md` | RL v0 接口说明。 | 记录 `HeadlessGame`、`DaxiguaEnv`、状态数据和边界规则。 |
 | `docs/rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md` | 训练速度优化计划。 | 记录 profiling、next_graph 缓存、并行采样、fast physics、图构建优化和日志频率等优化顺序。 |
@@ -136,13 +139,16 @@
 - `ReplayBuffer`：固定容量经验回放池，支持纯内存和热内存 + 冷磁盘两种模式；正式大规模训练默认只让最新一部分经验常驻内存。
 - `RolloutCollector`：单进程经验采集器，串联 `DaxiguaEnv`、`GraphBuilder`、Q 网络和
   `ReplayBuffer`，复用上一轮 `next_graph`，并将唯一 `TransitionKey` 交给环境完成
-  Reward V2 身份对齐。
-- `ParallelRolloutCollector`：多进程经验采集器，多个 worker 并行推进 headless 物理，主进程统一写 replay；可通过训练脚本的 `--async-rollout` 与 DQN 更新重叠。
+  Reward V2 身份对齐；每个真实 transition 在写 replay 前调用 worker-local
+  `AttributionTracker`。
+- `ParallelRolloutCollector`：多进程经验采集器，多个 worker 并行推进 headless
+  物理并分别维护 StateAnalyzer/AttributionTracker，主进程统一写 replay；可通过
+  训练脚本的 `--async-rollout` 与 DQN 更新重叠。
 - `DQNTrainer`：标准 DQN 单步更新器，使用 GraphBatch、online/target 双网络、SmoothL1Loss 和梯度裁剪更新 Q 网络，并记录采样、前向、target、反向和优化器耗时。
 - `train_dqn.py`：第一版训练入口，输出 `metrics.csv`、`episode_metrics.csv`、
-  `checkpoints/latest.pt`、`checkpoints/best.pt`、`plots/training_curves.png` 和
-  `plots/reward_breakdown_curves.png`；Reward V2 breakdown 按日志窗口求均值，
-  同时记录 shaping p95、StateAnalyzer 性能、训练 profiling 和 replay 分层状态。
+  `attribution_warmup.json`、`attribution_shutdown.json`、checkpoint 和训练曲线；
+  Reward V2 breakdown 按日志窗口求均值，同时记录 shaping p95、StateAnalyzer /
+  AttributionTracker 性能、事件生命周期、训练 profiling 和 replay 分层状态。
 - `board_game_state()` / `board_action_candidates()`：把原 pygame `Board` 的实时局面转换成 RL 图构建所需的数据结构。
 - `watch_dqn.py`：第一版模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `export_training_catalog.py`：扫描被 Git 忽略的训练输出，生成配置快照、指标摘要、产物清单和跨实验索引，方便迁移后复盘训练数据。
@@ -152,7 +158,11 @@
   证据、伙伴分量和连锁 motif；不写入主 replay。
 - `StateAnalyzer`：从稳定 `GameState`、15 个动作候选和 `TransitionKey` 生成
   `StateAnalysis`。它只做静态只读近似，不推进物理；已通过环境接入 Reward V2，
-  尚未接入历史 `AttributionTracker`。
+  并把相邻分析交给历史 `AttributionTracker`。
+- `AttributionTracker`：每个 rollout worker 独立维护的历史归因器。它建立完整水果
+  谱系、每个真实合成的唯一价值包、铺垫结构来源和 pending 负事件，并在后续真实
+  合成、恢复、终局、truncated/reset/shutdown 时完成兑现或收口；完整对象不进入
+  `TensorTransition`。
 - `configs/train_dqn_fast30_parallel.toml`：正式 DQN 训练参数配置，集中维护 run 目录、训练规模、replay、epsilon、模型、并行采样、reward、评估保存和进度参数。
 - `scripts/train_dqn.sh`：TOML 配置启动器，默认读取 `configs/train_dqn_fast30_parallel.toml`，也可以传入其它配置文件路径。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。

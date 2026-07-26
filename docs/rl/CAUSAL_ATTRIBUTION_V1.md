@@ -47,16 +47,17 @@ DaxiguaEnv
 - 正式训练默认使用 15 个离散投放动作、8 个并行环境和 `fast30` 物理模式。
 - 当前长训配置为 500000 次更新，每次更新采集 8 次投放。
 - 每个环境在 worker 内缓存相邻 `StateAnalysis`，Reward V2 已消费 C/R/K potential。
-- `RolloutStats` 和训练 CSV 已记录 Reward V2 分项、shaping p95 与 StateAnalyzer 性能。
+- 每个 worker 已维护独立 `AttributionTracker`，在主 replay 写入前消费真实
+  drop/merge/状态转移证据。
+- `RolloutStats` 和训练 CSV 已记录 Reward V2、StateAnalyzer 与 AttributionTracker
+  的核心性能和事件生命周期指标。
 
 现有缺口包括：
 
 - `TensorTransition` 只保存即时标量 reward，没有历史归因字段。
 - 当前是标准单步 DQN，不是 Double DQN，也没有 n-step return。
-- 当前已有静态可达性、支撑和基础连锁结构分析，但没有历史谱系、pending
-  封路/埋死事件和兑现追踪。
 - 当前公开 `GameState` 不是可恢复的完整物理快照。
-- 当前没有 `AttributionTracker`、`CausalReplayBuffer` 或因果排序 loss。
+- 当前还没有 `CausalReplayBuffer`、因果排序 loss 或反事实重演。
 
 ## 3. V1 总体结构
 
@@ -252,9 +253,12 @@ V1 不使用 `age_frames` 计算负担。年龄受物理模式和稳定帧配置
 - 非终止物理截断：保留下一状态 potential，并允许 bootstrap。
 - 物理异常且无法生成可信下一状态：丢弃该 transition，记录异常，不得伪装成正常死亡。
 
-当前实现已经满足上述语义：terminal 不创建 next analysis 并把下一 potential
-强制为零；truncated 生成同 episode 的降级 `analysis[t+1]`，保留 potential 和
-bootstrap，但 reset 后不会跨 episode 复用。
+当前实现已经满足上述语义：terminal 传给 Reward V2 的 `next_analysis` 仍为
+`None`，把下一 potential 强制为零；环境会额外生成只供 AttributionTracker 使用的
+`post_action_state_analysis`，让终局责任依据动作后局面而不是动作前局面。该分析若
+诊断无效，只会用 `terminal_geometry_untrusted` 撤销未决证据，不得确认负向事件。
+truncated 生成同 episode 的降级 `analysis[t+1]`，保留 potential 和 bootstrap，
+但 reset 后不会跨 episode 复用。
 
 ## 5. 状态分析模型
 
@@ -420,10 +424,11 @@ touches_left_wall / touches_right_wall / touches_floor
 是相对生成线和地板的几何深度，年龄仍不参与计算。当前只要还存在直接入口，就认为
 未来同级伙伴仍可形成，因此该分量保守地集中惩罚“零入口死果”；渐进减少的 15 位路径
 仍完整保留给容量和后续 tracker 使用。ladder 暂以 pair 中点近似未来合成位置，实际
-引擎合成坐标可能偏向较低父水果，该误差属于静态近似。所有这些分析都属于动作前稳定
-边界的 worker-local 只读快照；环境已经缓存相邻分析并接入 Reward V2，collector
-负责提供稳定 `TransitionKey` 和聚合性能统计。完整分析仍不进入主 replay，
-`AttributionTracker` 尚未实现。
+引擎合成坐标可能偏向较低父水果，该误差属于静态近似。常规分析属于动作前稳定边界的
+worker-local 只读快照；真实 terminal 另有只供归因使用的动作后分析。环境已经缓存
+相邻分析并接入 Reward V2，collector 负责提供稳定 `TransitionKey`、调用
+`AttributionTracker` 和聚合性能统计。完整分析与事件仍不进入主 replay；独立
+`CausalReplayBuffer` 尚未实现。
 
 ### 5.5 四张基础图
 
@@ -473,6 +478,8 @@ V1 不要求严格求解连续空间最小割；15 条离散动作路径的阻�
 AttributionEvent
 ├── event_id
 ├── episode_key
+├── attribution_version
+├── tracker_config_fingerprint
 ├── detected_step
 ├── resolved_step
 ├── event_type
@@ -484,6 +491,7 @@ AttributionEvent
 ├── link_confidence
 ├── placement_confidence
 ├── evidence
+├── budget_key
 └── delay
 ```
 
@@ -494,6 +502,11 @@ pending
 confirmed
 cancelled
 ```
+
+truncated、手动 reset 和 worker shutdown 属于证据中断，不得成为负向训练样本。
+V1 的落地结构仍用 `cancelled` 完成不可变事件的收口，但通过
+`resolution_reason=truncated/manual_reset/worker_shutdown` 和独立
+`interrupted_pending_count` 区分；统计取消率时必须把这些中断原因单列。
 
 贡献者结构：
 
@@ -598,6 +611,9 @@ victim_drop
 #### `CORRIDOR_OPENED_USED`
 
 动作打开新的投放通道，后续水果真实经过该区域并产生合成。
+
+当前 tracker 不会仅凭静态可达性恢复发射该事件；在物理层尚未提供“水果真实经过
+新通道”的路径证据前，该类型保持禁用，避免把普通局面变化伪装成通道贡献。
 
 #### `INVERSION_RESOLVED`
 
@@ -727,6 +743,11 @@ burial_confirm_steps = 12
 - 期间重新可达或进入合成谱系：取消待定负贡献。
 
 12 次投放只决定是否确认，惩罚不会随等待时间线性增加。
+
+真实终局仍保持 Reward V2 的 `next potential = 0`，但环境会额外生成
+`post_action_state_analysis` 供 tracker 检查终局动作后的可达性。它不会进入 reward、
+主 replay 或 DQN bootstrap。这样终局动作刚好解封时可以取消 pending，新建稳定支撑
+割点并触发终局时则可记录 `TERMINAL_SUPPORT_CREATED`。
 
 ### 10.3 单步与渐进责任
 
@@ -1123,7 +1144,8 @@ snapshot
 
 - `StateAnalyzer` 调用次数、总/平均耗时、缓存命中率和降级率；（已接入）
 - potential shaping 绝对值 p95；（已接入）
-- `AttributionTracker` 耗时；
+- `AttributionTracker` 调用次数、事件 created/confirmed/cancelled/interrupted、
+  当前 pending、同一步最大连锁深度和归因延迟；（已接入）
 - 反事实模拟步数；
 - 反事实成本比例；
 - 反事实队列长度和丢弃任务数；
@@ -1293,9 +1315,11 @@ tests/test_counterfactual.py
 4. 实现 15 动作可达性、顶部连通容量、封闭空腔和支撑图。（已完成）
 5. 实现 Reward V2。（已完成）
 6. 实现谱系、正负归因事件和 pending 生命周期。
+   （已完成；接触依赖型事件只在存在显式 `ContactInfluenceEdge` 时发射，
+   `CORRIDOR_OPENED_USED` 等待真实路径使用证据。）
 7. 实现 `CausalReplayBuffer` 与规则排序 loss。
 8. 将 DQN 改为 Double DQN 和 3-step return。
-9. 增加归因日志和人工场景测试。
+9. 增加归因日志和人工场景测试。（tracker 部分已完成，因果训练指标随第 7 步补齐。）
 10. 实现 `EngineSnapshot` 和原动作复现。
 11. 实现预算反事实和极稀疏局部 Shapley。
 12. 完成烟测、小跑和第一次完整状态归因长训。
