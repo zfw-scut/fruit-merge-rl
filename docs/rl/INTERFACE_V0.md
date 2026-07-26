@@ -155,22 +155,32 @@ RewardConfig(
 旧 checkpoint 的网络结构仍可加载，但 `radius` 输入语义会有轻微分布变化；第一次
 完整归因训练应从新配置重新训练。
 
-## 状态归因数据契约
+## 状态归因数据契约与分析器
 
-当前 `daxigua_rl.attribution` 包已经提供只读 schema：
+当前 `daxigua_rl.attribution` 包已经提供只读 schema 和静态 `StateAnalyzer`：
 
 - `StateAnalysis`: 一个动作前稳定边界的完整分析快照。
 - `FruitAnalysis`: 单水果可达性、伙伴、支撑、埋藏和等级倒置摘要。
 - `QueueLaneAnalysis`: q0 到 q3 各自在 15 个动作列上的投放容量。
+- `FreeSpaceRegionAnalysis`: 规范最小水果探针下的顶部连通空间或封闭空腔。
 - `SupportEdge`: 方向固定为 supporter -> supported fruit 的稳定约束。
 - `ContactInfluenceEdge`: 产生当前边界的前一动作所留下的压缩接触证据。
 - `PartnerComponent`、`ChainMotif`: 同级伙伴分量和局部连锁结构。
 - `StateAnalysisDiagnostics`: 稳定性、归因有效性、降级码和分析耗时。
+- `StateAnalyzerConfig`: 分析容差、栅格精度和结构阈值配置。
+- `StateAnalyzer`: 从 `GameState`、15 个动作候选和 `TransitionKey` 生成完整快照。
 
 导入方式：
 
 ```python
-from daxigua_rl.attribution import StateAnalysis, FruitAnalysis
+from daxigua_rl.attribution import StateAnalyzer, StateAnalyzerConfig
+
+analyzer = StateAnalyzer(StateAnalyzerConfig())
+analysis = analyzer.analyze(
+    state,
+    action_candidates,
+    transition_key,
+)
 ```
 
 当前契约固定以下语义：
@@ -191,12 +201,24 @@ from daxigua_rl.attribution import StateAnalysis, FruitAnalysis
   当前水果引用和支撑缓存会在构造时校验。
 - 场上水果等级限制为 1 到 11，队列槽等级限制为可直接投放的 1 到 4；每槽
   `capacity` 和 q0-q3 聚合后的 `top_connected_capacity` 必须与 Reward V2 公式一致。
+- q0～q3 容量和单水果可达 mask 使用解析圆形竖直投放列：以直接投放探针半径膨胀
+  当前真实圆形障碍，第一接触点决定落点、可达性和 blocker。该近似不模拟沿圆滚动。
+- 自由空间统一用等级 1 的直接投放半径作规范探针，对圆心可进入区域执行四邻域栅格
+  BFS。区域对象保存顶部连通性、面积、质心、包围盒、边界水果和墙/地板接触。
+- `FreeSpaceRegionAnalysis.region_id` 只保证当前分析内唯一。跨步区域关联应组合面积、
+  质心、包围盒重叠和边界水果，不能把 ID 当作永久身份。
+- 支撑分析区分地板支撑、墙约束、下方水果支撑、盖压和桥接；同级伙伴分量及
+  `merge_pair` / `level_ladder` motif 用于 `recoverability` 和 `chain_readiness`。
+  `critical_blocker_ids` / `caps` 只在目标零可达时形成，正 motif 同时要求队列兼容
+  等级和实际触发动作，避免给局部受阻或完全封死结构错误加分。
 - 不稳定的 truncated 边界可以保留诊断分析，但必须设置
   `valid_for_attribution=False`，不能生成高置信归因事件。
 
-`StateAnalysis` 只在 rollout worker 内使用，当前没有写入 `TensorTransition`、
-`ReplayBuffer` 或 `RolloutStats`。本阶段也还没有实现几何分析算法；15 动作可达性、
-顶部连通容量、支撑检测和封闭空腔区域结构属于下一实现步骤。
+`StateAnalyzer` 是纯只读、无物理推进的 worker-local 组件。调用方可以把前一动作已经
+压缩好的 `ContactInfluenceEdge` 和对应 `incoming_transition_key` 一并交给分析器，
+但当前分析器不会自行采集逐帧碰撞日志。`StateAnalysis` 尚未接入
+`RolloutCollector`、`TensorTransition`、`ReplayBuffer`、Reward V2 或
+`AttributionTracker`；训练主链路行为因此保持不变。
 
 ## 图构建接口
 

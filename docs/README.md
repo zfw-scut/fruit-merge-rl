@@ -17,10 +17,12 @@
 - `rl/INTERFACE_V0.md`: 当前已经实现的 RL 环境、状态、经验和训练接口。
 - `rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md`: 当前训练吞吐优化和 fast 物理模式说明。
 
-完整状态归因实现顺序中的前三步已经落地：terminated/truncated bootstrap 语义、
+完整状态归因实现顺序中的前四步已经落地：terminated/truncated bootstrap 语义、
 真实物理半径、`(worker_id, episode_id, step_index)` 轨迹键，以及可跨 Windows
-spawn/pickle 的只读 `StateAnalysis` 数据契约。下一步实现 15 动作可达性、顶部连通
-容量、支撑图和封闭空腔区域表示。
+spawn/pickle 的只读 `StateAnalysis` 数据契约；`StateAnalyzer` 已实现 15 动作解析
+投放列、q0～q3 顶部连通容量、规范最小水果探针自由空间、支撑/伙伴图和基础连锁
+motif。分析结果仍是 worker-local，尚未接入 collector、主 replay 或奖励；下一步实现
+Reward V2。
 
 ## 建议阅读顺序
 

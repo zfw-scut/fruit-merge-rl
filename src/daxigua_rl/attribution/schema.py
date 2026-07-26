@@ -25,7 +25,7 @@ from daxigua_rl.training.identity import TransitionKey
 ANALYSIS_ACTION_COUNT = 15
 QUEUE_LOOKAHEAD_COUNT = 4
 FULL_ACTION_MASK = (1 << ANALYSIS_ACTION_COUNT) - 1
-STATE_ANALYSIS_SCHEMA_VERSION = 1
+STATE_ANALYSIS_SCHEMA_VERSION = 2
 LANDING_DEPTH_WEIGHT = 0.7
 SAFE_ACTION_WEIGHT = 0.3
 DEFAULT_QUEUE_DECAY = 0.5
@@ -295,6 +295,10 @@ class FruitAnalysis:
             raise ValueError(
                 'critical_blocker_ids must come from top_blocker_ids_by_action'
             )
+        if self.critical_blocker_ids and mask:
+            raise ValueError(
+                'critical_blocker_ids requires zero reachable actions'
+            )
 
         object.__setattr__(
             self,
@@ -484,7 +488,7 @@ class PartnerComponent:
         object.__setattr__(
             self,
             'fruit_ids',
-            _id_tuple('fruit_ids', self.fruit_ids, minimum_length=1),
+            _id_tuple('fruit_ids', self.fruit_ids, minimum_length=2),
         )
         object.__setattr__(
             self,
@@ -581,11 +585,17 @@ class ChainMotif:
             'compatible_queue_indices',
             tuple(sorted(queue_indices)),
         )
-        object.__setattr__(
-            self,
-            'readiness',
-            _unit_float('readiness', self.readiness),
-        )
+        readiness = _unit_float('readiness', self.readiness)
+        if readiness > 0.0:
+            if not self.trigger_action_mask:
+                raise ValueError(
+                    'positive motif readiness requires trigger actions'
+                )
+            if not self.compatible_queue_indices:
+                raise ValueError(
+                    'positive motif readiness requires a compatible queue slot'
+                )
+        object.__setattr__(self, 'readiness', readiness)
 
     @property
     def signature(self):
@@ -714,6 +724,101 @@ class QueueLaneAnalysis:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class FreeSpaceRegionAnalysis:
+    """规范小水果探针下的一块连续自由空间。
+
+    坐标和面积都按探针中心的合法活动矩形归一化。区域 ID 只保证同一状态内确定，
+    跨状态匹配应组合边界水果、质心、包围盒和面积，而不能只比较 ``region_id``。
+    """
+
+    region_id: int
+    top_connected: bool
+    reachable_action_mask: int
+    cell_count: int
+    area_ratio: float
+    centroid_x: float
+    centroid_y: float
+    min_x: float
+    max_x: float
+    min_y: float
+    max_y: float
+    boundary_fruit_ids: tuple[int, ...] = ()
+    touches_left_wall: bool = False
+    touches_right_wall: bool = False
+    touches_floor: bool = False
+
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            'region_id',
+            _integer('region_id', self.region_id),
+        )
+        object.__setattr__(
+            self,
+            'top_connected',
+            _boolean('top_connected', self.top_connected),
+        )
+        object.__setattr__(
+            self,
+            'reachable_action_mask',
+            _action_mask(
+                'reachable_action_mask',
+                self.reachable_action_mask,
+            ),
+        )
+        object.__setattr__(
+            self,
+            'cell_count',
+            _integer('cell_count', self.cell_count, minimum=1),
+        )
+        for field_name in (
+                'area_ratio',
+                'centroid_x',
+                'centroid_y',
+                'min_x',
+                'max_x',
+                'min_y',
+                'max_y'):
+            object.__setattr__(
+                self,
+                field_name,
+                _unit_float(field_name, getattr(self, field_name)),
+            )
+        if self.min_x > self.max_x:
+            raise ValueError('min_x must not exceed max_x')
+        if self.min_y > self.max_y:
+            raise ValueError('min_y must not exceed max_y')
+        if not self.min_x <= self.centroid_x <= self.max_x:
+            raise ValueError('centroid_x must lie inside the region bounding box')
+        if not self.min_y <= self.centroid_y <= self.max_y:
+            raise ValueError('centroid_y must lie inside the region bounding box')
+        object.__setattr__(
+            self,
+            'boundary_fruit_ids',
+            _id_tuple('boundary_fruit_ids', self.boundary_fruit_ids),
+        )
+        for field_name in (
+                'touches_left_wall',
+                'touches_right_wall',
+                'touches_floor'):
+            object.__setattr__(
+                self,
+                field_name,
+                _boolean(field_name, getattr(self, field_name)),
+            )
+        if not self.top_connected and self.reachable_action_mask:
+            raise ValueError(
+                'a sealed region cannot have a reachable action mask'
+            )
+
+    @property
+    def sealed(self):
+        """该区域是否与顶部投放边界断开。"""
+
+        return not self.top_connected
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class StateAnalysisDiagnostics:
     """状态分析的有效性、降级和轻量性能诊断。"""
 
@@ -794,12 +899,16 @@ class StateAnalysis:
     diagnostics: StateAnalysisDiagnostics
     analyzer_config_fingerprint: str
     queue_decay: float = DEFAULT_QUEUE_DECAY
+    free_space_probe_physics_radius: float = float(
+        dropped_fruit_physics_radius(MIN_FRUIT_LEVEL)
+    )
     incoming_transition_key: TransitionKey | None = None
     fruit_analyses: tuple[FruitAnalysis, ...] = ()
     support_edges: tuple[SupportEdge, ...] = ()
     contact_influence_edges: tuple[ContactInfluenceEdge, ...] = ()
     partner_components: tuple[PartnerComponent, ...] = ()
     chain_motifs: tuple[ChainMotif, ...] = ()
+    free_space_regions: tuple[FreeSpaceRegionAnalysis, ...] = ()
     schema_version: int = STATE_ANALYSIS_SCHEMA_VERSION
 
     def __post_init__(self):
@@ -858,6 +967,11 @@ class StateAnalysis:
             ),
             ('chain_motifs', ChainMotif, lambda item: item.signature),
             (
+                'free_space_regions',
+                FreeSpaceRegionAnalysis,
+                lambda item: item.region_id,
+            ),
+            (
                 'queue_lane_analyses',
                 QueueLaneAnalysis,
                 lambda item: item.queue_index,
@@ -890,6 +1004,28 @@ class StateAnalysis:
             self,
             'queue_decay',
             _unit_float('queue_decay', self.queue_decay),
+        )
+        free_space_probe_radius = _finite_float(
+            'free_space_probe_physics_radius',
+            self.free_space_probe_physics_radius,
+            minimum=0.0,
+        )
+        expected_free_space_probe_radius = float(
+            dropped_fruit_physics_radius(MIN_FRUIT_LEVEL)
+        )
+        if not math.isclose(
+                free_space_probe_radius,
+                expected_free_space_probe_radius,
+                rel_tol=0.0,
+                abs_tol=1e-9):
+            raise ValueError(
+                'free_space_probe_physics_radius must use the minimum '
+                'direct-drop fruit radius'
+            )
+        object.__setattr__(
+            self,
+            'free_space_probe_physics_radius',
+            free_space_probe_radius,
         )
 
         if not isinstance(self.analyzer_config_fingerprint, str):
@@ -980,6 +1116,19 @@ class StateAnalysis:
             fruit_by_id[fruit.fruit_id] = fruit
         fruit_ids = set(fruit_by_id)
 
+        region_by_id = {}
+        total_region_area = 0.0
+        for region in self.free_space_regions:
+            if region.region_id in region_by_id:
+                raise ValueError(
+                    'free_space_regions contains duplicate region_id'
+                )
+            region_by_id[region.region_id] = region
+            total_region_area += region.area_ratio
+        if total_region_area > 1.0 + 1e-9:
+            raise ValueError('free_space region area ratios must sum to <= 1')
+        region_ids = set(region_by_id)
+
         def require_current_ids(name, values):
             missing = set(values) - fruit_ids
             if missing:
@@ -1011,6 +1160,13 @@ class StateAnalysis:
                     raise ValueError(
                         'a fruit cannot be its own top-path blocker'
                     )
+            if (
+                    fruit.connected_region_id is not None
+                    and fruit.connected_region_id not in region_ids):
+                raise ValueError(
+                    'fruit connected_region_id must reference '
+                    'free_space_regions'
+                )
 
             for partner_id in fruit.partner_ids:
                 if fruit_by_id[partner_id].level != fruit.level:
@@ -1019,6 +1175,21 @@ class StateAnalysis:
                 if fruit_by_id[blocker_id].level <= fruit.level:
                     raise ValueError(
                         'inversion_blocker_ids must reference higher-level fruits'
+                    )
+            for partner_id in fruit.partner_ids:
+                if fruit.fruit_id not in fruit_by_id[partner_id].partner_ids:
+                    raise ValueError('partner_ids must be reciprocal')
+            for partner_id in fruit.reachable_partner_ids:
+                partner = fruit_by_id[partner_id]
+                if fruit.fruit_id not in partner.reachable_partner_ids:
+                    raise ValueError(
+                        'reachable_partner_ids must be reciprocal'
+                    )
+                if not (
+                        fruit.reachable_action_mask
+                        & partner.reachable_action_mask):
+                    raise ValueError(
+                        'reachable partners must share an action path'
                     )
 
         support_keys = set()
@@ -1090,6 +1261,73 @@ class StateAnalysis:
                 raise ValueError(
                     'partner component level must match all member fruits'
                 )
+            member_ids = set(component.fruit_ids)
+            connected_ids = set()
+            pending_ids = [component.fruit_ids[0]]
+            while pending_ids:
+                fruit_id = pending_ids.pop()
+                if fruit_id in connected_ids:
+                    continue
+                connected_ids.add(fruit_id)
+                pending_ids.extend(
+                    partner_id
+                    for partner_id in fruit_by_id[fruit_id].partner_ids
+                    if (
+                        partner_id in member_ids
+                        and partner_id not in connected_ids
+                    )
+                )
+            if connected_ids != member_ids:
+                raise ValueError(
+                    'partner component members must form a connected subgraph'
+                )
+            expected_mask = 0
+            for fruit_id in component.fruit_ids:
+                expected_mask |= fruit_by_id[
+                    fruit_id].reachable_action_mask
+            if component.reachable_action_mask != expected_mask:
+                raise ValueError(
+                    'partner component reachable_action_mask must be '
+                    'the union of member masks'
+                )
+            if component.top_connected != bool(expected_mask):
+                raise ValueError(
+                    'partner component top_connected must match its mask'
+                )
+            if (
+                    component.connected_region_id is not None
+                    and component.connected_region_id not in region_ids):
+                raise ValueError(
+                    'partner component connected_region_id must reference '
+                    'free_space_regions'
+                )
+
+        fruits_with_partners = {
+            fruit.fruit_id
+            for fruit in self.fruit_analyses
+            if fruit.partner_ids
+        }
+        if not fruits_with_partners.issubset(component_members):
+            raise ValueError(
+                'fruits with partner_ids must belong to a partner component'
+            )
+        for fruit in self.fruit_analyses:
+            for partner_id in fruit.partner_ids:
+                if (
+                        fruit.fruit_id in component_members
+                        and partner_id in component_members):
+                    containing_components = tuple(
+                        component
+                        for component in self.partner_components
+                        if fruit.fruit_id in component.fruit_ids
+                    )
+                    if (
+                            not containing_components
+                            or partner_id
+                            not in containing_components[0].fruit_ids):
+                        raise ValueError(
+                            'partner graph edges cannot cross components'
+                        )
 
         motif_signatures = set()
         for motif in self.chain_motifs:
@@ -1114,6 +1352,12 @@ class StateAnalysis:
                     blockers,
                 )
 
+        for region in self.free_space_regions:
+            require_current_ids(
+                f'free-space region {region.region_id} boundary',
+                region.boundary_fruit_ids,
+            )
+
     @property
     def action_count(self):
         """当前 V1 固定动作数量。"""
@@ -1135,6 +1379,32 @@ class StateAnalysis:
             )
             / sum(weights)
         )
+
+    @property
+    def top_connected_free_space_ratio(self):
+        """返回仍与顶部连通的规范探针自由空间比例。"""
+
+        return sum(
+            region.area_ratio
+            for region in self.free_space_regions
+            if region.top_connected
+        )
+
+    @property
+    def sealed_cavity_ratio(self):
+        """返回已经与顶部断开的规范探针自由空间比例。"""
+
+        return sum(
+            region.area_ratio
+            for region in self.free_space_regions
+            if region.sealed
+        )
+
+    @property
+    def sealed_cavity_count(self):
+        """返回达到 analyzer 最小面积阈值的封闭区域数量。"""
+
+        return sum(region.sealed for region in self.free_space_regions)
 
     @property
     def episode_key(self):
@@ -1171,6 +1441,7 @@ __all__ = [
     'SUPPORT_RELATIONS',
     'ChainMotif',
     'ContactInfluenceEdge',
+    'FreeSpaceRegionAnalysis',
     'FruitAnalysis',
     'PartnerComponent',
     'QueueLaneAnalysis',

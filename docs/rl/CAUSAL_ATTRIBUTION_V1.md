@@ -265,6 +265,8 @@ StateAnalysis
 ├── action_indices
 ├── action_drop_x_by_offset
 ├── fruit_analyses
+├── free_space_probe_physics_radius
+├── free_space_regions
 ├── support_edges
 ├── contact_influence_edges
 ├── partner_components
@@ -350,7 +352,75 @@ mask 的 count 字段必须与 `bit_count()` 一致。schema 会校验每个槽�
 `capacity` 符合 4.4 节的 0.7/0.3 公式，并使用对象记录的 `queue_decay` 重新聚合
 q0 到 q3，拒绝与 `top_connected_capacity` 不一致的重复真值。
 
-### 5.4 四张基础图
+### 5.4 V1 静态几何分析算法
+
+当前 `StateAnalyzer` 使用两套互补、分别承担不同职责的静态近似：
+
+1. q0～q3 落点容量、水果可达动作和 blocker 使用解析圆形竖直投放列；
+2. 顶部连通自由空间和封闭空腔使用一个规范的最小直接投放水果探针栅格。
+
+解析投放列在每个合法横坐标上，将场上水果按“当前真实物理半径 + 待投探针半径”
+膨胀。投放列与膨胀圆的最上方交点决定第一落点：
+
+- q0～q3 分别使用自身等级的直接投放半径和合法横坐标，不能共享 q0 横坐标；
+- `landing_depth` 由生成线到第一障碍或地板接触点的深度归一化；
+- `blocker_ids_by_action` 只记录形成该列第一落点的水果，几何并列时保留全部并列 ID；
+- 分析目标水果时，只有目标是该列最先接触对象时才把对应动作记为可达；
+- 位于目标接触点之前的水果进入该动作的 `top_blocker_ids_by_action`；仅当目标已经
+  失去全部可达列时，最小阻挡集合才汇总为 `critical_blocker_ids` 并允许形成
+  `caps`，避免把渐进路径损失提前标成最终封口。
+
+该列模型有意不模拟落果沿曲面滚动、弹跳和后续碰撞重排。它为 15 个实际动作提供
+确定、廉价且能回溯到水果 ID 的 blocker 证据；动态歧义仍由后续 tracker 的接触证据和
+少量反事实处理。
+
+自由空间分析统一使用等级 1 的直接投放物理半径作为
+`free_space_probe_physics_radius`。分析器在探针圆心可进入的棋盘范围内建立规范栅格，
+将与膨胀水果相交的单元标记为占用，对剩余单元执行四邻域 BFS。每个连通分量产生一个
+`FreeSpaceRegionAnalysis`：
+
+```text
+region_id
+top_connected
+reachable_action_mask
+cell_count
+area_ratio
+centroid_x / centroid_y
+min_x / max_x / min_y / max_y
+boundary_fruit_ids
+touches_left_wall / touches_right_wall / touches_floor
+```
+
+接触顶部栅格行的分量属于顶部连通空间；其它达到最小单元阈值的分量属于封闭空腔，
+且其动作 mask 必须为零。区域 ID 由当前状态的规范栅格确定，只保证单状态内稳定，
+不是跨步永久身份。tracker 后续比较 `analysis[t] -> analysis[t+1]` 时必须结合面积、
+质心、包围盒重叠和边界水果匹配区域，不能只比较 `region_id`。
+
+静态支撑图使用几何接触容差生成：
+
+- 地板到水果的 `supports`；
+- 左右墙到水果的 `wall_constraint`；
+- 下方水果到上方水果的 `supports`；
+- 上方 blocker 对下方水果的 `caps`；
+- 两侧支撑共同形成上方横向结构时的 `bridges`。
+
+同级水果在局部范围内接触或共享可达动作时连成伙伴图，并输出至少包含两颗水果且内部
+连通的确定排序 `PartnerComponent`。当前存在顶部接近路径时，
+`partner_reachable` 也可以表示未来仍能形成同级伙伴，不要求场上已经存在伙伴。
+`merge_pair` 和邻近下一级水果组成的
+`level_ladder` 是第一版 `ChainMotif`；只有 q0～q3 存在兼容等级且结构仍有实际触发
+动作时才产生正的 motif。它们只用于 `chain_readiness` 和后续兑现追踪，不会直接复制
+合成奖励。
+
+`recoverability` 按 4.5 节从可达比例、伙伴路径、埋藏深度和低级权重聚合。当前埋藏深度
+是相对生成线和地板的几何深度，年龄仍不参与计算。当前只要还存在直接入口，就认为
+未来同级伙伴仍可形成，因此该分量保守地集中惩罚“零入口死果”；渐进减少的 15 位路径
+仍完整保留给容量和后续 tracker 使用。ladder 暂以 pair 中点近似未来合成位置，实际
+引擎合成坐标可能偏向较低父水果，该误差属于静态近似。所有这些分析都属于动作前稳定
+边界的 worker-local 只读快照；本步骤尚未把它们接入 collector、主 replay、
+Reward V2 或 `AttributionTracker`。
+
+### 5.5 四张基础图
 
 #### 合成谱系图
 
@@ -1213,7 +1283,7 @@ tests/test_counterfactual.py
 1. 修正 terminated/truncated 语义。（已完成）
 2. 暴露真实物理半径和完整 episode/worker 键。（已完成）
 3. 实现 `StateAnalysis` schema。（已完成）
-4. 实现 15 动作可达性、顶部连通容量和支撑图。
+4. 实现 15 动作可达性、顶部连通容量、封闭空腔和支撑图。（已完成）
 5. 实现 Reward V2。
 6. 实现谱系、正负归因事件和 pending 生命周期。
 7. 实现 `CausalReplayBuffer` 与规则排序 loss。
@@ -1243,7 +1313,7 @@ V1 不追求：
 | 可达性静态近似误判动态滚动 | 降低 placement confidence，交给少量反事实审计 |
 | fast30 与精确物理的事件分布不同 | 快照和反事实使用同一训练物理模式，并记录模式 |
 | 规则样本数量过多压过 TD | 分层限额、降低 `lambda_rule`、裁剪 margin |
-| 封闭空腔缺少稳定区域身份 | 在第 4 步确定栅格/可达算法时补充区域面积和边界结构，不在纯 schema 阶段伪造 |
+| 封闭空腔区域 ID 不能跨状态直接对齐 | ID 只作单状态引用；跨步结合面积、质心、包围盒重叠和边界水果匹配 |
 | 负封路标签过多 | 提高确认阈值，要求伙伴路径同时消失 |
 | 反事实队列积压 | 丢弃低价值任务，不阻塞 rollout |
 | 快照无法确定性复现 | 关闭反事实损失，保留规则归因继续训练 |

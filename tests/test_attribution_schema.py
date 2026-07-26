@@ -17,6 +17,7 @@ from daxigua_rl.attribution import (
     FULL_ACTION_MASK,
     ChainMotif,
     ContactInfluenceEdge,
+    FreeSpaceRegionAnalysis,
     FruitAnalysis,
     PartnerComponent,
     QueueLaneAnalysis,
@@ -106,7 +107,6 @@ def _valid_state(*, with_contact=True):
         supported_child_ids=(2,),
         inversion_blocker_ids=(3,),
         top_blockers=blockers_for_one,
-        critical_blocker_ids=(3,),
     )
     fruit_two = _fruit(
         2,
@@ -194,6 +194,25 @@ def _valid_state(*, with_contact=True):
                 readiness=0.7,
             ),
         ),
+        free_space_regions=(
+            FreeSpaceRegionAnalysis(
+                region_id=0,
+                top_connected=True,
+                reachable_action_mask=FULL_ACTION_MASK,
+                cell_count=100,
+                area_ratio=0.5,
+                centroid_x=0.5,
+                centroid_y=0.5,
+                min_x=0.0,
+                max_x=1.0,
+                min_y=0.0,
+                max_y=1.0,
+                boundary_fruit_ids=(3, 1, 2),
+                touches_left_wall=True,
+                touches_right_wall=True,
+                touches_floor=True,
+            ),
+        ),
         queue_lane_analyses=lanes,
         top_connected_capacity=0.86,
         recoverability=0.6,
@@ -236,6 +255,9 @@ class AttributionSchemaConstructionTest(unittest.TestCase):
         self.assertEqual(state.episode_key, (2, 5))
         self.assertEqual(state.get_fruit(2).level, 1)
         self.assertIsNone(state.get_fruit(50))
+        self.assertEqual(state.top_connected_free_space_ratio, 0.5)
+        self.assertEqual(state.sealed_cavity_ratio, 0.0)
+        self.assertEqual(state.sealed_cavity_count, 0)
 
     def test_nested_lists_become_tuples_and_objects_are_frozen(self):
         fruit = FruitAnalysis(
@@ -375,11 +397,19 @@ class AttributionSchemaInvariantTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             replace(fruit, critical_blocker_ids=(2,))
         with self.assertRaises(ValueError):
+            replace(fruit, critical_blocker_ids=(3,))
+        with self.assertRaises(ValueError):
             SupportEdge(
                 supporter_fruit_id=1,
                 supported_fruit_id=1,
                 relation='supports',
             )
+
+        motif = _valid_state().chain_motifs[0]
+        with self.assertRaises(ValueError):
+            replace(motif, trigger_action_mask=0)
+        with self.assertRaises(ValueError):
+            replace(motif, compatible_queue_indices=())
 
     def test_support_cache_must_match_canonical_support_edges(self):
         state = _valid_state()
@@ -393,6 +423,38 @@ class AttributionSchemaInvariantTest(unittest.TestCase):
                     if edge.supporter_fruit_id != 1
                 ),
             )
+
+    def test_partner_graph_and_component_caches_must_remain_consistent(self):
+        state = _valid_state()
+        fruit_one, fruit_two, fruit_three = state.fruit_analyses
+
+        asymmetric_partner = replace(
+            fruit_two,
+            partner_ids=(),
+            reachable_partner_ids=(),
+        )
+        with self.assertRaises(ValueError):
+            replace(
+                state,
+                fruit_analyses=(
+                    fruit_one,
+                    asymmetric_partner,
+                    fruit_three,
+                ),
+            )
+
+        component = state.partner_components[0]
+        with self.assertRaises(ValueError):
+            replace(component, fruit_ids=(1,))
+        with self.assertRaises(ValueError):
+            replace(
+                state,
+                partner_components=(
+                    replace(component, reachable_action_mask=0),
+                ),
+            )
+        with self.assertRaises(ValueError):
+            replace(state, partner_components=())
 
     def test_static_references_must_exist_but_consumed_contact_ids_may_not(self):
         state = _valid_state()
@@ -469,6 +531,40 @@ class AttributionSchemaInvariantTest(unittest.TestCase):
             replace(edge, last_contact_frame=None)
         with self.assertRaises(ValueError):
             replace(edge, first_contact_frame=None)
+
+    def test_free_space_regions_validate_geometry_and_current_references(self):
+        state = _valid_state()
+        region = state.free_space_regions[0]
+
+        self.assertEqual(region.boundary_fruit_ids, (1, 2, 3))
+        self.assertFalse(region.sealed)
+        with self.assertRaises(ValueError):
+            replace(region, min_x=0.6)
+        with self.assertRaises(ValueError):
+            replace(
+                region,
+                top_connected=False,
+                reachable_action_mask=1,
+            )
+        broken_reference = replace(region, boundary_fruit_ids=(99,))
+        with self.assertRaises(ValueError):
+            replace(state, free_space_regions=(broken_reference,))
+
+        sealed = replace(
+            region,
+            region_id=1,
+            top_connected=False,
+            reachable_action_mask=0,
+            area_ratio=0.2,
+            touches_left_wall=False,
+            touches_right_wall=False,
+        )
+        with_sealed = replace(
+            state,
+            free_space_regions=(region, sealed),
+        )
+        self.assertAlmostEqual(with_sealed.sealed_cavity_ratio, 0.2)
+        self.assertEqual(with_sealed.sealed_cavity_count, 1)
 
     def test_q0_layout_and_all_four_queue_slots_are_required(self):
         state = _valid_state()
