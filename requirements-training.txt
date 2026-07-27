@@ -1,5 +1,5 @@
 -r requirements.txt
 
-# 云端应从与 CUDA 驱动匹配的 PyTorch wheel 源安装；首轮训练冻结为此版本。
+# 首轮云端 V100（sm_70）训练必须从官方 cu126 源安装；cu130 wheel 不含 sm_70。
 torch==2.12.1
 matplotlib==3.11.1

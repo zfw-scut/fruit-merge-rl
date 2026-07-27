@@ -70,7 +70,7 @@ preflight 无法证明 commit 与 `dirty=false`。ZIP 只可用于人工阅读�
 
 - Ubuntu 22.04 或更新版本；
 - Python 3.11；
-- NVIDIA GPU 和能支持 CUDA 13.0 PyTorch wheel 的驱动；
+- NVIDIA GPU 和能支持 CUDA 12.6 PyTorch wheel 的驱动；
 - 至少 80 GiB 可用磁盘空间；因果 replay 精确 checkpoint 与 100k 冷 TD replay
   会同时占盘，不能只按模型权重估算；
 - 至少 32 GiB 内存，建议 64 GiB；8 个 rollout worker、20k 因果 replay、
@@ -109,13 +109,17 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install matplotlib==3.11.1
 python -m pip install torch==2.12.1 \
-  --index-url https://download.pytorch.org/whl/cu130
+  --index-url https://download.pytorch.org/whl/cu126
 python -m pip check
 ```
 
 `requirements-training.txt` 记录训练依赖的冻结版本；上面把 PyTorch 单独安装，是为了
-明确使用官方 CUDA 13.0 wheel，避免普通 PyPI 解析意外得到 CPU 构建。若云服务器驱动
-不支持该 wheel，不要临时改变正式配置或依赖版本；先升级驱动并重新执行本节验证。
+明确使用官方 CUDA 12.6 wheel，避免普通 PyPI 解析意外得到 CPU 构建。首轮云端 GPU
+是 compute capability 7.0 的 V100；实测 2.12.1+cu130 只包含 `sm_75` 及以上内核，
+虽然 `torch.cuda.is_available()` 为真，真实运算仍会报
+`cudaErrorNoKernelImageForDevice`。因此首轮环境契约固定为 2.12.1+cu126，而不是
+cu130。若云服务器驱动不支持该 wheel，不要临时改成 CPU 构建；先升级驱动并重新执行
+本节验证。
 
 ## 4. CUDA 与依赖验证
 
@@ -138,8 +142,8 @@ conda run --no-capture-output -n python-torch python -c \
 预期关键值：
 
 ```text
-torch = 2.12.1+cu130
-cuda_runtime = 13.0
+torch = 2.12.1+cu126
+cuda_runtime = 12.6
 available = True
 pymunk = 7.3.0
 chipmunk = 2.0.1-ade7ed72849e60289eefb7a41e79ae6322fefaf3
