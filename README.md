@@ -73,6 +73,23 @@ PYTHONPATH=src python -u -m daxigua_rl.scripts.train_dqn \
 
 从版本化 checkpoint 恢复时使用 `--resume`。正式 hybrid replay 采用明确记录的 hot-resume：恢复模型、target、optimizer、更新计数、RNG、因果 replay 和主 replay 热层，不宣称恢复已经省略的冷层。
 
+## 同步云端基础训练数据
+
+查看云端曲线时不需要下载大型 checkpoint/replay。阶段结束后运行：
+
+```bash
+python tools/sync_cloud_training_artifacts.py \
+  --host <SSH主机> --port <SSH端口> --user <SSH用户> \
+  --remote-run-dir /absolute/path/to/runs/<run_id> \
+  --local-dir runs/cloud_evidence/<本地名称> \
+  --require-complete
+```
+
+工具只同步标准配置/指标/归因 JSON 白名单和两张 `plots/*.png`，校验后写入
+`sync_manifest.json`；认证由 OpenSSH 的密钥、agent 或密码提示负责。训练中途同步时
+去掉 `--require-complete`。完整说明见
+`docs/rl/FIRST_500K_RUNBOOK.md` 的“把基础分析数据同步回本地”。
+
 ## 项目说明
 
 - `Main.py`: 兼容旧启动方式的薄入口。
@@ -83,6 +100,7 @@ PYTHONPATH=src python -u -m daxigua_rl.scripts.train_dqn \
 - `src/daxigua_rl/`: 环境、图模型、Reward V2、因果归因、反事实和训练主链路。
 - `requirements-training.txt`: 训练侧 PyTorch 和绘图依赖版本。
 - `tools/preflight_training.py`: 第一次大规模训练前门禁。
+- `tools/sync_cloud_training_artifacts.py`: 只读同步云端轻量指标和曲线。
 - `configs/`: 烟测、标定和正式训练配置。
 - `assets/fruits/`: 水果图片资源。
 - `assets/fruits.zip`: 原始水果图片压缩包归档。

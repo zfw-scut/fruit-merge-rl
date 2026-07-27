@@ -1,6 +1,6 @@
 # 项目文件索引
 
-最后更新：2026-07-27
+最后更新：2026-07-28
 
 ## 项目定位
 
@@ -82,6 +82,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | --- | --- | --- |
 | `tools/cuda_stress_test.py` | 独立 PyTorch CUDA 计算压力测试脚本。只做矩阵乘法和可选显存预留，并采集 GPU、系统内存、进程内存和内核 NVIDIA/Xid 日志。 | 用于判断黑屏/Xid 是否能在脱离游戏和 RL 训练代码后复现；默认输出到 `runs/cuda_stress/<时间戳>/`。 |
 | `tools/export_training_catalog.py` | 训练实验归档工具。扫描本地 `runs/`，识别 Reward V2 task/potential 与历史 Reward V1 指标，并从配置、训练指标和文件信息生成轻量实验目录。 | 不复制 checkpoint、replay 和完整指标 CSV；运行方式见 `docs/training_runs/README.md`。 |
+| `tools/sync_cloud_training_artifacts.py` | 云端轻量训练产物同步工具。通过一次只读 SSH tar 流同步固定白名单内的配置/指标/归因 JSON 和两张训练图，在本地校验路径、类型、大小、JSON/CSV/PNG 完整性后以目录事务安装并生成 SHA-256 manifest。 | 默认只要求训练中的 config/metrics；阶段结束加 `--require-complete` 核对目标 update 和 shutdown 包。认证交给 OpenSSH，工具没有密码参数；明确不下载 checkpoint、ReplayBuffer、日志或本地旁路证据。 |
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |
 | `tools/monitor_cgroup_memory.py` | Linux cgroup-v2 内存旁路监控。分别记录原始余量、`inactive_file` 页缓存、可回收工作集余量和 `memory.events`。 | 云容器训练时与通用资源监控并行运行；避免 checkpoint/replay 文件缓存造成假性低内存告警，同时保留真实 OOM/pressure 硬门禁。 |
 | `tools/temporary_rollout_smoke_test.py` | 临时 GNN rollout 验证脚本。用于检查 `DaxiguaEnv -> GraphBuilder -> GNNQNetwork -> step()` 链路是否闭合。 | 不是正式训练入口；验证完成或正式训练脚本落地后可删除或改造。 |
@@ -108,6 +109,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `tests/test_checkpointing.py` | 版本化训练 checkpoint 测试。覆盖原子替换、配置指纹、RNG、manifest、可选组件恢复、semantic drift 拒绝和 inference 兼容提取。 | 只加载可信 PyTorch checkpoint。 |
 | `tests/test_epsilon_schedule.py` | epsilon 衰减曲线测试。验证 smooth schedule 的关键锚点、单调性，以及 linear schedule 的旧行为。 | 使用标准库 `unittest`。 |
 | `tests/test_training_catalog.py` | 训练实验归档工具测试。验证新旧指标格式、奖励分解加权汇总、checkpoint 摘要和文档输出。 | 使用临时目录，不依赖本地 `runs/`。 |
+| `tests/test_sync_cloud_training_artifacts.py` | 云端轻量产物同步测试。覆盖 SSH 命令引用、无密码参数、安全解包、白名单、完整模式、失败不覆盖、无关证据保留和幂等 manifest。 | 全部使用临时归档，不依赖真实云服务器。 |
 | `tests/test_training_metrics.py` | 训练指标测试。验证 Reward V2 breakdown、shaping p95、StateAnalyzer 性能、gamma 同源、TOML 参数和 episode 指标。 | 使用标准库 `unittest`。 |
 | `tests/test_compare_physics_modes.py` | 物理模式对比工具测试。验证 Reward V2 配置能够传入评估环境，且对比入口继续输出预期摘要。 | 使用标准库 `unittest`。 |
 

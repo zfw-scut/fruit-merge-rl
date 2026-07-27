@@ -478,6 +478,50 @@ conda run --no-capture-output -n python-torch \
 resource monitor 的主机 RSS/GPU 峰值；这些仍必须从第 7 节监控目录人工补入
 readiness 记录。
 
+### 12.4 把基础分析数据同步回本地
+
+云端训练目录包含 GiB 级 checkpoint 和 ReplayBuffer，不能为了查看曲线而直接递归
+复制整个 run。项目提供只读轻量同步入口，只选择固定白名单内的配置、指标、
+归因/resume/failure JSON 与两张标准训练图：
+
+```powershell
+python tools/sync_cloud_training_artifacts.py `
+  --host <SSH主机> `
+  --port <SSH端口> `
+  --user <SSH用户> `
+  --remote-run-dir /root/autodl-tmp/<项目目录>/runs/<run_id> `
+  --local-dir runs/cloud_evidence/<本地名称>
+```
+
+默认模式允许在训练中途运行，只强制要求 `config.json` 和 `metrics.csv`；尚未生成的
+单局 CSV、归因收尾文件或曲线会写进 `sync_manifest.json` 的
+`missing_optional`。5k、10k 或 500k 阶段结束后同步最小完整分析包时使用完整模式：
+
+```powershell
+python tools/sync_cloud_training_artifacts.py `
+  --host <SSH主机> `
+  --port <SSH端口> `
+  --user <SSH用户> `
+  --remote-run-dir /root/autodl-tmp/<项目目录>/runs/<run_id> `
+  --local-dir runs/cloud_evidence/<本地名称> `
+  --require-complete
+```
+
+完整模式要求配置、两份指标 CSV、warmup、attribution/counterfactual shutdown 和
+两张标准曲线全部存在且内容完整，同时核对 `metrics.csv` 最大 update 已达到
+初始 `config.json` 或最新 `resume_config_*.json` 的目标，并拒绝仍带
+`failure_latest.json` 的活动失败 run。它验证的是“轻量分析包完整”，不能替代
+readiness 对模型、optimizer 和 replay 的真实恢复门禁。工具不会下载 checkpoint、
+ReplayBuffer 或日志；远端也不能用同名文件覆盖目标目录已有的 readiness、resource
+summary 等本地旁路证据。整个目标目录与新 manifest 作为同一事务快照切换，准备
+失败时旧证据保持不变；远端本轮缺失的受管 optional 会从新快照移除，不能残留旧图
+冒充本轮产物。
+
+认证由系统 OpenSSH 负责，使用 ssh-agent、密钥、交互式密码提示或调用方配置的
+`SSH_ASKPASS`；工具不接受密码参数，也不把凭据写入命令或 manifest。首次连接必须
+人工核对服务器指纹，不能通过关闭 host-key 校验绕过。同步成功后直接打开本地
+`plots/*.png`，并用 `sync_manifest.json` 中的 size/SHA-256 审计文件。
+
 ## 13. 安全停止方法
 
 训练入口会定期原子更新 `checkpoints/latest.pt`。准备人工停止时：
