@@ -138,7 +138,13 @@ ssh -N -L 8765:127.0.0.1:8765 \
 
 保持隧道连接后访问 `http://127.0.0.1:8765/`。脚本也支持自动发现最新训练产物；
 服务器保留多个实验时建议显式指定三个目录。启动、停止、状态检查、安全边界和排障
-说明见 `docs/operations/TRAINING_DASHBOARD.md`。文档与脚本不保存 SSH 凭据。
+说明见 `docs/operations/TRAINING_DASHBOARD.md`。
+
+Windows 本地电脑可运行
+`scripts/windows/install_training_dashboard_shortcut.ps1`，创建带项目图标的
+`合成大西瓜训练面板` 桌面入口。双击后会自动认证、建立回环 SSH 隧道并打开浏览器。
+仓库和快捷方式不保存明文密码；可选的一键入口只在本机以当前 Windows 用户 DPAPI
+加密保存凭据。
 
 ## 项目说明
 
@@ -154,7 +160,9 @@ ssh -N -L 8765:127.0.0.1:8765 \
 - `tools/sync_cloud_training_artifacts.py`: 只读同步云端轻量指标和曲线。
 - `tools/training_dashboard.py`: 只读汇总训练进度、资源状态和评估曲线的 HTTP 服务。
 - `scripts/training_dashboard.sh`: 云端面板的安全启动、停止、重启和状态检查入口。
+- `scripts/windows/`: Windows 训练面板桌面入口的安装、自动隧道和 ASKPASS 源码。
 - `configs/`: 烟测、标定和正式训练配置。
 - `assets/fruits/`: 水果图片资源。
+- `assets/dashboard/`: Windows 训练面板桌面入口的 PNG 源图和多尺寸 ICO 图标。
 - `assets/fruits.zip`: 原始水果图片压缩包归档。
 - `docs/`: 项目文档和 Codex 修改记录。

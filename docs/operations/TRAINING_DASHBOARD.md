@@ -68,6 +68,48 @@ http://127.0.0.1:8765/
 如本地 8765 已占用，可只修改本地端口，例如
 `-L 18765:127.0.0.1:8765`，浏览器相应访问 `http://127.0.0.1:18765/`。
 
+### Windows 一键桌面入口
+
+Windows 本地电脑可以把认证、SSH 隧道和浏览器启动包装成一个桌面快捷应用。在项目
+根目录使用 Windows PowerShell 5.1 运行一次安装器：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\windows\install_training_dashboard_shortcut.ps1
+```
+
+安装器只在首次安装时提示输入 SSH 密码，并完成以下操作：
+
+- 使用 Windows DPAPI 以当前 Windows 用户身份加密密码；
+- 把启动器、ASKPASS 辅助程序和图标安装到
+  `%LOCALAPPDATA%\FruitMergeRL\TrainingDashboard`；
+- 在当前用户桌面创建 `合成大西瓜训练面板.lnk`；
+- 双击时隐藏建立仅绑定 `127.0.0.1` 的 SSH 隧道，确认面板 API 后打开默认浏览器；
+- 已有由本入口为同一 SSH 目标建立的健康隧道时直接复用；默认端口被占用时依次尝试
+  18765、28765，不复用未知面板，也不终止占用端口的其他程序。
+
+密码不会进入仓库文件、PowerShell 脚本、快捷方式、SSH 命令行或日志。
+`credential.bin` 只能由同一台电脑上的同一 Windows 用户通过 DPAPI 解密，并额外把
+文件 ACL 限制为当前用户和 SYSTEM。它仍属于短期本地凭据：服务器释放后应卸载入口
+或更新凭据。
+
+服务器密码变化时重新录入：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\windows\install_training_dashboard_shortcut.ps1 `
+  -UpdateCredential
+```
+
+卸载会安全核对保存的 SSH PID 与进程启动时刻，只结束该入口自己创建的隧道，然后
+删除桌面快捷方式和本地安装目录：
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File .\scripts\windows\install_training_dashboard_shortcut.ps1 `
+  -Uninstall
+```
+
 ## 4. 生命周期操作
 
 `start` 默认在后台启动，并把 PID 和日志分别保存到
@@ -112,7 +154,9 @@ tail -f runs/dashboard/dashboard.log
   发信号，不会向 `train_dqn.py`、rollout worker 或资源监控进程发信号。
 - PID 文件指向存活但身份不符的进程时，不要直接执行 `kill` 或删除 PID 文件后重试；
   先用 `ps -fp <PID>`、`tr '\0' ' ' </proc/<PID>/cmdline` 人工确认。
-- 文档和脚本不保存 SSH 密码。认证继续交给 OpenSSH、密钥或云平台的安全入口。
+- 仓库文档和脚本不保存明文 SSH 密码。手动隧道继续交给 OpenSSH、密钥或云平台的
+  安全入口；可选 Windows 桌面入口只在本机保存当前用户 DPAPI 加密后的
+  `credential.bin`。
 - `/api/health` 同时返回服务状态和数据新鲜度；训练/监控心跳超过 30 秒未更新时，
   页面会标记为 stale，不会继续把旧的进程计数显示成“正在运行”。
 
@@ -134,6 +178,13 @@ conda run -n python-torch python tools/training_dashboard.py --help
   `episode_metrics.csv`，并核对 monitor/control 路径没有指向旧 run。
 - 本地浏览器无法连接：确认面板 `status` 为 running、SSH `-L` 会话仍在运行，并检查
   本地端口是否被占用；不应通过改成 `0.0.0.0` 绕过隧道问题。
+- Windows 桌面入口提示认证失败：重新运行安装器并加 `-UpdateCredential`；启动器只
+  尝试一次密码，不会循环锁定云账号。
+- Windows 桌面入口提示主机指纹变化：不要删除 `known_hosts` 或关闭主机指纹校验；
+  先从云平台核对服务器地址和新指纹，再人工更新本机记录。
+- Windows 双击后没有页面：查看
+  `%LOCALAPPDATA%\FruitMergeRL\TrainingDashboard\launcher.log` 和 `ssh.log`。
+  日志不含密码；若隧道 PID 仍存活但面板无响应，应先在云端检查 dashboard 服务。
 - `unsafe-pid-record`：PID 被复用、元数据缺失或文件被人工修改。先核实该 PID 的真实
   命令；只有确认进程已经不存在后，才清理 `runs/dashboard/dashboard.pid` 和
   `dashboard.start_ticks` 并重新启动。

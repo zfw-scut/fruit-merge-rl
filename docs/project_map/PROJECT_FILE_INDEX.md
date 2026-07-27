@@ -68,6 +68,10 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `scripts/` | 项目级启动脚本目录。放训练和只读观察服务的薄启动器，具体训练参数仍放在 `configs/`。 | `train_dqn.sh`、`training_dashboard.sh` |
 | `scripts/train_dqn.sh` | DQN 训练启动器。默认读取 `configs/train_dqn_fast30_parallel.toml`，设置 `PYTHONPATH`，通过 `python-torch` conda 环境启动训练并 tee 日志。 | `./scripts/train_dqn.sh` |
 | `scripts/training_dashboard.sh` | 云端训练面板生命周期入口。通过 `setsid` 后台运行服务，并以 PID、Linux 启动时刻、命令行和工作目录共同校验进程身份，避免 stop/restart 误伤训练。 | `start`、`stop`、`status`、`restart`；默认 `127.0.0.1:8765`。 |
+| `scripts/windows/install_training_dashboard_shortcut.ps1` | Windows 桌面入口安装器。编译原生 ASKPASS 辅助程序、以当前用户 DPAPI 加密凭据、收紧凭据 ACL，并创建带自定义图标的桌面快捷方式。 | 默认安装到 `%LOCALAPPDATA%\FruitMergeRL\TrainingDashboard`；支持 `-UpdateCredential` 和 `-Uninstall`，不接受明文密码参数。 |
+| `scripts/windows/open_training_dashboard.ps1` | Windows 面板启动器。核对本项目 health API 和状态中绑定的 SSH 目标、复用自有隧道、保护端口占用、隐藏启动 OpenSSH 并在成功后打开浏览器。 | named mutex 防重复双击；候选本地端口为 8765/18765/28765；不复用未知面板，失败只清理本次创建的 SSH 进程。 |
+| `scripts/windows/DashboardAskPass.cs` | Windows OpenSSH ASKPASS 小程序源码。只响应 password/密码提示，从同目录 DPAPI blob 解密并仅向 ssh 标准输出传递一次凭据。 | 安装时由 Windows PowerShell 5.1 编译为真实 PE，不记录异常或凭据。 |
+| `scripts/windows/launch_training_dashboard.vbs` | 桌面快捷方式的无窗口包装层。调用本地安装目录中的 PowerShell 启动器。 | 桌面 `.lnk` 指向 `wscript.exe`，避免控制台闪窗。 |
 
 ## 资源和说明
 
@@ -75,6 +79,8 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | --- | --- | --- |
 | `assets/fruits/` | 水果图片资源目录，包含 `01.png` 到 `11.png`。 | 游戏运行时直接读取。 |
 | `assets/fruits.zip` | 原始水果图片压缩包归档。 | 不参与运行，只作资源备份。 |
+| `assets/dashboard/training_dashboard.png` | 训练面板桌面入口图标源图。 | 深色圆角底、三枚合成水果和上升训练曲线，无文字。 |
+| `assets/dashboard/training_dashboard.ico` | Windows 桌面入口多尺寸图标。 | 包含 16 到 256 像素的 ICO 帧，由安装器复制到本地应用目录。 |
 | `README.md` | 项目总入口，包含手动游戏、完整因果训练概览、preflight、三阶段配置和恢复说明。 | 不记录尚未产生的烟测结果。 |
 | `requirements.txt` | 游戏与物理基础依赖。 | 固定 `pygame` 和 `pymunk`；快照重演还校验 Chipmunk 构建版本。 |
 | `requirements-training.txt` | 训练侧 Python 依赖版本。 | 当前 RTX 5090 正式环境固定 PyTorch 2.12.1 和 matplotlib 3.11.1；PyTorch 从官方 cu130 源安装，preflight 要求 `2.12.1+cu130` / CUDA runtime 13.0。 |
@@ -135,7 +141,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/operations/` | 云端运行服务的部署和运维手册目录。 | 当前包含训练实时面板的启动、SSH 隧道访问、安全边界和排障说明。 |
-| `docs/operations/TRAINING_DASHBOARD.md` | 云端训练实时面板运维手册。 | 默认通过 `127.0.0.1:8765` 和 SSH 本地端口转发访问；明确只读边界、生命周期命令和 PID 安全校验。 |
+| `docs/operations/TRAINING_DASHBOARD.md` | 云端训练实时面板运维手册。 | 默认通过 `127.0.0.1:8765` 和 SSH 本地端口转发访问；包含 Windows DPAPI 一键桌面入口、只读边界、生命周期命令和 PID 安全校验。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
 | `docs/rl/STRUCTURE_AWARE_GNN_V2.md` | 当前结构感知 GNN 与首次新架构长训的主规格。 | 记录关系图、连锁 motif、关系 GNN、六维辅助监督、集中式 actor、无泄漏/非奖励边界、启用参数、指标以及旧 checkpoint/replay 不兼容范围。 |
 | `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、局部 Shapley、测试和长训流程；实现步骤 1～11 已落地，烟测/标定/正式长训结果仍须按实际运行记录。 |
