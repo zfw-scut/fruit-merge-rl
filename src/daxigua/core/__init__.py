@@ -5,14 +5,36 @@
 """
 
 from .engine import HeadlessGame
-from .state import ActionCandidate, DropResult, FruitState, GameState, PhysicsResult
+from .state import (
+    ActionCandidate,
+    BoundaryPhysicsSnapshot,
+    DropResult,
+    ENGINE_SNAPSHOT_SCHEMA_VERSION,
+    EngineActionOutcome,
+    EngineConfigSnapshot,
+    EngineEpisodeSnapshot,
+    EngineSnapshot,
+    FruitPhysicsSnapshot,
+    FruitState,
+    GameState,
+    OriginalActionReplayReport,
+    PhysicsResult,
+)
 
 
 __all__ = [
     'ActionCandidate',
+    'BoundaryPhysicsSnapshot',
     'DropResult',
+    'ENGINE_SNAPSHOT_SCHEMA_VERSION',
+    'EngineActionOutcome',
+    'EngineConfigSnapshot',
+    'EngineEpisodeSnapshot',
+    'EngineSnapshot',
+    'FruitPhysicsSnapshot',
     'FruitState',
     'GameState',
     'HeadlessGame',
+    'OriginalActionReplayReport',
     'PhysicsResult',
 ]

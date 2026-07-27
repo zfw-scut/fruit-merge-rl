@@ -64,6 +64,52 @@ class DaxiguaEnv:
         self._direct_episode_id = -1
         self._episode_done = True
 
+    @classmethod
+    def from_snapshot(cls, snapshot, config=None, state_analyzer=None):
+        """从稳定的引擎快照创建可直接执行下一动作的环境。
+
+        ``EngineSnapshot`` 不保存 RL 奖励或状态分析配置；调用方传入的
+        ``DaxiguaEnvConfig`` 因此继续控制这些环境侧语义，但其中的物理步频和
+        Pymunk 迭代次数必须与快照完全一致。
+        """
+
+        if config is not None and not isinstance(config, DaxiguaEnvConfig):
+            raise TypeError('config must be DaxiguaEnvConfig or None')
+
+        game = HeadlessGame.from_snapshot(snapshot)
+        if config is None:
+            config = DaxiguaEnvConfig(
+                physics_fps=game.fps,
+                space_iterations=game.space.iterations,
+            )
+        if config.physics_fps != game.fps:
+            raise ValueError(
+                'config.physics_fps must match EngineSnapshot fps: '
+                f'{config.physics_fps!r} != {game.fps!r}'
+            )
+        if config.space_iterations != game.space.iterations:
+            raise ValueError(
+                'config.space_iterations must match EngineSnapshot '
+                f'space_iterations: {config.space_iterations!r} != '
+                f'{game.space.iterations!r}'
+            )
+        if game.is_done():
+            raise ValueError(
+                'EngineSnapshot must represent a live, step-ready game'
+            )
+
+        env = cls(
+            config=config,
+            game=game,
+            state_analyzer=state_analyzer,
+        )
+        env._cached_state_analysis = None
+        # 快照不携带 rollout 的 worker/episode 身份；显式 TransitionKey 会原样
+        # 使用。直接调用 step() 时则从一个新的本地 episode 0 开始。
+        env._direct_episode_id = 0
+        env._episode_done = False
+        return env
+
     def reset(self, seed=None, fruit_queue=None):
         """重置环境。
 
@@ -130,14 +176,15 @@ class DaxiguaEnv:
             )
 
         action = candidates[action_index]
-        drop_result = self.game.drop_at(action.drop_x)
-        physics_result = self.game.advance_physics(
+        engine_action_outcome = self.game.execute_action(
+            action.drop_x,
             max_frames=self.config.max_physics_frames,
-            until_stable=True,
             stable_frames=self.config.stable_frames,
         )
+        drop_result = engine_action_outcome.drop_result
+        physics_result = engine_action_outcome.physics_result
 
-        obs = self.game.get_state()
+        obs = engine_action_outcome.final_state
         terminated = physics_result.done
         truncated = physics_result.truncated
 
@@ -180,6 +227,7 @@ class DaxiguaEnv:
 
         info = {
             'action': action,
+            'engine_action_outcome': engine_action_outcome,
             'drop_result': drop_result,
             'physics_result': physics_result,
             'reward_breakdown': reward_breakdown,

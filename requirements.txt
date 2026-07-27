@@ -1,2 +1,3 @@
-pygame
-pymunk
+pygame==2.6.1
+# EngineSnapshot 会持久化 Pymunk Space 内部状态；跨版本不保证可恢复。
+pymunk==7.3.0
