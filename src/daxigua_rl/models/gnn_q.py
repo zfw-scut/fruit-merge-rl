@@ -1,151 +1,217 @@
-"""GNN-Q 模型。
+"""面向合成大西瓜结构信息的 GNN-Q 网络。
 
-第一版模型目标很朴素：验证 `GraphData -> q_values` 的前向链路。
-它使用统一图 message passing，不区分真正的异构图算子；节点类型和边类型
-由 GraphBuilder 写入 one-hot 特征，模型通过这些特征自行学习不同语义。
+模型继续保持最简单的外部契约：
+
+``forward(graph) -> q_values``
+
+其中 ``q_values`` 始终是一维张量。需要训练结构辅助任务时，可改用
+``forward_with_aux(graph)``，它会额外返回每个动作的六维结构预测。两条入口共享
+同一次图编码和消息传播，不会为了辅助头重复计算 GNN。
+
+图仍然使用统一的节点/边张量，但消息传递会显式利用边表示生成 relation gate 和
+attention gate。Q 值采用 dueling 分解：每张图从 ``is_global_node`` 特征列定位
+唯一 global 节点并预测状态值，再对该图自己的动作 advantage 做中心化。
 """
+
+from typing import NamedTuple
 
 import torch
 from torch import nn
 
-from daxigua_rl.graph.schema import EDGE_FEATURE_NAMES, NODE_FEATURE_NAMES, GraphData
+from daxigua_rl.graph.schema import (
+    EDGE_FEATURE_NAMES,
+    NODE_FEATURE_NAMES,
+    GraphData,
+)
 from daxigua_rl.graph.tensor import GraphBatch, GraphTensor, graph_to_tensor
 
 
-def _activation(name):
-    """根据名称创建激活层。
+# 固定顺序是辅助监督的数据契约。后续 trainer 可以按列选择回归或分类损失，
+# 不需要依赖字典迭代顺序。
+STRUCTURE_PREDICTION_NAMES = (
+    'top_connected_capacity_delta',
+    'recoverability_delta',
+    'chain_readiness_delta',
+    'new_dead_or_blocked_fruit_risk',
+    'sealed_cavity_delta',
+    'realized_chain_or_terminal_risk',
+)
 
-    目前只暴露少量选择，避免模型配置还没稳定时引入太多分支。
+
+class StructureAwareQOutput(NamedTuple):
+    """``forward_with_aux`` 的稳定返回结构。
+
+    ``q_values`` 的 shape 为 ``[total_action_count]``；
+    ``structure_predictions`` 的 shape 为 ``[total_action_count, 6]``。
+    GraphBatch 仍使用 ``graph.action_slices`` 把扁平动作维还原到每张图。
     """
 
-    # ReLU 简单、稳定，是很多 DQN baseline 的常见选择。
+    q_values: torch.Tensor
+    structure_predictions: torch.Tensor
+
+    @property
+    def prediction_names(self):
+        """返回六个辅助预测列的固定名称。"""
+
+        return STRUCTURE_PREDICTION_NAMES
+
+
+def _activation(name):
+    """根据名称创建激活层。"""
+
     if name == 'relu':
         return nn.ReLU()
-
-    # SiLU 在连续特征任务里通常更平滑，这里作为默认激活函数。
     if name == 'silu':
         return nn.SiLU()
-
-    # 明确报错可以尽早发现拼写错误，例如把 `silu` 写成 `SiLU`。
     raise ValueError(f'unsupported activation: {name}')
 
 
 def _mlp(input_dim, hidden_dim, output_dim, activation='silu', dropout=0.0):
-    """创建两层 MLP。
-
-    本文件里的节点编码、边编码、message 生成、节点更新都复用这个结构。
-    """
+    """创建项目内统一使用的两层 MLP。"""
 
     return nn.Sequential(
-        # 先把输入特征映射到统一隐藏维度，方便后续 message passing 处理。
         nn.Linear(input_dim, hidden_dim),
-
-        # 非线性激活用于提升表达能力，否则多层线性层仍然等价于一层线性层。
         _activation(activation),
-
-        # dropout 默认关闭；后续训练时如果过拟合明显，可以通过参数打开。
         nn.Dropout(dropout),
-
-        # 输出维度由调用者决定，例如编码器输出 hidden_dim，Q head 最终输出 1。
         nn.Linear(hidden_dim, output_dim),
     )
 
 
 class MessagePassingLayer(nn.Module):
-    """一层 mean aggregation 的消息传递。
+    """带 edge-conditioned relation gate/attention 的消息传递层。
 
-    对每条有向边 `src -> dst`：
-    - 使用源节点、目标节点和边特征共同生成 message。
-    - 按目标节点对 message 做 mean 聚合。
-    - 用残差和 LayerNorm 更新节点表示。
+    对每条 ``src -> dst`` 边：
+
+    1. ``message_mlp`` 根据源节点、目标节点和边表示生成候选消息；
+    2. ``relation_gate`` 仅由边表示生成逐通道门，学习不同关系应开放哪些通道；
+    3. ``attention_gate`` 根据完整三元组生成标量权重，学习同类关系中的重要边；
+    4. 按目标节点做加权平均，再通过残差和 LayerNorm 更新节点。
+
+    sigmoid attention 配合加权平均不要求额外的 scatter-softmax 扩展，因而能在
+    CPU rollout worker、CUDA trainer 和空边图上使用同一实现。
     """
 
     def __init__(self, hidden_dim, activation='silu', dropout=0.0):
         super().__init__()
+        self.hidden_dim = int(hidden_dim)
 
-        # 每条边的 message 同时看三部分信息：
-        # 1. source 节点当前隐藏表示；
-        # 2. target 节点当前隐藏表示；
-        # 3. 这条边自己的隐藏表示。
-        # 因此输入维度是 hidden_dim * 3。
-        self.message_mlp = _mlp(hidden_dim * 3, hidden_dim, hidden_dim, activation, dropout)
-
-        # target 节点收到邻居消息后，用「自身旧表示 + 聚合消息」计算更新量。
-        # 输入维度是 hidden_dim * 2。
-        self.update_mlp = _mlp(hidden_dim * 2, hidden_dim, hidden_dim, activation, dropout)
-
-        # LayerNorm 用来稳定多层 message passing，降低隐藏表示数值漂移。
-        self.norm = nn.LayerNorm(hidden_dim)
-
-        # 残差分支上的 dropout，默认不启用。
+        message_input_dim = self.hidden_dim * 3
+        self.message_mlp = _mlp(
+            message_input_dim,
+            self.hidden_dim,
+            self.hidden_dim,
+            activation,
+            dropout,
+        )
+        self.relation_gate = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            _activation(activation),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.attention_gate = nn.Sequential(
+            nn.Linear(message_input_dim, self.hidden_dim),
+            _activation(activation),
+            nn.Linear(self.hidden_dim, 1),
+            nn.Sigmoid(),
+        )
+        self.update_mlp = _mlp(
+            self.hidden_dim * 2,
+            self.hidden_dim,
+            self.hidden_dim,
+            activation,
+            dropout,
+        )
+        self.norm = nn.LayerNorm(self.hidden_dim)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, node_hidden, edge_index, edge_hidden):
-        """执行一次消息传递并返回更新后的节点表示。
+        """传播一层消息并返回 ``[num_nodes, hidden_dim]``。"""
 
-        参数约定：
-        - node_hidden: [num_nodes, hidden_dim]
-        - edge_index: [2, num_edges]
-        - edge_hidden: [num_edges, hidden_dim]
-        返回：
-        - updated_node_hidden: [num_nodes, hidden_dim]
-        """
+        if node_hidden.dim() != 2:
+            raise ValueError(
+                'node_hidden must have shape [num_nodes, hidden_dim]'
+            )
+        if edge_hidden.dim() != 2:
+            raise ValueError(
+                'edge_hidden must have shape [num_edges, hidden_dim]'
+            )
+        if edge_index.dim() != 2 or edge_index.shape[0] != 2:
+            raise ValueError('edge_index must have shape [2, num_edges]')
+        if node_hidden.shape[1] != self.hidden_dim:
+            raise ValueError(
+                f'expected node hidden dim {self.hidden_dim}, '
+                f'got {node_hidden.shape[1]}'
+            )
+        if edge_hidden.shape[1] != self.hidden_dim:
+            raise ValueError(
+                f'expected edge hidden dim {self.hidden_dim}, '
+                f'got {edge_hidden.shape[1]}'
+            )
+        if edge_index.shape[1] != edge_hidden.shape[0]:
+            raise ValueError(
+                'edge_index and edge_hidden must contain the same '
+                'number of edges'
+            )
 
         if edge_index.numel() == 0:
-            # 没有边时，所有节点都收不到邻居消息。
-            # 这里使用全零聚合结果，保证后面的 update_mlp 仍然能处理节点自身信息。
             aggregated = torch.zeros_like(node_hidden)
         else:
-            # source_index/target_index 都是一维 LongTensor，长度等于边数量。
-            # 对第 i 条边来说：source_index[i] -> target_index[i]。
             source_index = edge_index[0]
             target_index = edge_index[1]
-
-            # 根据边索引取出每条边两端节点的当前隐藏表示。
-            # source_hidden、target_hidden 的 shape 都是 [num_edges, hidden_dim]。
             source_hidden = node_hidden[source_index]
             target_hidden = node_hidden[target_index]
+            message_input = torch.cat(
+                (source_hidden, target_hidden, edge_hidden),
+                dim=-1,
+            )
 
-            # 把边两端节点表示和边表示拼接起来，作为 message_mlp 的输入。
-            # message_input shape: [num_edges, hidden_dim * 3]。
-            message_input = torch.cat((source_hidden, target_hidden, edge_hidden), dim=-1)
-
-            # 为每条边生成一条 message，shape: [num_edges, hidden_dim]。
             messages = self.message_mlp(message_input)
+            relation_weights = self.relation_gate(edge_hidden)
+            attention_weights = self.attention_gate(message_input)
+            weighted_messages = (
+                messages
+                * relation_weights
+                * attention_weights
+            )
 
-            # aggregated 用来按 target 节点累加收到的 message。
-            # 初始全零，随后 index_add_ 会把 messages 加到对应目标节点行上。
             aggregated = torch.zeros_like(node_hidden)
-            aggregated.index_add_(0, target_index, messages)
+            aggregated.index_add_(
+                0,
+                target_index,
+                weighted_messages,
+            )
 
-            # 记录每个 target 节点收到了多少条入边 message。
-            # 后面除以 counts，就从 sum aggregation 变成 mean aggregation。
-            counts = torch.zeros(
+            # 用 attention 权重而不是裸入度归一化。这样被 gate 抑制的边不会同时
+            # 把其它有效消息按完整入度缩小。
+            attention_sum = torch.zeros(
                 node_hidden.shape[0],
                 1,
                 dtype=node_hidden.dtype,
                 device=node_hidden.device,
             )
-            counts.index_add_(0, target_index, torch.ones_like(messages[:, :1]))
+            attention_sum.index_add_(
+                0,
+                target_index,
+                attention_weights,
+            )
+            epsilon = torch.finfo(node_hidden.dtype).eps
+            aggregated = aggregated / attention_sum.clamp_min(epsilon)
 
-            # clamp_min(1.0) 防止没有入边的节点除以 0。
-            # 没有入边的节点 aggregated 原本就是 0，除以 1 后仍然是 0。
-            aggregated = aggregated / counts.clamp_min(1.0)
-
-        # 节点更新时同时看自己的旧表示和从邻居聚合来的消息。
-        update_input = torch.cat((node_hidden, aggregated), dim=-1)
-        update = self.update_mlp(update_input)
-
-        # 残差连接保留旧表示，update 只负责补充新信息；
-        # LayerNorm 让多层堆叠时数值范围更稳定。
-        return self.norm(node_hidden + self.dropout(update))
+        update = self.update_mlp(
+            torch.cat((node_hidden, aggregated), dim=-1)
+        )
+        return self.norm(
+            node_hidden + self.dropout(update)
+        )
 
 
 class GNNQNetwork(nn.Module):
-    """输入一张状态图，输出每个候选动作的 Q 值。
+    """输入状态图，输出所有候选动作的 dueling Q 值。
 
-    当前模型不是完整训练算法，只负责 Q 网络的前向计算。
-    后续 DQN/Double DQN、经验回放、目标网络等训练逻辑会在更外层实现。
+    构造参数保持与旧模型相同，因此训练脚本、rollout worker 和反事实 runner
+    不需要修改。``q_head`` 这个历史属性也继续保留；在 dueling 结构中它承担
+    global state-value 分支，动作 advantage 由 ``advantage_head`` 负责。
     """
 
     def __init__(
@@ -158,127 +224,390 @@ class GNNQNetwork(nn.Module):
             dropout=0.0):
         super().__init__()
 
-        # 如果调用者没有显式传入维度，就使用当前 schema 中定义的完整特征维度。
-        # 这样 GraphBuilder 的默认输出可以直接送入模型。
-        self.node_feature_dim = node_feature_dim or len(NODE_FEATURE_NAMES)
-        self.edge_feature_dim = edge_feature_dim or len(EDGE_FEATURE_NAMES)
-        self.hidden_dim = hidden_dim
-        self.message_layers = message_layers
+        self.node_feature_dim = (
+            node_feature_dim
+            if node_feature_dim is not None
+            else len(NODE_FEATURE_NAMES)
+        )
+        self.edge_feature_dim = (
+            edge_feature_dim
+            if edge_feature_dim is not None
+            else len(EDGE_FEATURE_NAMES)
+        )
+        self.hidden_dim = int(hidden_dim)
+        self.message_layers = int(message_layers)
 
-        # 节点编码器：把原始节点特征映射到 hidden_dim。
-        # 输入 shape: [num_nodes, node_feature_dim]
-        # 输出 shape: [num_nodes, hidden_dim]
-        self.node_encoder = _mlp(self.node_feature_dim, hidden_dim, hidden_dim, activation, dropout)
+        if self.node_feature_dim <= 0:
+            raise ValueError('node_feature_dim must be positive')
+        if self.edge_feature_dim <= 0:
+            raise ValueError('edge_feature_dim must be positive')
+        if self.hidden_dim <= 0:
+            raise ValueError('hidden_dim must be positive')
+        if self.message_layers < 0:
+            raise ValueError('message_layers must be non-negative')
 
-        # 边编码器：把原始边特征映射到 hidden_dim。
-        # 输入 shape: [num_edges, edge_feature_dim]
-        # 输出 shape: [num_edges, hidden_dim]
-        self.edge_encoder = _mlp(self.edge_feature_dim, hidden_dim, hidden_dim, activation, dropout)
-
-        # 连续堆叠多层 message passing。
-        # 层数越多，action 节点理论上能整合越远的图结构信息；
-        # 但层数太深也可能带来过平滑或训练不稳定，当前默认先用 3 层。
+        self.node_encoder = _mlp(
+            self.node_feature_dim,
+            self.hidden_dim,
+            self.hidden_dim,
+            activation,
+            dropout,
+        )
+        self.edge_encoder = _mlp(
+            self.edge_feature_dim,
+            self.hidden_dim,
+            self.hidden_dim,
+            activation,
+            dropout,
+        )
         self.layers = nn.ModuleList(
-            MessagePassingLayer(hidden_dim, activation=activation, dropout=dropout)
-            for _ in range(message_layers)
+            MessagePassingLayer(
+                self.hidden_dim,
+                activation=activation,
+                dropout=dropout,
+            )
+            for _ in range(self.message_layers)
         )
 
-        # Q head 只作用在 action 节点的最终隐藏表示上。
-        # 每个 action 节点输出一个标量，表示该候选动作的 Q(s, a)。
-        self.q_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            _activation(activation),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
+        # 保留 q_head 名称以兼容既有测试和调试代码。dueling 结构里它读取每张图
+        # 唯一 global 节点，输出 V(s)。
+        self.q_head = _mlp(
+            self.hidden_dim,
+            self.hidden_dim,
+            1,
+            activation,
+            dropout,
         )
+        self.advantage_head = _mlp(
+            self.hidden_dim,
+            self.hidden_dim,
+            1,
+            activation,
+            dropout,
+        )
+
+        # 辅助头同时读取 action 表示和同图 global 表示，使它既能看到落点局部
+        # 结构，也能判断该变化相对整个局面的意义。
+        self.structure_head = _mlp(
+            self.hidden_dim * 2,
+            self.hidden_dim,
+            len(STRUCTURE_PREDICTION_NAMES),
+            activation,
+            dropout,
+        )
+
+    @property
+    def value_head(self):
+        """``q_head`` 的语义化只读别名，不重复注册同一个子模块。"""
+
+        return self.q_head
 
     def forward(self, graph):
-        """返回 shape 为 `[action_count]` 的 Q 值张量。
+        """返回一维 Q 值，保持原有调用 API。"""
 
-        输入可以是：
-        - `GraphData`：调试友好，内部会临时转成 Tensor；
-        - `GraphTensor`：训练友好，推荐训练循环中提前转换好后复用。
+        (
+            action_hidden,
+            action_slices,
+            global_hidden,
+            _action_global_hidden,
+        ) = self._encode_readout_context(graph)
+        return self._dueling_q_values(
+            action_hidden=action_hidden,
+            action_slices=action_slices,
+            global_hidden=global_hidden,
+        )
+
+    def forward_with_aux(self, graph):
+        """返回 Q 值和每动作六维结构预测。
+
+        六列与 ``StructuralTarget`` 的列顺序一致，并统一通过 tanh 映射到
+        ``[-1, 1]``。风险列的有效 target 位于 ``[0, 1]``；封闭空腔变化量需要
+        表达改善和恶化；最后一列用正值表达真实连锁、``-1`` 表达真实终局。
         """
 
-        # 统一转换成 GraphTensor，并确保张量和模型处于同一个 device/dtype。
-        graph_tensor = self._ensure_tensor(graph)
+        (
+            action_hidden,
+            action_slices,
+            global_hidden,
+            action_global_hidden,
+        ) = self._encode_readout_context(graph)
+        q_values = self._dueling_q_values(
+            action_hidden=action_hidden,
+            action_slices=action_slices,
+            global_hidden=global_hidden,
+        )
 
-        # 在真正进入神经网络前做形状检查，避免 PyTorch 报出难读的矩阵乘法错误。
+        raw_structure = self.structure_head(
+            torch.cat(
+                (action_hidden, action_global_hidden),
+                dim=-1,
+            )
+        )
+        structure_predictions = torch.tanh(raw_structure)
+
+        return StructureAwareQOutput(
+            q_values=q_values,
+            structure_predictions=structure_predictions,
+        )
+
+    def _encode_readout_context(self, graph):
+        """只执行一次图编码，并准备 Q/辅助头共用的读出表示。"""
+
+        # 训练主链路的图通常仍在 CPU。先在原设备上按 schema 定位 global
+        # 节点，再整体搬到 CUDA，避免每次 forward 为读取一个索引触发 GPU -> CPU
+        # 同步。调用者若直接传入 GPU GraphTensor，仍支持同一逻辑。
+        graph_tensor = self._as_tensor(graph)
         self._validate_graph_tensor(graph_tensor)
+        (
+            action_slices,
+            global_node_indices,
+        ) = self._locate_graph_global_nodes(graph_tensor)
+        graph_tensor = self._move_tensor_to_model(graph_tensor)
+        global_node_indices = global_node_indices.to(
+            device=graph_tensor.node_features.device,
+        )
 
-        # 原始特征先编码成统一隐藏维度。
         node_hidden = self.node_encoder(graph_tensor.node_features)
         edge_hidden = self.edge_encoder(graph_tensor.edge_features)
-
-        # 逐层传播图结构信息。
-        # 每一层都会让节点从入边邻居那里接收一次信息。
         for layer in self.layers:
-            node_hidden = layer(node_hidden, graph_tensor.edge_index, edge_hidden)
+            node_hidden = layer(
+                node_hidden,
+                graph_tensor.edge_index,
+                edge_hidden,
+            )
 
-        # 图里包含真实水果、队列水果、边界、全局节点等多种节点；
-        # 但 DQN 最终只需要比较候选动作，所以这里仅读取 action 节点。
-        action_hidden = node_hidden[graph_tensor.action_node_indices]
+        action_hidden = node_hidden[
+            graph_tensor.action_node_indices
+        ]
+        (
+            global_hidden,
+            action_global_hidden,
+        ) = self._read_graph_global_hidden(
+            graph_tensor,
+            node_hidden,
+            action_slices,
+            global_node_indices,
+        )
+        return (
+            action_hidden,
+            action_slices,
+            global_hidden,
+            action_global_hidden,
+        )
 
-        # 单图时输出 [action_count]；GraphBatch 时输出 [total_action_count]。
-        # batch 中每张图的动作区间由 GraphBatch.action_slices 记录。
-        return self.q_head(action_hidden).squeeze(-1)
+    def _dueling_q_values(
+            self,
+            *,
+            action_hidden,
+            action_slices,
+            global_hidden):
+        """从读出表示计算按图中心化的 dueling Q。"""
 
-    def _ensure_tensor(self, graph):
-        """接受 GraphData、GraphTensor 或 GraphBatch，并移动到模型所在设备。"""
+        state_values = self.q_head(global_hidden).squeeze(-1)
+        advantages = self.advantage_head(action_hidden).squeeze(-1)
+        return self._combine_dueling_values(
+            state_values,
+            advantages,
+            action_slices,
+        )
 
-        # next(self.parameters()) 给出当前模型参数所在 device/dtype。
-        # ReplayBuffer 可以用 float16 省内存，但模型通常仍是 float32；
-        # 因此进入网络前需要把图特征转回模型参数 dtype，避免 Linear dtype mismatch。
+    def _as_tensor(self, graph):
+        """把 GraphData 转成张量，但暂时保留调用方所在设备。"""
+
         first_parameter = next(self.parameters())
-        device = first_parameter.device
         dtype = first_parameter.dtype
 
-        # GraphTensor 已经是张量格式，只需要移动设备。
         if isinstance(graph, GraphTensor):
-            return graph.to(device=device, dtype=dtype)
-
-        # GraphBatch 已经是张量格式，只需要整体移动设备。
+            return graph
         if isinstance(graph, GraphBatch):
-            return graph.to(device=device, dtype=dtype)
-
-        # GraphData 是 GraphBuilder 的原始输出，先转成张量。
+            return graph
         if isinstance(graph, GraphData):
-            return graph_to_tensor(graph, device=device)
-
-        # 其它类型说明调用链有问题，直接报错比静默失败更容易定位。
+            return graph_to_tensor(
+                graph,
+                dtype=dtype,
+            )
         raise TypeError(f'unsupported graph type: {type(graph)!r}')
 
+    def _move_tensor_to_model(self, graph):
+        """把已经检查过的图移动到模型参数所在 device/dtype。"""
+
+        first_parameter = next(self.parameters())
+        return graph.to(
+            device=first_parameter.device,
+            dtype=first_parameter.dtype,
+        )
+
     def _validate_graph_tensor(self, graph):
-        """检查输入图张量的基础形状。
+        """检查模型依赖的张量形状和 schema 元数据。"""
 
-        这里只检查模型必须依赖的基本条件。
-        更细的语义检查，例如 action 节点类型是否真的正确，由 GraphBuilder 负责。
-        """
-
-        # 节点特征必须是二维矩阵：[节点数量, 节点特征维度]。
         if graph.node_features.dim() != 2:
-            raise ValueError('node_features must have shape [num_nodes, node_feature_dim]')
-
-        # 边特征必须是二维矩阵：[边数量, 边特征维度]。
+            raise ValueError(
+                'node_features must have shape '
+                '[num_nodes, node_feature_dim]'
+            )
         if graph.edge_features.dim() != 2:
-            raise ValueError('edge_features must have shape [num_edges, edge_feature_dim]')
-
-        # edge_index 必须保存 source/target 两行索引。
+            raise ValueError(
+                'edge_features must have shape '
+                '[num_edges, edge_feature_dim]'
+            )
         if graph.edge_index.dim() != 2 or graph.edge_index.shape[0] != 2:
-            raise ValueError('edge_index must have shape [2, num_edges]')
-
-        # 如果 GraphBuilder 的 schema 改了，但模型仍按旧维度初始化，这里会立刻报错。
+            raise ValueError(
+                'edge_index must have shape [2, num_edges]'
+            )
+        if graph.edge_index.shape[1] != graph.edge_features.shape[0]:
+            raise ValueError(
+                'edge_index and edge_features must contain the same '
+                'number of edges'
+            )
         if graph.node_feature_dim != self.node_feature_dim:
             raise ValueError(
-                f'expected node_feature_dim={self.node_feature_dim}, got {graph.node_feature_dim}'
+                f'expected node_feature_dim={self.node_feature_dim}, '
+                f'got {graph.node_feature_dim}'
             )
-
-        # 边特征维度同理，避免 Linear 层输入维度不匹配。
         if graph.edge_feature_dim != self.edge_feature_dim:
             raise ValueError(
-                f'expected edge_feature_dim={self.edge_feature_dim}, got {graph.edge_feature_dim}'
+                f'expected edge_feature_dim={self.edge_feature_dim}, '
+                f'got {graph.edge_feature_dim}'
+            )
+        if len(graph.node_feature_names) != graph.node_feature_dim:
+            raise ValueError(
+                'node_feature_names must match node feature dimension'
+            )
+        if len(graph.edge_feature_names) != graph.edge_feature_dim:
+            raise ValueError(
+                'edge_feature_names must match edge feature dimension'
+            )
+        if graph.action_count == 0:
+            raise ValueError(
+                'graph must contain at least one action node'
             )
 
-        # 没有 action 节点时，模型无法输出动作 Q 值。
-        if graph.action_count == 0:
-            raise ValueError('graph must contain at least one action node')
+    def _locate_graph_global_nodes(self, graph):
+        """在图原设备上按 schema 定位每张图唯一 global 节点。"""
+
+        global_feature_name = 'is_global_node'
+        matching_columns = tuple(
+            index
+            for index, name in enumerate(graph.node_feature_names)
+            if name == global_feature_name
+        )
+        if len(matching_columns) != 1:
+            raise ValueError(
+                'node feature schema must contain exactly one '
+                'is_global_node column'
+            )
+        global_column = matching_columns[0]
+
+        if isinstance(graph, GraphBatch):
+            action_slices = tuple(graph.action_slices)
+            node_slices = tuple(graph.node_slices)
+            if len(action_slices) != len(node_slices):
+                raise ValueError(
+                    'GraphBatch action_slices and node_slices must align'
+                )
+        else:
+            action_slices = ((0, graph.action_count),)
+            node_slices = ((0, graph.num_nodes),)
+
+        global_indices = []
+        expected_action_start = 0
+        for graph_index, (
+                (action_start, action_end),
+                (node_start, node_end),
+        ) in enumerate(zip(action_slices, node_slices)):
+            if (
+                    action_start != expected_action_start
+                    or action_end <= action_start):
+                raise ValueError(
+                    'action_slices must be contiguous and each graph '
+                    f'must contain an action; invalid graph {graph_index}'
+                )
+            expected_action_start = action_end
+            if node_start < 0 or node_end <= node_start:
+                raise ValueError(
+                    f'graph {graph_index} must contain at least one node'
+                )
+
+            flags = graph.node_features[
+                node_start:node_end,
+                global_column,
+            ]
+            local_indices = torch.nonzero(
+                flags > 0.5,
+                as_tuple=False,
+            ).flatten()
+            if local_indices.numel() != 1:
+                raise ValueError(
+                    f'graph {graph_index} must contain exactly one '
+                    'global node selected by is_global_node'
+                )
+            global_indices.append(
+                local_indices[0] + node_start
+            )
+
+        if expected_action_start != graph.action_count:
+            raise ValueError(
+                'action_slices must cover all action nodes exactly once'
+            )
+
+        return (
+            action_slices,
+            torch.stack(global_indices).to(dtype=torch.long),
+        )
+
+    @staticmethod
+    def _read_graph_global_hidden(
+            graph,
+            node_hidden,
+            action_slices,
+            global_node_indices):
+        """读取 global 表示，并把每张图的表示广播到自己的动作。"""
+
+        global_hidden = node_hidden[global_node_indices]
+        action_global_chunks = tuple(
+            global_hidden[graph_index].unsqueeze(0).expand(
+                action_end - action_start,
+                -1,
+            )
+            for graph_index, (action_start, action_end) in enumerate(
+                action_slices
+            )
+        )
+        action_global_hidden = torch.cat(
+            action_global_chunks,
+            dim=0,
+        )
+        if action_global_hidden.shape[0] != graph.action_count:
+            raise ValueError(
+                'action_slices do not match the flattened action count'
+            )
+
+        return (
+            global_hidden,
+            action_global_hidden,
+        )
+
+    @staticmethod
+    def _combine_dueling_values(
+            state_values,
+            advantages,
+            action_slices):
+        """逐图中心化 advantage，禁止 GraphBatch 样本互相泄漏基线。"""
+
+        q_chunks = []
+        for graph_index, (action_start, action_end) in enumerate(
+                action_slices):
+            graph_advantages = advantages[action_start:action_end]
+            if graph_advantages.numel() == 0:
+                raise ValueError(
+                    f'graph {graph_index} has no action advantages'
+                )
+            centered_advantages = (
+                graph_advantages
+                - graph_advantages.mean()
+            )
+            q_chunks.append(
+                state_values[graph_index]
+                + centered_advantages
+            )
+        return torch.cat(q_chunks, dim=0)

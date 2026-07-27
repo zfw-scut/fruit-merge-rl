@@ -37,6 +37,7 @@ from daxigua_rl.graph.tensor import graph_to_tensor
 from .identity import TransitionKey
 from .n_step import NStepTransitionAccumulator
 from .replay_buffer import ReplayBuffer
+from .structural_targets import build_structural_target
 from .tensor_transition import TensorTransition
 
 
@@ -186,7 +187,8 @@ class RolloutStats:
     state_analysis_calls: int = 0
     state_analysis_seconds: float = 0.0
 
-    # 命中上一动作 next_analysis 缓存的 step 数。
+    # step() 复用动作前已缓存 StateAnalysis 的次数。结构图会主动预分析首个状态，
+    # 后续状态通常直接复用上一动作的 next_analysis，因此 V2 正常路径应接近 100%。
     state_analysis_cache_hits: int = 0
 
     # 新生成分析中被标记为 degraded 的数量；truncated 边界通常会计入。
@@ -408,6 +410,7 @@ class RolloutCollector:
             graph_builder,
             replay_buffer,
             model=None,
+            q_value_evaluator=None,
             policy=None,
             seed=None,
             worker_id=0,
@@ -427,6 +430,8 @@ class RolloutCollector:
         - `graph_builder`: 当前预期为 `GraphBuilder`。
         - `replay_buffer`: `ReplayBuffer` 实例。
         - `model`: 可选 Q 网络；当 `epsilon < 1.0` 时必须提供。
+        - `q_value_evaluator`: 可选远程/批量 Q 推理函数。并行 GPU actor 使用它
+          代替 worker-local CPU 模型；输入单个 ``GraphTensor``，返回一维 Q。
         - `policy`: 可选动作策略，默认使用 `EpsilonGreedyPolicy`。
         - `seed`: 默认策略随机种子。
         - `worker_id`: 当前采集器在本次训练 run 内的稳定 worker 编号。
@@ -451,6 +456,13 @@ class RolloutCollector:
         self.graph_builder = graph_builder
         self.replay_buffer = replay_buffer
         self.model = model
+        if q_value_evaluator is not None and not callable(q_value_evaluator):
+            raise TypeError('q_value_evaluator must be callable or None')
+        if model is not None and q_value_evaluator is not None:
+            raise ValueError(
+                'model and q_value_evaluator are mutually exclusive'
+            )
+        self.q_value_evaluator = q_value_evaluator
         self.policy = policy or EpsilonGreedyPolicy(seed=seed)
         self.worker_id = int(worker_id)
         if self.worker_id < 0:
@@ -739,8 +751,13 @@ class RolloutCollector:
             raise ValueError('step_count must be positive')
 
         epsilon = self.policy.normalize_epsilon(epsilon)
-        if self.model is None and epsilon < 1.0:
-            raise ValueError('model is required when epsilon < 1.0')
+        if (
+                self.model is None
+                and self.q_value_evaluator is None
+                and epsilon < 1.0):
+            raise ValueError(
+                'model or q_value_evaluator is required when epsilon < 1.0'
+            )
 
         if not self.has_state:
             self.reset()
@@ -871,8 +888,20 @@ class RolloutCollector:
                 self.reset()
                 continue
 
+            # 结构增强图与 Reward V2 必须消费同一个动作前 StateAnalysis。身份先于
+            # 构图确定，环境会缓存这份分析，随后的 step() 直接复用而不会重复计算。
+            transition_key = self.next_transition_key
+            current_analysis = self.env.prepare_state_analysis(
+                transition_key
+            )
             if self._current_graph is None:
-                graph, build_seconds, convert_seconds = self._build_graph_tensor(self._obs, candidates)
+                graph, build_seconds, convert_seconds = (
+                    self._build_graph_tensor(
+                        self._obs,
+                        candidates,
+                        current_analysis,
+                    )
+                )
                 graph_build_seconds += build_seconds
                 tensor_convert_seconds += convert_seconds
                 graph_cache_misses += 1
@@ -894,9 +923,6 @@ class RolloutCollector:
                 epsilon=epsilon,
             )
             action_select_seconds += time.perf_counter() - action_select_start
-
-            # 身份必须在动作执行前生成，后续状态分析、谱系和事件都绑定到同一键。
-            transition_key = self.next_transition_key
 
             counterfactual_snapshot = None
             if self.counterfactual_proposal_builder is not None:
@@ -1239,6 +1265,7 @@ class RolloutCollector:
                 next_graph, build_seconds, convert_seconds = self._build_graph_tensor(
                     next_obs,
                     next_info['action_candidates'],
+                    next_info['next_state_analysis'],
                 )
                 graph_build_seconds += build_seconds
                 tensor_convert_seconds += convert_seconds
@@ -1250,6 +1277,14 @@ class RolloutCollector:
                 next_graph=next_graph,
                 terminated=terminated,
                 truncated=truncated,
+                structural_target=build_structural_target(
+                    next_info['previous_state_analysis'],
+                    next_info.get(
+                        'post_action_state_analysis',
+                        next_info['next_state_analysis'],
+                    ),
+                    physics_result=next_info['physics_result'],
+                ),
             )
             replay_transitions_emitted += (
                 self._emit_n_step_transitions(
@@ -1459,11 +1494,23 @@ class RolloutCollector:
             self.replay_buffer.extend(transitions)
         return len(transitions)
 
-    def _build_graph_tensor(self, obs, candidates):
-        """构建当前状态图并转成 replay 长期保存用的 CPU tensor。"""
+    def _build_graph_tensor(
+            self,
+            obs,
+            candidates,
+            state_analysis=None):
+        """构建结构增强状态图并转成 replay 长期保存用的 CPU tensor。
+
+        完整 ``StateAnalysis`` 仍然只存在于 worker；GraphBuilder 只把固定维度
+        标量和少量 motif 关系压入 ``GraphTensor``，不会把分析对象塞进 replay。
+        """
 
         build_start = time.perf_counter()
-        graph_data = self.graph_builder.build(obs, candidates)
+        graph_data = self.graph_builder.build(
+            obs,
+            candidates,
+            state_analysis=state_analysis,
+        )
         build_seconds = time.perf_counter() - build_start
 
         convert_start = time.perf_counter()
@@ -1556,6 +1603,12 @@ class RolloutCollector:
 
     def _evaluate_q_values(self, graph):
         """使用当前模型计算一张图的动作 Q 值。"""
+
+        if self.q_value_evaluator is not None:
+            q_values = self.q_value_evaluator(graph)
+            if not isinstance(q_values, torch.Tensor):
+                q_values = torch.as_tensor(q_values, dtype=torch.float32)
+            return q_values.detach().cpu()
 
         if self.model is None:
             raise ValueError('model is required for greedy action selection')

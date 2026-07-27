@@ -3,7 +3,7 @@
 extends = "train_dqn_fast30_parallel.toml"
 
 [runtime]
-run_dir = "runs/dqn_causal_smoke_5k"
+run_dir = "runs/dqn_structure_v2_smoke_5k"
 
 [training]
 total_updates = 5000

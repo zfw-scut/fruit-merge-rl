@@ -357,7 +357,14 @@ def _graph_builder(payload):
 def _q_values(model, graph_builder, env):
     state = env.game.get_state()
     candidates = env.action_candidates()
-    graph = graph_builder.build(state, candidates)
+    # 反事实分支也必须使用与正式 rollout 相同的结构图。这里复用环境缓存的
+    # 当前边界分析；首次 bootstrap 边界才会做一次静态分析，不增加动作枚举。
+    state_analysis = env.prepare_state_analysis()
+    graph = graph_builder.build(
+        state,
+        candidates,
+        state_analysis=state_analysis,
+    )
     with torch.inference_mode():
         q_values = model(graph)
     if (

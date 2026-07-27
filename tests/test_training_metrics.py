@@ -237,6 +237,11 @@ class TrainingMetricsTest(unittest.TestCase):
             weighted_rule_rank_loss=0.075,
             counterfactual_loss=0.25,
             weighted_counterfactual_loss=0.025,
+            structural_loss=0.2,
+            weighted_structural_loss=0.03,
+            structural_valid_count=24,
+            structural_sample_count=6,
+            structural_mean_abs_error=0.35,
             causal_update_applied=True,
             causal_batch_size=6,
             rule_batch_size=4,
@@ -321,11 +326,28 @@ class TrainingMetricsTest(unittest.TestCase):
                     numeric_jitter_max_angular_velocity_error=0.0025,
                 ),
             ),
+            actor_stats={
+                'requests': 40,
+                'batches': 5,
+                'mean_batch_size': 8.0,
+                'max_batch': 12,
+                'seconds': 0.125,
+            },
         )
 
         self.assertEqual(row['td_loss'], 0.8)
         self.assertEqual(row['rule_rank_loss'], 0.5)
         self.assertEqual(row['counterfactual_loss'], 0.25)
+        self.assertEqual(row['structural_loss'], 0.2)
+        self.assertEqual(row['weighted_structural_loss'], 0.03)
+        self.assertEqual(row['structural_valid_count'], 24)
+        self.assertEqual(row['structural_sample_count'], 6)
+        self.assertEqual(row['structural_mean_abs_error'], 0.35)
+        self.assertEqual(row['actor_inference_requests'], 40)
+        self.assertEqual(row['actor_inference_batches'], 5)
+        self.assertEqual(row['actor_inference_mean_batch_size'], 8.0)
+        self.assertEqual(row['actor_inference_max_batch'], 12)
+        self.assertEqual(row['actor_inference_seconds'], 0.125)
         self.assertEqual(row['causal_batch_size'], 6)
         self.assertEqual(row['collect_replay_transitions_emitted'], 3)
         self.assertEqual(row['collect_n_step_pending_count'], 2)
@@ -634,6 +656,35 @@ class TrainingMetricsTest(unittest.TestCase):
         with self.assertRaisesRegex(
                 ValueError,
                 'full state attribution requires'):
+            validate_args(args)
+
+    def test_central_actor_and_structural_cli_validation(self):
+        args = parse_args((
+            '--centralized-actor-inference',
+            '--num-envs',
+            '1',
+        ))
+        with self.assertRaisesRegex(
+                ValueError,
+                'centralized-actor-inference requires'):
+            validate_args(args)
+
+        args = parse_args((
+            '--centralized-actor-inference',
+            '--num-envs',
+            '2',
+            '--actor-batch-wait-ms',
+            '-1',
+        ))
+        with self.assertRaisesRegex(
+                ValueError,
+                'actor-batch-wait-ms'):
+            validate_args(args)
+
+        args = parse_args(('--lambda-structural', '-0.1'))
+        with self.assertRaisesRegex(
+                ValueError,
+                'lambda-structural'):
             validate_args(args)
 
     def test_toml_config_loads_defaults_and_cli_can_override(self):

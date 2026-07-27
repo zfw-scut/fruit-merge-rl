@@ -23,7 +23,12 @@ from collections import deque
 from pathlib import Path
 
 from .checkpointing import atomic_torch_save
+from .structural_targets import StructuralTarget
 from .tensor_transition import TensorTransition
+
+
+_REPLAY_SEGMENT_VERSION = 3
+_SUPPORTED_REPLAY_SEGMENT_VERSIONS = frozenset((1, 2, 3))
 
 
 class ReplayBuffer:
@@ -580,6 +585,11 @@ class ReplayBuffer:
             return graph_indices[graph_key]
 
         for transition in transitions:
+            structural_payload = (
+                None
+                if transition.structural_target is None
+                else transition.structural_target.to_half_bytes()
+            )
             records.append((
                 add_graph(transition.graph),
                 int(transition.action_offset),
@@ -588,12 +598,13 @@ class ReplayBuffer:
                 bool(transition.terminated),
                 bool(transition.truncated),
                 int(transition.bootstrap_steps),
+                structural_payload,
             ))
 
         return {
-            # version 2 新增 bootstrap_steps。加载器仍接受 version 1，
-            # 并把旧单步经验显式还原为 bootstrap_steps=1。
-            'version': 2,
+            # v2 新增 bootstrap_steps；v3 新增可选的 14-byte
+            # StructuralTarget payload。加载器继续兼容 v1/v2。
+            'version': _REPLAY_SEGMENT_VERSION,
             'graphs': tuple(graphs),
             'records': tuple(records),
         }
@@ -612,19 +623,50 @@ class ReplayBuffer:
         import torch
 
         payload = torch.load(segment['path'], map_location='cpu', weights_only=False)
-        version = int(payload.get('version', 1))
-        if version not in {1, 2}:
+        if not isinstance(payload, dict):
+            raise ValueError('replay segment payload must be a mapping')
+        raw_version = payload.get('version', 1)
+        if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+            raise ValueError(
+                'replay segment version must be an integer'
+            )
+        version = raw_version
+        if version not in _SUPPORTED_REPLAY_SEGMENT_VERSIONS:
             raise ValueError(
                 f'unsupported replay segment version: {version}'
             )
-        graphs = payload['graphs']
+        try:
+            graphs = payload['graphs']
+            records = payload['records']
+        except KeyError as exc:
+            raise ValueError(
+                f'replay segment is missing field: {exc.args[0]}'
+            ) from exc
+        if not isinstance(graphs, (list, tuple)):
+            raise ValueError('replay segment graphs must be a sequence')
+        if not isinstance(records, (list, tuple)):
+            raise ValueError('replay segment records must be a sequence')
+
+        expected_record_length = {
+            1: 6,
+            2: 7,
+            3: 8,
+        }[version]
         transitions = []
-        for record in payload['records']:
+        for record_offset, record in enumerate(records):
+            if not isinstance(record, (list, tuple)):
+                raise ValueError(
+                    'replay segment record '
+                    f'{record_offset} must be a sequence'
+                )
+            if len(record) != expected_record_length:
+                raise ValueError(
+                    f'version {version} replay record must contain '
+                    f'{expected_record_length} fields '
+                    f'(record {record_offset})'
+                )
+
             if version == 1:
-                if len(record) != 6:
-                    raise ValueError(
-                        'version 1 replay record must contain 6 fields'
-                    )
                 (
                     graph_index,
                     action_offset,
@@ -634,11 +676,8 @@ class ReplayBuffer:
                     truncated,
                 ) = record
                 bootstrap_steps = 1
-            else:
-                if len(record) != 7:
-                    raise ValueError(
-                        'version 2 replay record must contain 7 fields'
-                    )
+                structural_target = None
+            elif version == 2:
                 (
                     graph_index,
                     action_offset,
@@ -648,16 +687,67 @@ class ReplayBuffer:
                     truncated,
                     bootstrap_steps,
                 ) = record
-            next_graph = None if next_graph_index is None else graphs[next_graph_index]
-            transitions.append(TensorTransition(
-                graph=graphs[graph_index],
-                action_offset=action_offset,
-                reward=reward,
-                next_graph=next_graph,
-                terminated=terminated,
-                truncated=truncated,
-                bootstrap_steps=bootstrap_steps,
-            ))
+                structural_target = None
+            else:
+                (
+                    graph_index,
+                    action_offset,
+                    reward,
+                    next_graph_index,
+                    terminated,
+                    truncated,
+                    bootstrap_steps,
+                    structural_payload,
+                ) = record
+                if structural_payload is None:
+                    structural_target = None
+                else:
+                    try:
+                        structural_target = (
+                            StructuralTarget.from_half_bytes(
+                                structural_payload
+                            )
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            'version 3 replay record '
+                            f'{record_offset} has invalid structural '
+                            f'target payload: {exc}'
+                        ) from exc
+
+            def load_graph(graph_index, *, optional):
+                if optional and graph_index is None:
+                    return None
+                if (
+                        isinstance(graph_index, bool)
+                        or not isinstance(graph_index, int)
+                        or graph_index < 0
+                        or graph_index >= len(graphs)):
+                    raise ValueError(
+                        'replay segment record '
+                        f'{record_offset} contains an invalid graph index'
+                    )
+                return graphs[graph_index]
+
+            graph = load_graph(graph_index, optional=False)
+            next_graph = load_graph(next_graph_index, optional=True)
+            try:
+                transition = TensorTransition(
+                    graph=graph,
+                    action_offset=action_offset,
+                    reward=reward,
+                    next_graph=next_graph,
+                    terminated=terminated,
+                    truncated=truncated,
+                    bootstrap_steps=bootstrap_steps,
+                    structural_target=structural_target,
+                )
+            except (IndexError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f'replay segment record {record_offset} is invalid: '
+                    f'{exc}'
+                ) from exc
+            transitions.append(transition)
         return transitions
 
     def _sample_cold(self, count):

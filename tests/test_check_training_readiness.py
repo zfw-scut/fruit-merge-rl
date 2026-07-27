@@ -41,9 +41,19 @@ METRIC_FIELDS = (
     'update_step',
     'env_steps',
     'td_loss',
+    'structural_loss',
+    'weighted_structural_loss',
+    'structural_valid_count',
+    'structural_sample_count',
+    'structural_mean_abs_error',
     'mean_q',
     'mean_target',
     'mean_abs_td_error',
+    'actor_inference_requests',
+    'actor_inference_batches',
+    'actor_inference_mean_batch_size',
+    'actor_inference_max_batch',
+    'actor_inference_seconds',
     'causal_update_applied',
     'rule_batch_size',
     'counterfactual_batch_size',
@@ -208,6 +218,11 @@ class SyntheticTrainingRun:
             / 'plots'
             / 'reward_breakdown_curves.png'
         ).write_bytes(b'png-reward')
+        (
+            self.run_dir
+            / 'plots'
+            / 'structure_learning_curves.png'
+        ).write_bytes(b'png-structure')
 
     def _write_json(self, relative_path, payload):
         (self.run_dir / relative_path).write_text(
@@ -297,9 +312,33 @@ class SyntheticTrainingRun:
                     'update_step': update,
                     'env_steps': env_step,
                     'td_loss': 1.0 / (index + 1),
+                    'structural_loss': (
+                        0.0 if index == 0 else 0.3 / index
+                    ),
+                    'weighted_structural_loss': (
+                        0.0 if index == 0 else 0.045 / index
+                    ),
+                    'structural_valid_count': (
+                        0 if index == 0 else 12 + 6 * index
+                    ),
+                    'structural_sample_count': (
+                        0 if index == 0 else 4
+                    ),
+                    'structural_mean_abs_error': (
+                        0.0 if index == 0 else 0.4 / index
+                    ),
                     'mean_q': 0.2 + index / 10,
                     'mean_target': 0.3 + index / 10,
                     'mean_abs_td_error': 0.1,
+                    'actor_inference_requests': (1, 4, 8)[index],
+                    'actor_inference_batches': (1, 3, 5)[index],
+                    'actor_inference_mean_batch_size': (
+                        (1, 4, 8)[index] / (1, 3, 5)[index]
+                    ),
+                    'actor_inference_max_batch': (1, 2, 2)[index],
+                    'actor_inference_seconds': (
+                        0.01 * (index + 1)
+                    ),
                     'causal_update_applied': int(index > 0),
                     'rule_batch_size': 4 if index > 0 else 0,
                     'counterfactual_batch_size': (
@@ -841,7 +880,7 @@ class CheckTrainingReadinessTest(unittest.TestCase):
         )
 
         self.assertTrue(payload['ready'])
-        self.assertEqual(payload['schema_version'], 2)
+        self.assertEqual(payload['schema_version'], 3)
         self.assertEqual(payload['exit_code'], 0)
         self.assertGreater(
             payload['attribution_shutdown']['cancelled_pending_count'],
@@ -858,6 +897,204 @@ class CheckTrainingReadinessTest(unittest.TestCase):
             payload['shapley']['interpretation'],
         )
         self.assertEqual(payload['warnings'], [])
+        self.assertTrue(
+            self._check(
+                payload,
+                'structural_supervision_targets_reached_optimizer',
+            )['passed']
+        )
+        self.assertTrue(
+            self._check(
+                payload,
+                'centralized_actor_inference_activity',
+            )['passed']
+        )
+
+    def test_structure_learning_plot_is_required_artifact(self):
+        (
+            self.fixture.run_dir
+            / 'plots'
+            / 'structure_learning_curves.png'
+        ).unlink()
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        artifact_gate = self._check(payload, 'required_artifacts')
+        self.assertIn(
+            'structure_learning_curves',
+            artifact_gate['details']['missing_or_empty'],
+        )
+
+    def test_structural_supervision_requires_valid_nonzero_optimizer_term(self):
+        rows = self.fixture.read_metrics()
+        for row in rows:
+            row['structural_loss'] = '0'
+            row['weighted_structural_loss'] = '0'
+            row['structural_valid_count'] = '0'
+            row['structural_sample_count'] = '0'
+            row['structural_mean_abs_error'] = '0'
+        self.fixture.write_metrics(rows)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        self.assertIn(
+            'structural_supervision_targets_reached_optimizer',
+            payload['required_failures'],
+        )
+        gate = self._check(
+            payload,
+            'structural_supervision_targets_reached_optimizer',
+        )
+        self.assertEqual(
+            gate['details']['optimizer_evidence_rows'],
+            [],
+        )
+
+    def test_structural_supervision_rejects_sixth_dimension_only(self):
+        rows = self.fixture.read_metrics()
+        for row in rows:
+            row['structural_loss'] = '0.2'
+            row['weighted_structural_loss'] = '0.03'
+            row['structural_valid_count'] = '4'
+            row['structural_sample_count'] = '4'
+            row['structural_mean_abs_error'] = '0.3'
+        self.fixture.write_metrics(rows)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        gate = self._check(
+            payload,
+            'structural_supervision_targets_reached_optimizer',
+        )
+        self.assertEqual(
+            gate['details']['optimizer_evidence_rows'],
+            [],
+        )
+        self.assertEqual(
+            gate['details'][
+                'minimum_mean_valid_dimensions_for_evidence'
+            ],
+            5.0,
+        )
+
+    def test_v2_structural_and_actor_metrics_are_required_schema(self):
+        rows = self.fixture.read_metrics()
+        omitted = {
+            'structural_valid_count',
+            'actor_inference_requests',
+        }
+        fields = tuple(
+            field
+            for field in METRIC_FIELDS
+            if field not in omitted
+        )
+        with (self.fixture.run_dir / 'metrics.csv').open(
+                'w',
+                newline='',
+                encoding='utf-8') as file_obj:
+            writer = csv.DictWriter(
+                file_obj,
+                fieldnames=fields,
+                extrasaction='ignore',
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        schema = self._check(
+            payload,
+            'metrics_schema_and_finite_values',
+        )
+        self.assertFalse(schema['passed'])
+        self.assertEqual(
+            set(schema['details']['missing_fields']),
+            omitted,
+        )
+
+    def test_structural_supervision_rejects_invalid_count_and_weighting(self):
+        rows = self.fixture.read_metrics()
+        rows[-1]['structural_valid_count'] = '25'
+        rows[-1]['structural_sample_count'] = '4'
+        rows[-1]['weighted_structural_loss'] = '0.5'
+        self.fixture.write_metrics(rows)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        gate = self._check(
+            payload,
+            'structural_supervision_targets_reached_optimizer',
+        )
+        reasons = gate['details']['invalid_rows'][0]['reasons']
+        self.assertIn(
+            'structural_valid_count_exceeds_six_per_sample',
+            reasons,
+        )
+        self.assertIn(
+            'weighted_structural_loss_lambda_mismatch',
+            reasons,
+        )
+
+    def test_centralized_actor_requires_real_consistent_batches(self):
+        rows = self.fixture.read_metrics()
+        for row in rows:
+            row['actor_inference_requests'] = '0'
+            row['actor_inference_batches'] = '0'
+            row['actor_inference_mean_batch_size'] = '0'
+            row['actor_inference_max_batch'] = '0'
+            row['actor_inference_seconds'] = '0'
+        self.fixture.write_metrics(rows)
+
+        inactive = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+        self.assertFalse(inactive['ready'])
+        self.assertIn(
+            'centralized_actor_inference_activity',
+            inactive['required_failures'],
+        )
+
+        rows = self.fixture.read_metrics()
+        rows[-1]['actor_inference_requests'] = '8'
+        rows[-1]['actor_inference_batches'] = '9'
+        rows[-1]['actor_inference_mean_batch_size'] = '3'
+        rows[-1]['actor_inference_max_batch'] = '17'
+        rows[-1]['actor_inference_seconds'] = '0.1'
+        self.fixture.write_metrics(rows)
+
+        inconsistent = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+        gate = self._check(
+            inconsistent,
+            'centralized_actor_inference_activity',
+        )
+        self.assertFalse(gate['passed'])
+        reasons = gate['details']['invalid_rows'][-1]['reasons']
+        self.assertIn('actor_batches_exceed_requests', reasons)
+        self.assertIn('actor_mean_batch_size_mismatch', reasons)
+        self.assertIn('actor_max_batch_exceeds_config', reasons)
 
     def test_metric_corruption_and_budget_violations_fail_gate(self):
         rows = self.fixture.read_metrics()

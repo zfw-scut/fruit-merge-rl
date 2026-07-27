@@ -6,6 +6,8 @@
 - 无渲染物理环境、GNN-Q 模型和并行 rollout；
 - 面向首轮大规模训练的 Reward V2、Double DQN + 3-step return；
 - 完整状态分析、历史贡献归因、独立 `CausalReplayBuffer`、预算反事实和极稀疏局部 Shapley。
+- 显式支撑/遮挡/可达关系、连锁 motif、关系感知 dueling GNN、六维结构辅助监督和
+  集中式 GPU actor。
 
 游戏本体位于 `daxigua`，训练代码位于 `daxigua_rl`；前者不得反向依赖后者。旧实验代码已经移除，当前 RL 主链路是重新设计后的实现。
 
@@ -39,17 +41,29 @@ python Main.py
 
 ## 训练准备
 
-先安装游戏依赖，再从与目标 CUDA 驱动匹配的 PyTorch wheel 源安装训练依赖：
+当前正式服务器是 RTX 5090，训练环境固定为 PyTorch 2.12.1 + CUDA runtime
+13.0。依赖版本记录在 `requirements-training.txt`，CUDA wheel 从官方 cu130 源
+安装：
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pip install -r requirements-training.txt
+python -m pip install matplotlib==3.11.1
+python -m pip install torch==2.12.1 \
+  --index-url https://download.pytorch.org/whl/cu130
+python -m pip check
 ```
 
-大规模训练前应先运行门禁。它会验证正式配置、CUDA 前后向、固定 Pymunk/Chipmunk 版本、`EngineSnapshot` 原动作重演、完整因果 optimizer step、局部 Shapley 物理链路、磁盘与 CPU 余量，但不会启动训练：
+大规模训练前应先运行门禁。它会验证正式结构感知配置、CUDA 前后向、六维结构
+optimizer step、固定 Pymunk/Chipmunk 版本、`EngineSnapshot` 原动作重演、完整因果
+optimizer step、局部 Shapley 物理链路、磁盘与 CPU 余量，并真实执行一次 16-worker
+集中式 CUDA actor 的同步/异步采集与关闭链路，但不会启动持续训练：
 
 ```bash
-python tools/preflight_training.py --config configs/train_dqn_causal_500k.toml
+python tools/preflight_training.py \
+  --config configs/train_dqn_causal_500k.toml \
+  --min-free-gb 80 \
+  --min-memory-gb 64 \
+  --min-available-memory-gb 16
 ```
 
 当前提供三套同源配置：
@@ -59,6 +73,13 @@ python tools/preflight_training.py --config configs/train_dqn_causal_500k.toml
   update 0 另起独立 25000 次更新校准是可比性首选；也可连续延长，但会保持
   checkpoint 冻结的 epsilon horizon，并必须单独标记；
 - `configs/train_dqn_causal_500k.toml`：第一次 500000 次更新正式训练。
+
+当前三套配置属于结构感知 V2：正式基线采用 H256/L4、batch 128、16 个 rollout
+worker、6 个反事实物理 worker 和集中式 GPU actor，并以
+`lambda_structural=0.15` 训练六维一步结构结果。旧 H128/L3 checkpoint、旧 hot/cold
+replay 和旧 causal replay 不能续训新架构；三个 V2 阶段都必须使用空目录从 update 0
+开始。完整设计与兼容表见
+`docs/rl/STRUCTURE_AWARE_GNN_V2.md`。
 
 完整安装、阶段门禁、监控、停止阈值和恢复流程见
 `docs/rl/FIRST_500K_RUNBOOK.md`；当前阶段证据只以
@@ -71,7 +92,10 @@ PYTHONPATH=src python -u -m daxigua_rl.scripts.train_dqn \
   --config configs/train_dqn_causal_smoke_5k.toml
 ```
 
-从版本化 checkpoint 恢复时使用 `--resume`。正式 hybrid replay 采用明确记录的 hot-resume：恢复模型、target、optimizer、更新计数、RNG、因果 replay 和主 replay 热层，不宣称恢复已经省略的冷层。
+从版本化 checkpoint 恢复时使用 `--resume`，但只允许恢复同一 V2 run 的可信
+checkpoint。正式 hybrid replay 采用明确记录的 hot-resume：恢复模型、target、
+optimizer、更新计数、RNG、因果 replay 和主 replay 热层，不宣称恢复已经省略的
+冷层。
 
 ## 同步云端基础训练数据
 
@@ -85,7 +109,7 @@ python tools/sync_cloud_training_artifacts.py \
   --require-complete
 ```
 
-工具只同步标准配置/指标/归因 JSON 白名单和两张 `plots/*.png`，校验后写入
+工具只同步标准配置/指标/归因 JSON 白名单和三张 `plots/*.png`，校验后写入
 `sync_manifest.json`；认证由 OpenSSH 的密钥、agent 或密码提示负责。训练中途同步时
 去掉 `--require-complete`。完整说明见
 `docs/rl/FIRST_500K_RUNBOOK.md` 的“把基础分析数据同步回本地”。
@@ -97,7 +121,8 @@ python tools/sync_cloud_training_artifacts.py \
 - `src/daxigua/app.py`: 游戏应用入口和当前表现层实现。
 - `src/daxigua/core/`: 游戏核心逻辑，负责物理世界、边界、碰撞合成、计分和水果定义。
 - `src/daxigua/core/engine.py`: 无渲染游戏引擎和可校验、可恢复的 `EngineSnapshot`。
-- `src/daxigua_rl/`: 环境、图模型、Reward V2、因果归因、反事实和训练主链路。
+- `src/daxigua_rl/`: 环境、结构关系图、关系感知 GNN、Reward V2、因果归因、
+  反事实和训练主链路。
 - `requirements-training.txt`: 训练侧 PyTorch 和绘图依赖版本。
 - `tools/preflight_training.py`: 第一次大规模训练前门禁。
 - `tools/sync_cloud_training_artifacts.py`: 只读同步云端轻量指标和曲线。

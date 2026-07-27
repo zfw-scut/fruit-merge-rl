@@ -109,6 +109,11 @@ METRIC_FIELDS = (
     'weighted_rule_rank_loss',
     'counterfactual_loss',
     'weighted_counterfactual_loss',
+    'structural_loss',
+    'weighted_structural_loss',
+    'structural_valid_count',
+    'structural_sample_count',
+    'structural_mean_abs_error',
     'causal_update_applied',
     'causal_batch_size',
     'rule_batch_size',
@@ -171,6 +176,11 @@ METRIC_FIELDS = (
     'collect_state_analysis_cache_hit_rate',
     'collect_state_analysis_degraded_count',
     'collect_state_analysis_degraded_rate',
+    'actor_inference_requests',
+    'actor_inference_batches',
+    'actor_inference_mean_batch_size',
+    'actor_inference_max_batch',
+    'actor_inference_seconds',
     'collect_attribution_tracker_calls',
     'collect_attribution_tracker_seconds',
     'collect_mean_attribution_tracker_seconds',
@@ -395,6 +405,14 @@ def build_arg_parser():
         help='反事实与局部 Shapley 差值 loss 权重。',
     )
     parser.add_argument(
+        '--lambda-structural',
+        type=float,
+        default=0.15,
+        help=(
+            '动作后六维结构辅助预测 loss 权重；该监督不修改环境 reward。'
+        ),
+    )
+    parser.add_argument(
         '--counterfactual-return-scale',
         type=float,
         default=merge_utility(7),
@@ -488,6 +506,32 @@ def build_arg_parser():
         action=argparse.BooleanOptionalAction,
         default=False,
         help='并行采样时提前提交下一批 rollout，让采样和训练尽量重叠。',
+    )
+    parser.add_argument(
+        '--centralized-actor-inference',
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            '把并行 worker 的 greedy Q 请求汇总到主进程模型设备做微批推理。'
+        ),
+    )
+    parser.add_argument(
+        '--actor-batch-size',
+        type=int,
+        default=16,
+        help='集中式 actor 单次 GPU 推理最多聚合多少张状态图。',
+    )
+    parser.add_argument(
+        '--actor-batch-wait-ms',
+        type=float,
+        default=2.0,
+        help='集中式 actor 等待同批其他 worker 请求的最长毫秒数。',
+    )
+    parser.add_argument(
+        '--actor-request-timeout-seconds',
+        type=float,
+        default=120.0,
+        help='worker 等待集中式 actor 响应的超时时间。',
     )
 
     # Reward V2。gamma 直接复用上面的 DQN gamma，保证 potential shaping 和
@@ -613,6 +657,7 @@ def validate_args(args):
         'space_iterations',
         'num_envs',
         'worker_sync_interval',
+        'actor_batch_size',
         'log_interval',
         'eval_episodes',
         'eval_max_steps',
@@ -678,7 +723,26 @@ def validate_args(args):
         raise ValueError('--replay-cold-sample-ratio must be in [0, 1]')
     if args.async_rollout and args.num_envs <= 1:
         raise ValueError('--async-rollout requires --num-envs > 1')
-    for field_name in ('lambda_rule', 'lambda_cf'):
+    if args.centralized_actor_inference and args.num_envs <= 1:
+        raise ValueError(
+            '--centralized-actor-inference requires --num-envs > 1'
+        )
+    if (
+            not math.isfinite(args.actor_batch_wait_ms)
+            or args.actor_batch_wait_ms < 0.0):
+        raise ValueError(
+            '--actor-batch-wait-ms must be finite and >= 0'
+        )
+    if (
+            not math.isfinite(args.actor_request_timeout_seconds)
+            or args.actor_request_timeout_seconds <= 0.0):
+        raise ValueError(
+            '--actor-request-timeout-seconds must be finite and positive'
+        )
+    for field_name in (
+            'lambda_rule',
+            'lambda_cf',
+            'lambda_structural'):
         value = float(getattr(args, field_name))
         if not math.isfinite(value) or value < 0.0:
             raise ValueError(
@@ -935,7 +999,8 @@ def build_collector(
         replay_buffer,
         online_model,
         causal_replay_buffer=None,
-        episode_id_start=0):
+        episode_id_start=0,
+        policy_version=None):
     """根据 `--num-envs` 创建单进程或多进程 rollout collector。"""
 
     if args.num_envs <= 1:
@@ -947,6 +1012,7 @@ def build_collector(
             seed=args.seed + 2,
             n_step=args.n_step,
             gamma=args.gamma,
+            policy_version=policy_version,
             causal_replay_buffer=causal_replay_buffer,
             counterfactual_enabled=bool(getattr(
                 args,
@@ -975,6 +1041,7 @@ def build_collector(
         seed=args.seed + 2,
         n_step=args.n_step,
         gamma=args.gamma,
+        policy_version=policy_version,
         causal_replay_buffer=causal_replay_buffer,
         counterfactual_enabled=bool(getattr(
             args,
@@ -992,6 +1059,26 @@ def build_collector(
             1.0,
         )),
         episode_id_start=episode_id_start,
+        centralized_actor_inference=bool(getattr(
+            args,
+            'centralized_actor_inference',
+            False,
+        )),
+        actor_batch_size=int(getattr(
+            args,
+            'actor_batch_size',
+            16,
+        )),
+        actor_batch_wait_ms=float(getattr(
+            args,
+            'actor_batch_wait_ms',
+            2.0,
+        )),
+        actor_request_timeout_seconds=float(getattr(
+            args,
+            'actor_request_timeout_seconds',
+            120.0,
+        )),
     )
 
 
@@ -2630,16 +2717,23 @@ def evaluate_policy(model, args, device, seed_offset=10_000):
                 if not candidates:
                     break
 
-                graph = graph_builder.build(obs, candidates)
-                with torch.no_grad():
-                    q_values = model(graph).detach().cpu()
-                action_offset = int(torch.argmax(q_values).item())
-
                 transition_key = TransitionKey(
                     worker_id=int(getattr(args, 'num_envs', 1)),
                     episode_id=episode_index,
                     step_index=episode_length,
                 )
+                state_analysis = env.prepare_state_analysis(
+                    transition_key
+                )
+                graph = graph_builder.build(
+                    obs,
+                    candidates,
+                    state_analysis=state_analysis,
+                )
+                with torch.no_grad():
+                    q_values = model(graph).detach().cpu()
+                action_offset = int(torch.argmax(q_values).item())
+
                 obs, reward, terminated, truncated, info = env.step(
                     action_offset,
                     transition_key=transition_key,
@@ -2717,6 +2811,7 @@ def maybe_plot_metrics(run_dir, rows, episode_rows=None):
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     _maybe_plot_reward_breakdown(run_dir, rows, x, plt)
+    _maybe_plot_structure_learning(run_dir, rows, x, plt)
     return True
 
 
@@ -2810,6 +2905,93 @@ def _maybe_plot_reward_breakdown(run_dir, rows, x, plt):
             axis.legend(loc='best')
 
     output_path = run_dir / 'plots' / 'reward_breakdown_curves.png'
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    return True
+
+
+def _maybe_plot_structure_learning(run_dir, rows, x, plt):
+    """生成结构辅助监督与集中 actor 的独立诊断曲线。"""
+
+    structure_fields = (
+        'structural_loss',
+        'weighted_structural_loss',
+        'structural_valid_count',
+        'structural_sample_count',
+        'structural_mean_abs_error',
+        'actor_inference_mean_batch_size',
+        'actor_inference_max_batch',
+    )
+    if not _has_any_points(rows, structure_fields):
+        return False
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(12, 8),
+        constrained_layout=True,
+    )
+    axes = axes.ravel()
+    _plot_one(
+        axes[0],
+        x,
+        _series(rows, 'structural_loss'),
+        'raw',
+        'Structural auxiliary loss',
+    )
+    _plot_one(
+        axes[0],
+        x,
+        _series(rows, 'weighted_structural_loss'),
+        'weighted',
+        'Structural auxiliary loss',
+    )
+    _plot_one(
+        axes[1],
+        x,
+        _series(rows, 'structural_mean_abs_error'),
+        'valid dimensions',
+        'Structural mean absolute error',
+    )
+    _plot_one(
+        axes[2],
+        x,
+        _series(rows, 'structural_valid_count'),
+        'valid dimensions',
+        'Structural label coverage per update',
+    )
+    _plot_one(
+        axes[2],
+        x,
+        _series(rows, 'structural_sample_count'),
+        'labeled samples',
+        'Structural label coverage per update',
+    )
+    _plot_one(
+        axes[3],
+        x,
+        _series(rows, 'actor_inference_mean_batch_size'),
+        'mean batch',
+        'Central actor micro-batch size',
+    )
+    _plot_one(
+        axes[3],
+        x,
+        _series(rows, 'actor_inference_max_batch'),
+        'max batch',
+        'Central actor micro-batch size',
+    )
+    for axis in axes:
+        axis.set_xlabel('update')
+        axis.grid(True, alpha=0.25)
+        if axis.get_legend_handles_labels()[0]:
+            axis.legend(loc='best')
+
+    output_path = (
+        run_dir
+        / 'plots'
+        / 'structure_learning_curves.png'
+    )
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
     return True
@@ -2938,6 +3120,26 @@ def print_log(row):
             f"{int(row['causal_replay_negative_count'])}/"
             f"{int(row['causal_replay_counterfactual_count'])}]"
         )
+    if int(row.get('structural_valid_count', 0) or 0) > 0:
+        parts.append(
+            'structure='
+            f"{float(row['structural_loss']):.4f}/"
+            f"{float(row['structural_mean_abs_error']):.4f}"
+            '(loss/mae)'
+        )
+        parts.append(
+            'structure_labels='
+            f"{int(row['structural_sample_count'])}/"
+            f"{int(row['structural_valid_count'])}"
+            '(samples/dims)'
+        )
+    if int(row.get('actor_inference_batches', 0) or 0) > 0:
+        parts.append(
+            'actor_batch='
+            f"{float(row['actor_inference_mean_batch_size']):.2f}/"
+            f"{int(row['actor_inference_max_batch'])}"
+            '(mean/max)'
+        )
 
     if row.get('collect_mean_episode_score') not in ('', None):
         parts.append(f"train_score={float(row['collect_mean_episode_score']):.1f}")
@@ -3033,6 +3235,15 @@ def should_sync_parallel_workers_after_train(update_step, worker_sync_interval):
     return update_step % int(worker_sync_interval) == 0
 
 
+def online_policy_version(completed_update_step):
+    """返回与 online 权重唯一对应、跨恢复过程稳定的策略版本。"""
+
+    completed_update_step = int(completed_update_step)
+    if completed_update_step < 0:
+        raise ValueError('completed_update_step must be non-negative')
+    return f'online-update-{completed_update_step:08d}'
+
+
 def maybe_print_progress(
         args,
         last_progress_at,
@@ -3102,7 +3313,8 @@ def build_metric_row(
         replay_stats=None,
         causal_replay_stats=None,
         counterfactual_stats=None,
-        shapley_stats=None):
+        shapley_stats=None,
+        actor_stats=None):
     """把训练、采集、评估统计合成一行 CSV 指标。"""
 
     elapsed = max(1e-9, timing['elapsed'])
@@ -3125,6 +3337,7 @@ def build_metric_row(
     )
     replay_stats = replay_stats or {}
     causal_replay_stats = causal_replay_stats or {}
+    actor_stats = actor_stats or {}
     causal_strata = causal_replay_stats.get('stratum_counts', {})
     causal_supervision = causal_replay_stats.get(
         'supervision_kind_counts',
@@ -3340,6 +3553,31 @@ def build_metric_row(
             'weighted_counterfactual_loss',
             0.0,
         ),
+        'structural_loss': getattr(
+            train_stats,
+            'structural_loss',
+            0.0,
+        ),
+        'weighted_structural_loss': getattr(
+            train_stats,
+            'weighted_structural_loss',
+            0.0,
+        ),
+        'structural_valid_count': getattr(
+            train_stats,
+            'structural_valid_count',
+            0,
+        ),
+        'structural_sample_count': getattr(
+            train_stats,
+            'structural_sample_count',
+            0,
+        ),
+        'structural_mean_abs_error': getattr(
+            train_stats,
+            'structural_mean_abs_error',
+            0.0,
+        ),
         'causal_update_applied': int(bool(getattr(
             train_stats,
             'causal_update_applied',
@@ -3468,6 +3706,26 @@ def build_metric_row(
         ),
         'collect_state_analysis_degraded_rate': (
             state_analysis_degraded_rate
+        ),
+        'actor_inference_requests': actor_stats.get(
+            'requests',
+            0,
+        ),
+        'actor_inference_batches': actor_stats.get(
+            'batches',
+            0,
+        ),
+        'actor_inference_mean_batch_size': actor_stats.get(
+            'mean_batch_size',
+            0.0,
+        ),
+        'actor_inference_max_batch': actor_stats.get(
+            'max_batch',
+            0,
+        ),
+        'actor_inference_seconds': actor_stats.get(
+            'seconds',
+            0.0,
         ),
         'collect_attribution_tracker_calls': attribution_tracker_calls,
         'collect_attribution_tracker_seconds': attribution_tracker_seconds,
@@ -4156,6 +4414,7 @@ def train(args):
         causal_update_interval=args.causal_update_interval,
         lambda_rule=args.lambda_rule,
         lambda_counterfactual=args.lambda_cf,
+        lambda_structural=args.lambda_structural,
         counterfactual_return_scale=args.counterfactual_return_scale,
         counterfactual_target_clip=args.counterfactual_target_clip,
     )
@@ -4206,6 +4465,9 @@ def train(args):
         episode_id_start=(
             env_steps + 1 if resume_state is not None else 0
         ),
+        # 版本按“已经完成的 optimizer update”命名。恢复同一 checkpoint
+        # 会得到同一版本和同一权重，不会重新从 parallel-sync-1 开始碰撞。
+        policy_version=online_policy_version(resume_update_step),
     )
     counterfactual_config = build_counterfactual_config(args)
     shapley_config = build_shapley_config(args)
@@ -4386,12 +4648,16 @@ def train(args):
         f'causal_replay_capacity={causal_replay_buffer.capacity} '
         f'n_step={args.n_step} '
         f'lambda_rule={args.lambda_rule} '
-        f'lambda_cf={args.lambda_cf}',
+        f'lambda_cf={args.lambda_cf} '
+        f'lambda_structural={args.lambda_structural}',
         flush=True,
     )
     print(
         f'collector={"parallel" if isinstance(collector, ParallelRolloutCollector) else "single"} '
-        f'num_envs={args.num_envs} async_rollout={int(bool(args.async_rollout))}',
+        f'num_envs={args.num_envs} '
+        f'async_rollout={int(bool(args.async_rollout))} '
+        f'centralized_actor={int(bool(args.centralized_actor_inference))} '
+        f'actor_batch_size={args.actor_batch_size}',
         flush=True,
     )
     if counterfactual_coordinator is not None:
@@ -4582,7 +4848,12 @@ def train(args):
                             update_step,
                             args.worker_sync_interval,
                             model_synced=collector.model_synced):
-                        collector.sync_model(online_model)
+                        collector.sync_model(
+                            online_model,
+                            policy_version=online_policy_version(
+                                update_step - 1
+                            ),
+                        )
                     pending_collect = collector.start_collect_steps(
                         args.collect_per_update,
                         epsilon=epsilon,
@@ -4596,7 +4867,12 @@ def train(args):
                             update_step,
                             args.worker_sync_interval,
                             model_synced=collector.model_synced)):
-                    collector.sync_model(online_model)
+                    collector.sync_model(
+                        online_model,
+                        policy_version=online_policy_version(
+                            update_step - 1
+                        ),
+                    )
                 collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
             env_steps += collect_stats.steps
             metric_window.add(collect_stats)
@@ -4640,6 +4916,12 @@ def train(args):
             # 执行一次 DQN 参数更新
             failure_stage = 'optimizer_step'
             train_stats = trainer.train_step()
+            if not isinstance(collector, ParallelRolloutCollector):
+                # 单进程 collector 直接引用 online_model；参数每次 optimizer
+                # step 都会变化，因此 provenance 版本也必须同步前进。
+                collector.set_policy_version(
+                    online_policy_version(update_step)
+                )
             if train_stats.target_synced:
                 refresh_counterfactual_target(
                     counterfactual_coordinator,
@@ -4654,7 +4936,10 @@ def train(args):
                     and args.async_rollout
                     and update_step < args.total_updates):
                 if pending_next_collect is None:
-                    collector.sync_model(online_model)
+                    collector.sync_model(
+                        online_model,
+                        policy_version=online_policy_version(update_step),
+                    )
                     pending_collect = collector.start_collect_steps(
                         args.collect_per_update,
                         epsilon=next_epsilon,
@@ -4731,6 +5016,15 @@ def train(args):
                     shapley_stats=(
                         shapley_coordinator.stats
                         if shapley_coordinator is not None
+                        else None
+                    ),
+                    actor_stats=(
+                        collector.actor_stats_snapshot()
+                        if isinstance(
+                            collector,
+                            ParallelRolloutCollector,
+                        )
+                        and collector.centralized_actor_inference
                         else None
                     ),
                 )

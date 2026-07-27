@@ -1,5 +1,5 @@
 -r requirements.txt
 
-# 首轮云端 V100（sm_70）训练必须从官方 cu126 源安装；cu130 wheel 不含 sm_70。
+# 新云端 RTX 5090（Blackwell）训练从官方 cu130 源安装。
 torch==2.12.1
 matplotlib==3.11.1

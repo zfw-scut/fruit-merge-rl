@@ -78,6 +78,15 @@ from daxigua_rl.training.counterfactual_coordinator import (  # noqa: E402
     recommended_counterfactual_worker_count,
 )
 from daxigua_rl.training.identity import TransitionKey  # noqa: E402
+from daxigua_rl.training.parallel_collector import (  # noqa: E402
+    ParallelRolloutCollector,
+)
+from daxigua_rl.training.structural_targets import (  # noqa: E402
+    STRUCTURAL_TARGET_DIMENSION_COUNT,
+    STRUCTURAL_TARGET_DIMENSIONS,
+    STRUCTURAL_TARGET_FULL_VALID_MASK,
+    build_structural_target,
+)
 from daxigua_rl.training.tensor_transition import TensorTransition  # noqa: E402
 from daxigua_rl.reward import merge_utility  # noqa: E402
 
@@ -86,35 +95,42 @@ PINNED_PYMUNK_VERSION = '7.3.0'
 PINNED_CHIPMUNK_VERSION = (
     '2.0.1-ade7ed72849e60289eefb7a41e79ae6322fefaf3'
 )
-PINNED_TORCH_VERSION = '2.12.1+cu126'
-PINNED_CUDA_RUNTIME = '12.6'
+PINNED_TORCH_VERSION = '2.12.1+cu130'
+PINNED_CUDA_RUNTIME = '13.0'
 
 FORMAL_500K_CONFIG_CONTRACT = {
     'total_updates': 500_000,
     'warmup_steps': 5_000,
-    'collect_per_update': 9,
-    'batch_size': 64,
+    'collect_per_update': 16,
+    'batch_size': 128,
     'replay_capacity': 100_000,
     'hot_replay_capacity': 8_000,
     'n_step': 3,
     'causal_replay_capacity': 20_000,
-    'causal_batch_size': 32,
+    'causal_batch_size': 64,
     'causal_update_interval': 2,
-    'counterfactual_workers': 2,
+    'counterfactual_workers': 6,
     'counterfactual_max_alternatives': 2,
     'shapley_candidate_limit': 3,
+    'hidden_dim': 256,
+    'message_layers': 4,
     'action_count': 15,
-    'num_envs': 3,
+    'num_envs': 16,
+    'worker_sync_interval': 100,
+    'actor_batch_size': 16,
 }
 FORMAL_500K_FLOAT_CONTRACT = {
     'lambda_rule': 0.15,
     'lambda_cf': 0.10,
+    'lambda_structural': 0.15,
     'counterfactual_cost_ratio': 0.06,
     'counterfactual_hard_limit': 0.10,
     'counterfactual_external_token_reserve_ratio': 0.01,
-    'counterfactual_cpu_core_ratio': 0.34,
+    'counterfactual_cpu_core_ratio': 0.24,
     'counterfactual_proposal_sample_rate': 0.0625,
     'shapley_event_ratio_max': 0.0005,
+    'actor_batch_wait_ms': 2.0,
+    'actor_request_timeout_seconds': 120.0,
 }
 
 
@@ -187,6 +203,7 @@ def _formal_500k_config_audit(training_args):
             }
     required_flags = {
         'async_rollout': True,
+        'centralized_actor_inference': True,
         'counterfactual_enabled': True,
         'shapley_enabled': True,
     }
@@ -510,21 +527,39 @@ def _model_device_audit(training_args):
 
     env = DaxiguaEnv(config=build_env_config(training_args))
     obs, info = env.reset(seed=training_args.seed)
+    analysis = env.prepare_state_analysis()
     graph = GraphBuilder().build(
         obs,
         tuple(info['action_candidates']),
+        state_analysis=analysis,
     )
     tensor_graph = graph_to_tensor(graph, device=device)
     model = build_model(training_args).to(device)
     model.train()
-    q_values = model(tensor_graph)
+    model_output = model.forward_with_aux(tensor_graph)
+    q_values = model_output.q_values
+    structure_predictions = model_output.structure_predictions
     if q_values.shape != (training_args.action_count,):
         raise RuntimeError(
             f'model output shape mismatch: {tuple(q_values.shape)!r}'
         )
-    if not bool(torch.isfinite(q_values).all().item()):
-        raise RuntimeError('model forward produced non-finite Q values')
-    loss = q_values.square().mean()
+    if structure_predictions.shape != (
+            training_args.action_count,
+            6):
+        raise RuntimeError(
+            'model structural output shape mismatch: '
+            f'{tuple(structure_predictions.shape)!r}'
+        )
+    if (
+            not bool(torch.isfinite(q_values).all().item())
+            or not bool(torch.isfinite(
+                structure_predictions
+            ).all().item())):
+        raise RuntimeError('model forward produced non-finite outputs')
+    loss = (
+        q_values.square().mean()
+        + structure_predictions.square().mean()
+    )
     loss.backward()
     gradients = tuple(
         parameter.grad
@@ -541,6 +576,7 @@ def _model_device_audit(training_args):
     result = {
         'device': str(device),
         'q_shape': list(q_values.shape),
+        'structural_shape': list(structure_predictions.shape),
         'loss': float(loss.detach().cpu().item()),
         'torch_version': torch.__version__,
         'cuda_runtime': torch.version.cuda,
@@ -561,8 +597,317 @@ def _model_device_audit(training_args):
     return result
 
 
+def _centralized_actor_rollout_audit(
+        training_args,
+        *,
+        collector_factory=ParallelRolloutCollector,
+        model_factory=build_model,
+        worker_count_override=None):
+    """以真实同步/异步采集顺序验证集中式 actor 的完整运行链。
+
+    正式调用必须使用配置中的 16 个 worker、正式模型和正式 device。仅测试可以通过
+    ``worker_count_override`` 和工厂注入缩小规模；生产 preflight 不传这些参数。
+    replay 全程只存在于内存，且无论采集或校验是否失败都会关闭 worker、actor 线程和
+    multiprocessing queue。
+    """
+
+    configured_worker_count = int(training_args.num_envs)
+    formal_worker_count = FORMAL_500K_CONFIG_CONTRACT['num_envs']
+    if configured_worker_count != formal_worker_count:
+        raise RuntimeError(
+            'centralized actor preflight requires the formal '
+            f'{formal_worker_count} rollout workers, got '
+            f'{configured_worker_count}'
+        )
+    if not bool(training_args.centralized_actor_inference):
+        raise RuntimeError(
+            'centralized actor preflight requires '
+            'centralized_actor_inference=true'
+        )
+    if not bool(training_args.async_rollout):
+        raise RuntimeError(
+            'centralized actor preflight requires async_rollout=true'
+        )
+
+    worker_count = (
+        configured_worker_count
+        if worker_count_override is None
+        else int(worker_count_override)
+    )
+    if worker_count <= 1 or worker_count > configured_worker_count:
+        raise ValueError(
+            'worker_count_override must be in '
+            f'[2, {configured_worker_count}]'
+        )
+
+    device = torch.device(training_args.device)
+    if device.type == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError(
+            'formal config requests CUDA but torch.cuda.is_available() is False'
+        )
+    model = model_factory(training_args).to(device)
+    model_device = next(model.parameters()).device
+    if (
+            model_device.type != device.type
+            or (
+                device.index is not None
+                and model_device.index != device.index
+            )):
+        raise RuntimeError(
+            'centralized actor source model is on the wrong device: '
+            f'{model_device} != {device}'
+        )
+
+    # 两轮各让每个 worker 执行一步。epsilon=0 保证每个动作都必须收到集中 actor
+    # 的 Q 响应；正式探针因此会实际完成 32 个 GPU actor 请求。
+    first_step_count = worker_count
+    second_step_count = worker_count
+    replay = ReplayBuffer(
+        capacity=max(
+            first_step_count + second_step_count,
+            worker_count * max(2, int(training_args.n_step)),
+        ),
+        seed=training_args.seed + 84_211,
+    )
+    collector = None
+    close_result = None
+    close_error = None
+    audit_error = None
+    result = None
+    try:
+        collector = collector_factory(
+            worker_count=worker_count,
+            env_config=build_env_config(training_args),
+            replay_buffer=replay,
+            model_config=build_model_config(training_args),
+            model=model,
+            seed=training_args.seed + 84_223,
+            n_step=training_args.n_step,
+            gamma=training_args.gamma,
+            policy_version=None,
+            causal_replay_buffer=None,
+            # 本门禁只验证 rollout/actor 数据通路；物理反事实和规则因果分别由
+            # full_causal_optimizer_step 与 local_shapley_physical 覆盖。
+            counterfactual_enabled=False,
+            counterfactual_ring_size=(
+                training_args.counterfactual_snapshot_ring_size
+            ),
+            counterfactual_proposal_sample_rate=0.0,
+            centralized_actor_inference=True,
+            actor_batch_size=training_args.actor_batch_size,
+            actor_batch_wait_ms=training_args.actor_batch_wait_ms,
+            actor_request_timeout_seconds=(
+                training_args.actor_request_timeout_seconds
+            ),
+        )
+        initial_actor = collector.actor_stats_snapshot()
+        if (
+                initial_actor['requests'] != 0
+                or initial_actor['batches'] != 0):
+            raise RuntimeError(
+                'new centralized actor collector started with non-zero stats'
+            )
+
+        collector.sync_model(
+            model,
+            policy_version='preflight-actor-sync-v1',
+        )
+        if (
+                not collector.model_synced
+                or collector.policy_version
+                != 'preflight-actor-sync-v1'):
+            raise RuntimeError(
+                'first centralized actor model synchronization was rejected'
+            )
+
+        # 显式使用 start/finish，而不是只调用 collect_steps，确保正式 async
+        # rollout API 本身至少被执行一次。
+        handle = collector.start_collect_steps(
+            first_step_count,
+            epsilon=0.0,
+        )
+        if (
+                len(handle.futures) != worker_count
+                or len(handle.worker_indices) != worker_count
+                or sum(handle.counts) != first_step_count):
+            raise RuntimeError(
+                'async rollout did not dispatch exactly one request to '
+                'each configured worker'
+            )
+        first_stats = collector.finish_collect_steps(handle)
+        after_first = collector.actor_stats_snapshot()
+        if (
+                first_stats.steps != first_step_count
+                or first_stats.greedy_actions != first_step_count
+                or first_stats.random_actions != 0
+                or len(first_stats.transition_keys) != first_step_count
+                or after_first['requests'] != first_step_count
+                or after_first['batches'] <= 0):
+            raise RuntimeError(
+                'async rollout did not receive one centralized actor '
+                'response per greedy environment step'
+            )
+
+        # 第二次同步后走 collect_steps 包装路径，覆盖长训中的常规
+        # sync -> collect 周期，并确认累计响应继续增长。
+        collector.sync_model(
+            model,
+            policy_version='preflight-actor-sync-v2',
+        )
+        if (
+                collector.policy_version
+                != 'preflight-actor-sync-v2'
+                or getattr(collector, '_policy_sync_count', 0) < 2):
+            raise RuntimeError(
+                'second centralized actor model synchronization was rejected'
+            )
+        second_stats = collector.collect_steps(
+            second_step_count,
+            epsilon=0.0,
+        )
+        actor = collector.actor_stats_snapshot()
+        expected_responses = first_step_count + second_step_count
+        if (
+                second_stats.steps != second_step_count
+                or second_stats.greedy_actions != second_step_count
+                or second_stats.random_actions != 0
+                or len(second_stats.transition_keys) != second_step_count
+                or actor['requests'] != expected_responses):
+            raise RuntimeError(
+                'second rollout did not receive one centralized actor '
+                'response per greedy environment step'
+            )
+        if (
+                actor['batches'] <= 0
+                or actor['batches'] > actor['requests']
+                or actor['max_batch'] < 1
+                or actor['max_batch'] > training_args.actor_batch_size
+                or not math.isclose(
+                    actor['mean_batch_size'],
+                    actor['requests'] / actor['batches'],
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+                or not math.isfinite(actor['seconds'])
+                or actor['seconds'] <= 0.0):
+            raise RuntimeError(
+                'centralized actor request/batch timing statistics are '
+                'not self-consistent'
+            )
+
+        actor_model = getattr(collector, '_actor_model', None)
+        if actor_model is None:
+            raise RuntimeError(
+                'centralized actor model was not created'
+            )
+        actor_device = next(actor_model.parameters()).device
+        if actor_device != model_device:
+            raise RuntimeError(
+                'centralized actor model is on the wrong device: '
+                f'{actor_device} != {device}'
+            )
+
+        result = {
+            'device': str(device),
+            'configured_worker_count': configured_worker_count,
+            'exercised_worker_count': worker_count,
+            'formal_worker_target': formal_worker_count,
+            'sync_count': int(collector._policy_sync_count),
+            'async_start_finish_exercised': True,
+            'first_collect_steps': first_stats.steps,
+            'second_collect_steps': second_stats.steps,
+            'greedy_responses_verified': expected_responses,
+            'actor_requests': actor['requests'],
+            'actor_batches': actor['batches'],
+            'actor_mean_batch_size': actor['mean_batch_size'],
+            'actor_max_batch': actor['max_batch'],
+            'actor_inference_seconds': actor['seconds'],
+            'replay_size_before_close': len(replay),
+        }
+    except Exception as exc:
+        audit_error = exc
+    finally:
+        if collector is not None:
+            try:
+                close_result = collector.close()
+            except Exception as exc:
+                close_error = exc
+
+    if audit_error is not None:
+        if close_error is not None:
+            raise RuntimeError(
+                'centralized actor audit failed and cleanup also failed: '
+                f'audit={type(audit_error).__name__}: {audit_error}; '
+                f'close={type(close_error).__name__}: {close_error}'
+            ) from audit_error
+        raise audit_error
+    if close_error is not None:
+        raise RuntimeError(
+            'centralized actor resources did not close cleanly: '
+            f'{type(close_error).__name__}: {close_error}'
+        ) from close_error
+    if (
+            collector is None
+            or not collector._closed
+            or collector._actor_thread is not None
+            or close_result is None
+            or len(close_result) != worker_count):
+        raise RuntimeError(
+            'centralized actor close did not finalize every worker and '
+            'join the actor service'
+        )
+    if len(replay) != first_step_count + second_step_count:
+        raise RuntimeError(
+            'centralized actor close did not flush one replay transition '
+            'per verified actor response'
+        )
+    result.update({
+        'replay_size_after_close': len(replay),
+        'worker_finalizations': len(close_result),
+        'closed_cleanly': True,
+    })
+    return result
+
+
+def _require_full_structural_target(structural_target):
+    """拒绝缺失任一 StateAnalysis 或物理结果维度的正式结构标签。"""
+
+    if structural_target.valid_mask != STRUCTURAL_TARGET_FULL_VALID_MASK:
+        invalid_dimensions = tuple(
+            dimension
+            for offset, dimension in enumerate(
+                STRUCTURAL_TARGET_DIMENSIONS
+            )
+            if not structural_target.valid_mask & (1 << offset)
+        )
+        raise RuntimeError(
+            'full causal optimizer preflight requires all six structural '
+            'target dimensions; invalid='
+            + ','.join(invalid_dimensions)
+        )
+
+
+def _require_full_structural_optimizer_stats(stats, batch_size):
+    """确认正式 batch 的每个样本都实际消费六维结构监督。"""
+
+    expected_valid_count = (
+        int(batch_size) * STRUCTURAL_TARGET_DIMENSION_COUNT
+    )
+    if (
+            stats.structural_sample_count != int(batch_size)
+            or stats.structural_valid_count != expected_valid_count):
+        raise RuntimeError(
+            'full causal optimizer step did not consume all six '
+            'structural dimensions for every sample: '
+            f'samples={stats.structural_sample_count}/{int(batch_size)} '
+            f'valid={stats.structural_valid_count}/'
+            f'{expected_valid_count}'
+        )
+    return expected_valid_count
+
+
 def _full_causal_update_audit(training_args):
-    """执行一条真实 CF 标签到 batch64 optimizer step 的完整门禁。"""
+    """执行真实 CF、结构标签和正式 batch optimizer step 的完整门禁。"""
 
     device = torch.device(training_args.device)
     env_config = build_env_config(training_args)
@@ -614,7 +959,11 @@ def _full_causal_update_audit(training_args):
         stable_boundary=True,
     )
     graph = graph_to_tensor(
-        GraphBuilder().build(state, candidates),
+        GraphBuilder().build(
+            state,
+            candidates,
+            state_analysis=analysis,
+        ),
         dtype=torch.float16,
     )
     actual_offset = training_args.action_count // 2
@@ -630,6 +979,29 @@ def _full_causal_update_audit(training_args):
         max_frames=training_args.max_physics_frames,
         stable_frames=training_args.stable_frames,
     )
+    post_state = factual_outcome.final_state
+    post_analysis = analyzer.analyze(
+        post_state,
+        tuple(game.get_action_candidates(
+            training_args.action_count
+        )),
+        TransitionKey(
+            transition_key.worker_id,
+            transition_key.episode_id,
+            transition_key.step_index + 1,
+        ),
+        stable_boundary=bool(
+            factual_outcome.physics_result.stable
+            or factual_outcome.physics_result.done
+        ),
+        incoming_transition_key=transition_key,
+    )
+    structural_target = build_structural_target(
+        analysis,
+        post_analysis,
+        physics_result=factual_outcome.physics_result,
+    )
+    _require_full_structural_target(structural_target)
 
     model_config = FrozenGNNModelConfig(
         **build_model_config(training_args)
@@ -697,6 +1069,7 @@ def _full_causal_update_audit(training_args):
             terminated=True,
             truncated=False,
             bootstrap_steps=training_args.n_step,
+            structural_target=structural_target,
         )
         for index in range(training_args.batch_size)
     )
@@ -736,6 +1109,7 @@ def _full_causal_update_audit(training_args):
             causal_update_interval=1,
             lambda_rule=training_args.lambda_rule,
             lambda_counterfactual=training_args.lambda_cf,
+            lambda_structural=training_args.lambda_structural,
             counterfactual_return_scale=(
                 training_args.counterfactual_return_scale
             ),
@@ -747,12 +1121,20 @@ def _full_causal_update_audit(training_args):
     if device.type == 'cuda':
         torch.cuda.reset_peak_memory_stats(device)
     stats = trainer.train_step()
+    expected_structural_valid_count = (
+        _require_full_structural_optimizer_stats(
+            stats,
+            training_args.batch_size,
+        )
+    )
     if (
             not math.isfinite(stats.loss)
             or stats.counterfactual_batch_size <= 0
-            or stats.counterfactual_loss <= 0.0):
+            or stats.counterfactual_loss <= 0.0
+            or stats.structural_loss <= 0.0):
         raise RuntimeError(
-            'full optimizer step did not consume a finite non-zero CF loss'
+            'full optimizer step did not consume finite non-zero CF and '
+            'structural losses'
         )
     peak_memory = (
         torch.cuda.max_memory_allocated(device)
@@ -772,7 +1154,15 @@ def _full_causal_update_audit(training_args):
         ),
         'loss': stats.loss,
         'counterfactual_loss': stats.counterfactual_loss,
+        'structural_valid_count': stats.structural_valid_count,
+        'structural_expected_valid_count': (
+            expected_structural_valid_count
+        ),
+        'structural_sample_count': stats.structural_sample_count,
+        'structural_target_valid_mask': structural_target.valid_mask,
+        'structural_loss': stats.structural_loss,
         'grad_norm': stats.grad_norm,
+        'train_step_seconds': stats.train_step_seconds,
         'cuda_peak_memory_bytes': int(peak_memory),
     }
 
@@ -820,7 +1210,11 @@ def _local_shapley_physical_audit(training_args):
             stable_boundary=True,
         )
         graph = graph_to_tensor(
-            GraphBuilder().build(state, candidates),
+            GraphBuilder().build(
+                state,
+                candidates,
+                state_analysis=analysis,
+            ),
             dtype=torch.float16,
         )
         context = CausalTransitionContext(
@@ -1075,6 +1469,23 @@ def run_preflight(args):
                 'model_forward_backward',
                 True,
                 **model_device,
+            ))
+
+        try:
+            actor_rollout = _centralized_actor_rollout_audit(
+                training_args
+            )
+        except Exception as exc:
+            checks.append(_check(
+                'centralized_actor_async_rollout',
+                False,
+                error=f'{type(exc).__name__}: {exc}',
+            ))
+        else:
+            checks.append(_check(
+                'centralized_actor_async_rollout',
+                True,
+                **actor_rollout,
             ))
 
         try:

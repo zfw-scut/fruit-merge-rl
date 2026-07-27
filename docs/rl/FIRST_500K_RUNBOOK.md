@@ -1,10 +1,10 @@
 # 第一次 500k 完整因果训练运行手册
 
-状态：首轮长训前执行基线
+状态：结构感知 V2 长训前执行基线；旧 V1 短跑证据已重置
 
 适用分支：`codex/work-1`
 
-最后更新：2026-07-27
+最后更新：2026-07-28
 
 ## 1. 目标与边界
 
@@ -19,8 +19,15 @@
 
 三份训练配置都继承 `configs/train_dqn_fast30_parallel.toml`。5k 和 10k 只缩短
 训练长度并提高日志、保存和评估频率，不关闭 Reward V2、Double DQN、3-step、
-完整状态归因、规则排序、稀疏物理反事实或局部 Shapley。短跑的用途是排除实现和
-数值错误，不是重新决定是否启用完整归因。
+完整状态归因、结构图、连锁 motif、关系感知 GNN、六维结构监督、集中式 GPU
+actor、规则排序、稀疏物理反事实或局部 Shapley。短跑的用途是排除实现、数值和
+资源错误，不是重新决定是否启用完整方案。
+
+结构感知 V2 改变了图 schema 和模型参数。2026-07-27 完成的旧 H128/L3 5k/10k
+仍是 V1 历史证据，但不能批准 V2 的 500k。V2 的 5k、10k 和 500k 均须使用空目录
+从 update 0 开始，禁止恢复旧 checkpoint 或复用旧 hot/cold/causal replay。设计、
+无未来泄漏证明和兼容表见
+[`STRUCTURE_AWARE_GNN_V2.md`](STRUCTURE_AWARE_GNN_V2.md)。
 
 不要在 5k 和 10k 门禁完成前启动 500k。当前进度和证据以
 `docs/training_runs/FIRST_500K_READINESS.md` 为准。
@@ -70,14 +77,16 @@ preflight 无法证明 commit 与 `dirty=false`。ZIP 只可用于人工阅读�
 
 - Ubuntu 22.04 或更新版本；
 - Python 3.11；
-- NVIDIA GPU 和能支持 CUDA 12.6 PyTorch wheel 的驱动；
+- 当前正式服务器的 RTX 5090 32 GiB，以及能运行 CUDA 13.0 PyTorch wheel 的
+  NVIDIA 驱动；
 - 至少 80 GiB 可用磁盘空间；因果 replay 精确 checkpoint 与 100k 冷 TD replay
   会同时占盘，不能只按模型权重估算；
-- 至少 24 GiB 内存，建议 32 GiB 或更多；3 个 rollout worker、20k 因果 replay、
-  8k 热 TD replay 和 2k 冷缓存会并存；
-- 至少 6 个经 affinity/cgroup 限制后仍实际可用的 CPU 逻辑核。正式配置固定使用
-  3 个 rollout worker 和 2 个反事实/局部 Shapley 共享物理 worker，并为主进程
-  保留 1 核；preflight 按有效核数而不是宿主机名义核数检查。
+- 至少 64 GiB 内存，并在启动时保留至少 16 GiB 可回收余量；16 个 rollout worker、
+  20k 因果 replay、8k 热 TD replay、2k 冷缓存和 H256/L4 learner/actor 会并存；
+- 至少 24 个经 affinity/cgroup 限制后仍实际可用的 CPU 逻辑核，建议 25 核或更多。
+  正式配置使用 16 个 rollout worker 和 6 个反事实/局部 Shapley 共享物理 worker，
+  还需为 learner、集中 actor 和调度线程保留余量；preflight 按有效核数而不是宿主机
+  名义核数检查。
 
 安装基础工具：
 
@@ -109,17 +118,15 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 python -m pip install matplotlib==3.11.1
 python -m pip install torch==2.12.1 \
-  --index-url https://download.pytorch.org/whl/cu126
+  --index-url https://download.pytorch.org/whl/cu130
 python -m pip check
 ```
 
 `requirements-training.txt` 记录训练依赖的冻结版本；上面把 PyTorch 单独安装，是为了
-明确使用官方 CUDA 12.6 wheel，避免普通 PyPI 解析意外得到 CPU 构建。首轮云端 GPU
-是 compute capability 7.0 的 V100；实测 2.12.1+cu130 只包含 `sm_75` 及以上内核，
-虽然 `torch.cuda.is_available()` 为真，真实运算仍会报
-`cudaErrorNoKernelImageForDevice`。因此首轮环境契约固定为 2.12.1+cu126，而不是
-cu130。若云服务器驱动不支持该 wheel，不要临时改成 CPU 构建；先升级驱动并重新执行
-本节验证。
+明确使用官方 CUDA 13.0 wheel，避免普通 PyPI 解析意外得到 CPU 构建。当前正式硬件
+是 RTX 5090（Blackwell），环境契约固定为 `torch==2.12.1+cu130` 和 CUDA runtime
+13.0；旧 V100 使用的 cu126 环境只属于历史证据。若服务器驱动不支持该 wheel，不要
+临时改成 CPU 或复用旧 cu126 环境；先修复驱动/环境并重新执行本节验证。
 
 ## 4. CUDA 与依赖验证
 
@@ -142,8 +149,8 @@ conda run --no-capture-output -n python-torch python -c \
 预期关键值：
 
 ```text
-torch = 2.12.1+cu126
-cuda_runtime = 12.6
+torch = 2.12.1+cu130
+cuda_runtime = 13.0
 available = True
 pymunk = 7.3.0
 chipmunk = 2.0.1-ade7ed72849e60289eefb7a41e79ae6322fefaf3
@@ -176,9 +183,11 @@ conda run --no-capture-output -n python-torch \
 
 ## 6. 正式 preflight
 
-preflight 不启动训练，但会验证正式 500k 解析后的配置、CUDA 前后向、完整因果
-optimizer step、物理反事实、局部 Shapley、32 次 EngineSnapshot 原动作复现、磁盘和
-CPU 余量：
+preflight 不启动持续训练，但会验证正式 500k 解析后的结构参数、CUDA 前后向、六维
+结构与完整因果 optimizer step、物理反事实、局部 Shapley、32 次 EngineSnapshot
+原动作复现、磁盘和 CPU 余量。它还会临时启动正式 16 个 rollout worker 和 CUDA
+actor：执行两次参数同步、一次显式 async start/finish 及一次再次采集，随后关闭全部
+worker、actor 线程和队列；经验只保存在内存，不创建训练 run：
 
 ```bash
 conda run --no-capture-output -n python-torch \
@@ -187,8 +196,8 @@ conda run --no-capture-output -n python-torch \
   --output runs/preflight/first_500k_pre_smoke.json \
   --snapshot-audits 32 \
   --min-free-gb 80 \
-  --min-memory-gb 24 \
-  --min-available-memory-gb 8
+  --min-memory-gb 64 \
+  --min-available-memory-gb 16
 ```
 
 允许进入短跑的条件：
@@ -198,11 +207,17 @@ conda run --no-capture-output -n python-torch \
 - `required_failures=[]`；
 - `warnings=[]`，或每条 warning 已有人为解释；
 - `engine_snapshot_reproduction.matches=32`；
-- `formal_500k_config_contract` 通过，确认输入确实是冻结的 500k/CUDA/3 env/
-  9 steps per update/3-step/完整因果与 Shapley 配置，而不是误传 5k 或关闭归因的
-  配置；
-- `full_causal_optimizer_step` 和 `local_shapley_physical` 均通过；
-- cgroup 可用物理内存上限至少 24 GiB，启动时可回收工作集余量至少 8 GiB；
+- `formal_500k_config_contract` 通过，确认输入确实是冻结的 500k/CUDA/H256/L4/
+  batch 128/causal batch 64/16 env/每 update 共 16 个真实 step/6 个物理 worker/
+  集中 actor/六维结构监督/3-step/完整因果与 Shapley 配置，而不是误传 5k 或关闭
+  结构链路的配置；
+- `centralized_actor_async_rollout` 通过：实际使用 16 worker、正式 H256/L4 CUDA
+  模型，actor request/response/batch 计数自洽，且所有资源干净关闭；
+- `full_causal_optimizer_step` 通过，且
+  `structural_valid_count == batch_size * 6`、`structural_sample_count == batch_size`；
+  这同时证明前五个 StateAnalysis 维度和最后一个物理结果维度均进入 optimizer；
+- `local_shapley_physical` 通过；
+- cgroup 可用物理内存上限至少 64 GiB，启动时可回收工作集余量至少 16 GiB；
   `memory.current` 中的 `inactive_file` 不计作不可回收占用，原始余量仍写入报告供审查；
 - JSON 中 commit 与准备运行的源码 commit 一致，`dirty=false`。
 
@@ -217,10 +232,10 @@ conda run --no-capture-output -n python-torch \
   python -u tools/monitor_training_resources.py \
   --interval 3 \
   --stop-after-target-exits \
-  --warn-mem-available-mb 4096 \
+  --warn-mem-available-mb 16384 \
   --warn-swap-used-mb 1024 \
-  --warn-target-rss-mb 16384 \
-  --warn-gpu-memory-used-mb 7600
+  --warn-target-rss-mb 65536 \
+  --warn-gpu-memory-used-mb 30000
 ```
 
 云容器还要在同一个监控目录并行启动 cgroup-v2 工作集监控：
@@ -230,13 +245,13 @@ conda run --no-capture-output -n python-torch \
   python -u tools/monitor_cgroup_memory.py \
   --log-dir runs/resource_monitor/<本次独占目录> \
   --interval 3 \
-  --min-effective-available-gb 4
+  --min-effective-available-gb 16
 ```
 
 `memory.current` 包含冷 replay 和 checkpoint 写入产生的文件页缓存，不能直接把
 `memory.max - memory.current` 当作真实不可回收余量。cgroup 监控同时保存原始余量，
 并用 `memory.current - inactive_file` 计算工作集；阶段门禁要求工作集有效余量至少
-4 GiB，且 `memory.events` 的 `low/high/max/oom/oom_kill` 增量全部为 0。
+16 GiB，且 `memory.events` 的 `low/high/max/oom/oom_kill` 增量全部为 0。
 
 监控输出默认位于 `runs/resource_monitor/<时间戳>/`。它与训练进程隔离，即使训练被
 OOM killer 终止，也能留下崩溃前的 CPU、内存、GPU 和进程日志。
@@ -245,10 +260,10 @@ OOM killer 终止，也能留下崩溃前的 CPU、内存、GPU 和进程日志�
 
 - `events.jsonl` 出现 `target_process_started` 和 `target_exited_stop_requested`；
 - `process_metrics.csv` 至少包含一条目标训练进程记录；
-- `summary.json` 的 `samples > 0`、`min_mem_available_mb >= 4096`、
-  `peak_swap_used_mb <= 1024`、`peak_target_rss_mb <= 16384`；
+- `summary.json` 的 `samples > 0`、`min_mem_available_mb >= 16384`、
+  `peak_swap_used_mb <= 1024`、`peak_target_rss_mb <= 65536`；
 - `cgroup_summary.json` 的 `healthy=true`、
-  `min_memory_effective_available_bytes >= 4 GiB`，并人工核对
+  `min_memory_effective_available_bytes >= 16 GiB`，并人工核对
   `min_memory_raw_available_bytes` 与页缓存峰值；
 - `gpu_metrics.csv` 存在有效 GPU 样本，显存没有连续 3 次超过总量 95%；
 - `events.jsonl` 没有在结束时仍未恢复的 `low_system_memory`、
@@ -276,7 +291,7 @@ CONDA_ENV=python-torch \
 输出目录固定为：
 
 ```text
-runs/dqn_causal_smoke_5k/
+runs/dqn_structure_v2_smoke_5k/
 ```
 
 若该目录已经非空，训练入口会拒绝静默覆盖。不要为图省事使用
@@ -287,6 +302,8 @@ runs/dqn_causal_smoke_5k/
 
 - 无崩溃、NaN/Inf、死锁、ID 串线和重复预算记账；
 - 主 TD、规则排序和反事实监督都能进入真实 optimizer step；
+- 六维结构 target 持续产生有效 mask，结构 loss 真正进入同一次 optimizer step；
+- 集中 actor 能接收 greedy 请求、产生微批、同步参数并干净关闭；
 - 规则因果 replay 同时出现正、负样本；
 - 物理反事实存在 `strict_match` 且可生成标签的结果；numeric jitter 与 semantic
   divergence 均被丢弃且三态账本闭合；
@@ -311,7 +328,7 @@ CONDA_ENV=python-torch \
 输出目录：
 
 ```text
-runs/dqn_causal_calibration_10k/
+runs/dqn_structure_v2_calibration_10k/
 ```
 
 10k 除了稳定性，还要校准：
@@ -319,6 +336,8 @@ runs/dqn_causal_calibration_10k/
 - shaping p95 是否处于任务奖励的次要尺度；
 - 归因事件数量、正负样本比例、确认/取消/中断分布；
 - 规则 loss、反事实 loss 与 TD loss 的数量级；
+- 结构 loss/MAE、有效维度数和有效样本数，确认辅助项没有压过 TD；
+- actor 请求/批次数、平均/最大 batch、推理时间、动作选择耗时和 GPU 利用率；
 - 反事实复现率、标签产量、实际 token 比例和队列积压；
 - 局部 Shapley 的选择、物理复现、效率门和样本落盘；
 - `env_steps_per_second`、内存、显存和 checkpoint 体积是否可承受 500k。
@@ -330,7 +349,7 @@ runs/dqn_causal_calibration_10k/
 CONDA_ENV=python-torch \
   ./scripts/train_dqn.sh \
   configs/train_dqn_causal_calibration_10k.toml \
-  --run-dir runs/dqn_causal_calibration_25k \
+  --run-dir runs/dqn_structure_v2_calibration_25k \
   --total-updates 25000
 ```
 
@@ -355,10 +374,11 @@ CONDA_ENV=python-torch \
   ./scripts/train_dqn.sh configs/train_dqn_causal_500k.toml
 ```
 
-正式输出目录由基配置冻结为：
+正式输出目录由基配置冻结；必须是一个全新的 V2 空目录，不能沿用旧
+`dqn_causal_fast30_h128_l3_n3_500k`：
 
 ```text
-runs/dqn_causal_fast30_h128_l3_n3_500k/
+runs/dqn_causal_structure_h256_l4_n3_500k/
 ```
 
 启动后立即保存以下身份信息到运行记录：
@@ -382,6 +402,8 @@ attribution_shutdown.json
 counterfactual_shutdown.json
 checkpoints/latest.pt
 plots/training_curves.png
+plots/reward_breakdown_curves.png
+plots/structure_learning_curves.png
 failure_latest.json                 # 仅异常时出现
 ```
 
@@ -390,6 +412,8 @@ failure_latest.json                 # 仅异常时出现
 | 维度 | 关键字段 | 正常含义 |
 | --- | --- | --- |
 | 主训练 | `loss`、`td_loss`、`mean_q`、`mean_target`、`grad_norm` | 全部有限，长期不单向爆炸 |
+| 结构监督 | `structural_loss`、`weighted_structural_loss`、valid/sample count、MAE | target 持续有效，误差有限，辅助项不压过 TD |
+| 集中 actor | requests/batches、mean/max batch、inference seconds | 无 timeout/失败；结合 epsilon 和吞吐解释批大小 |
 | 因果训练 | `rule_rank_loss`、`counterfactual_loss`、各 batch size | 非零样本到来后能进入更新 |
 | 因果 replay | 正/负、rule/cf/Shapley 数量和 cause type | 不被单一类别永久饿死 |
 | 状态分析 | degraded rate、shaping p95、cache hit | 降级稀少，shaping 不压过任务效用 |
@@ -434,7 +458,7 @@ p95 不超过其 25%，即约 `0.707`。
 - `counterfactual_circuit_open=1`，或 snapshot failure 非零且持续增加；
 - counterfactual pending 达到队列上限并持续 10 分钟没有完成结果；
 - pending 归因事件持续增长，同时至少 5 个窗口没有确认或取消事件；
-- 内存低于 4 GiB、swap 持续增长，或 GPU 显存连续 3 次超过 95%。
+- 有效可用内存低于 8 GiB、swap 持续增长，或 GPU 显存连续 3 次超过 95%。
 
 这些阈值是“停止扩大训练规模”的工程门禁，不是自动修改奖励权重的依据。任何阈值调整都
 必须写入 readiness 记录，并在启动 500k 前重新冻结配置和 preflight。
@@ -462,15 +486,15 @@ p95 不超过其 25%，即约 `0.707`。
 ```bash
 conda run --no-capture-output -n python-torch \
   python tools/check_training_readiness.py \
-  --run-dir runs/dqn_causal_smoke_5k \
+  --run-dir runs/dqn_structure_v2_smoke_5k \
   --stage 5k \
-  --output runs/preflight/dqn_causal_smoke_5k_readiness.json
+  --output runs/preflight/dqn_structure_v2_smoke_5k_readiness.json
 
 conda run --no-capture-output -n python-torch \
   python tools/check_training_readiness.py \
-  --run-dir runs/dqn_causal_calibration_10k \
+  --run-dir runs/dqn_structure_v2_calibration_10k \
   --stage 10k \
-  --output runs/preflight/dqn_causal_calibration_10k_readiness.json
+  --output runs/preflight/dqn_structure_v2_calibration_10k_readiness.json
 ```
 
 门禁要求配置/manifest/replay/RNG/模型 optimizer 可真实恢复，按 resume sidecar 分段
@@ -482,7 +506,7 @@ readiness 记录。
 
 云端训练目录包含 GiB 级 checkpoint 和 ReplayBuffer，不能为了查看曲线而直接递归
 复制整个 run。项目提供只读轻量同步入口，只选择固定白名单内的配置、指标、
-归因/resume/failure JSON 与两张标准训练图：
+归因/resume/failure JSON 与三张标准训练图：
 
 ```powershell
 python tools/sync_cloud_training_artifacts.py `
@@ -508,7 +532,7 @@ python tools/sync_cloud_training_artifacts.py `
 ```
 
 完整模式要求配置、两份指标 CSV、warmup、attribution/counterfactual shutdown 和
-两张标准曲线全部存在且内容完整，同时核对 `metrics.csv` 最大 update 已达到
+三张标准曲线全部存在且内容完整，同时核对 `metrics.csv` 最大 update 已达到
 初始 `config.json` 或最新 `resume_config_*.json` 的目标，并拒绝仍带
 `failure_latest.json` 的活动失败 run。它验证的是“轻量分析包完整”，不能替代
 readiness 对模型、optimizer 和 replay 的真实恢复门禁。工具不会下载 checkpoint、
@@ -539,14 +563,19 @@ summary 等本地旁路证据。整个目标目录与新 manifest 作为同一�
 
 ## 14. Checkpoint 恢复语义
 
-从可信的同一 run checkpoint 恢复：
+只有已经从 update 0 启动的同一 V2 run，才能从其可信 checkpoint 恢复：
 
 ```bash
 CONDA_ENV=python-torch \
   ./scripts/train_dqn.sh \
   configs/train_dqn_causal_500k.toml \
-  --resume runs/dqn_causal_fast30_h128_l3_n3_500k/checkpoints/latest.pt
+  --resume runs/dqn_causal_structure_h256_l4_n3_500k/checkpoints/latest.pt
 ```
+
+旧 H128/L3 权重、optimizer、旧图 replay 和旧 causal replay 不属于“可信的同一
+run”。基础加载器能识别旧文件外层，不代表能加载到新图维度和 H256/L4
+relation-aware 模型；不得用 `strict=False` 绕过。完整边界见
+[`STRUCTURE_AWARE_GNN_V2.md`](STRUCTURE_AWARE_GNN_V2.md) 第 9 节。
 
 manifest 允许增加 `--total-updates`。`smooth` epsilon 使用 checkpoint 首次创建时
 冻结的 `epsilon_schedule_total_updates`，因此延长总步数不会把已经下降的探索率突然

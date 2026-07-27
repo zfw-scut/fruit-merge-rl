@@ -33,7 +33,9 @@ Current interface:
   Pymunk collision radius; graph geometry uses the collision radius.
 - `TensorTransition`: the training-path experience record built from CPU
   `GraphTensor`; replay graph features use float16 to reduce resident memory.
-  `bootstrap_steps` records the actual 1-to-3-step horizon.
+  `bootstrap_steps` records the actual 1-to-3-step horizon. Its optional
+  `structural_target` stores the selected action's masked six-dimensional,
+  one-step structural outcome; it is not accumulated with n-step reward.
 - Only `terminated` transitions disable DQN bootstrap; `truncated` transitions
   keep their final observation and next graph.
 - `ReplayBuffer`: fixed-capacity in-memory or hot-memory/cold-disk replay. Its
@@ -45,13 +47,20 @@ Current interface:
 - `RolloutCollector` / `ParallelRolloutCollector`: assign stable
   `(worker_id, episode_id, step_index)` keys, play the headless environment,
   emit n-step transitions, and build rule-causal samples plus bounded
-  counterfactual proposals. Worker PyTorch inference is CPU-only and
-  single-threaded per process.
+  counterfactual proposals. Parallel rollout can centralize greedy inference
+  in a main-process GPU actor, micro-batching requests while epsilon-random
+  actions remain worker-local.
 - `StateAnalyzer` and worker-local `AttributionTracker`: analyze canonical
   15-action reachability, top-connected space, support/partner/motif
   structure, keep exact fruit lineage, enforce one value package per merge,
   and resolve delayed setup, rescue, blocking, burial, and terminal-support
-  events. Full analyses and lineage do not enter the main replay.
+  events. `GraphBuilder` projects only generalizable, current-boundary
+  structural features and motifs into the main graph; full analysis objects,
+  arbitrary IDs, and lineage histories do not enter the main replay.
+- `GNNQNetwork`: relation-gated and attention-weighted message passing over
+  explicit support/blocker/partner/motif edges, followed by a global-value
+  plus centered action-advantage dueling readout. `forward_with_aux()` reuses
+  the same encoding for six selected-action structural predictions.
 - `CausalReplayBuffer`: separate bounded in-memory replay with
   `positive_setup`, `negative_blocking`, and `counterfactual` strata, carrying
   `rule`, `counterfactual`, or `shapley` pairwise Q supervision. Rule samples
@@ -69,8 +78,10 @@ Current interface:
   shares the counterfactual hard budget.
 - `DQNTrainer`: Double DQN updater using
   `reward_n + gamma**bootstrap_steps * Q_target(s', argmax Q_online(s'))`.
-  It combines TD, rule-ranking, and counterfactual/Shapley Huber losses and
-  fails before `optimizer.step()` on non-finite values or gradients.
+  It combines TD, masked one-step structural, rule-ranking, and
+  counterfactual/Shapley Huber losses and fails before `optimizer.step()` on
+  non-finite values or gradients. Structural supervision does not change the
+  environment reward.
 - `daxigua_rl.training.checkpointing`: atomic, versioned checkpoint writer with
   run/config fingerprints, Python/PyTorch/CUDA RNG state, model/target/
   optimizer counters, replay component states, and strict resume validation.
@@ -95,7 +106,7 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
 ```
 
 The three launch configurations inherit one frozen algorithm/environment
-baseline:
+structure-aware V2 baseline:
 
 - `train_dqn_causal_smoke_5k.toml`: integration smoke run;
 - `train_dqn_causal_calibration_10k.toml`: scale calibration run;
@@ -111,7 +122,13 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
 
 Use `--no-capture-output` to see progress in real time through conda.
 
-Resume an interrupted run from its trusted checkpoint:
+All first V2 gate runs start at update 0 in new empty directories. Do not
+resume an H128/L3 checkpoint or reuse old hot/cold/causal replay: the graph
+schema, relation-aware model, dueling readout, auxiliary head, and formal
+H256/L4 dimensions are not training-compatible with those artifacts. See
+`docs/rl/STRUCTURE_AWARE_GNN_V2.md` for the exact compatibility boundary.
+
+Resume an interrupted run from a trusted checkpoint of that same V2 run:
 
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \

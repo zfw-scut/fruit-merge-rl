@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import multiprocessing
+import queue
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
@@ -16,6 +18,7 @@ from io import BytesIO
 from daxigua_rl.attribution.causal_replay import CausalReplayBuffer
 from daxigua_rl.env import DaxiguaEnv
 from daxigua_rl.graph import GraphBuilder
+from daxigua_rl.graph.tensor import collate_graph_tensors
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS
 
@@ -26,6 +29,11 @@ from .replay_buffer import ReplayBuffer
 _WORKER_COLLECTOR = None
 _WORKER_MODEL = None
 _WORKER_SEED = 0
+_WORKER_INDEX = 0
+_WORKER_ACTOR_REQUEST_QUEUE = None
+_WORKER_ACTOR_RESPONSE_QUEUE = None
+_WORKER_ACTOR_REQUEST_ID = 0
+_WORKER_ACTOR_TIMEOUT_SECONDS = 120.0
 
 
 def _configure_worker_torch_threads():
@@ -49,6 +57,55 @@ def _worker_torch_thread_counts():
     import torch
 
     return torch.get_num_threads(), torch.get_num_interop_threads()
+
+
+def _worker_remote_q_values(graph):
+    """把单图推理请求交给主进程的批量 actor，并等待本 worker 的响应。
+
+    通过显式 bytes 传输 GraphTensor，避免 Windows ``spawn`` 下 torch tensor
+    共享句柄在短生命周期请求中积累。响应只包含很小的 Q 浮点 tuple。
+    """
+
+    global _WORKER_ACTOR_REQUEST_ID
+
+    if (
+            _WORKER_ACTOR_REQUEST_QUEUE is None
+            or _WORKER_ACTOR_RESPONSE_QUEUE is None):
+        raise RuntimeError('centralized actor queues are not configured')
+
+    _WORKER_ACTOR_REQUEST_ID += 1
+    request_id = _WORKER_ACTOR_REQUEST_ID
+    _WORKER_ACTOR_REQUEST_QUEUE.put(
+        (
+            _WORKER_INDEX,
+            request_id,
+            _save_to_bytes(graph),
+        ),
+        timeout=_WORKER_ACTOR_TIMEOUT_SECONDS,
+    )
+    try:
+        response_id, q_values, error = (
+            _WORKER_ACTOR_RESPONSE_QUEUE.get(
+                timeout=_WORKER_ACTOR_TIMEOUT_SECONDS
+            )
+        )
+    except queue.Empty as exc:
+        raise TimeoutError(
+            'timed out waiting for centralized actor inference'
+        ) from exc
+    if response_id != request_id:
+        raise RuntimeError(
+            'centralized actor response identity mismatch: '
+            f'{response_id!r} != {request_id!r}'
+        )
+    if error is not None:
+        raise RuntimeError(
+            f'centralized actor inference failed: {error}'
+        )
+
+    import torch
+
+    return torch.tensor(q_values, dtype=torch.float32)
 
 
 @dataclass(frozen=True)
@@ -84,17 +141,27 @@ def _worker_init(
         counterfactual_enabled,
         counterfactual_ring_size,
         counterfactual_proposal_sample_rate,
-        episode_id_start):
+        episode_id_start,
+        actor_request_queue=None,
+        actor_response_queue=None,
+        actor_timeout_seconds=120.0):
     """初始化 worker 进程内长期复用的环境、模型和 collector。"""
 
     global _WORKER_COLLECTOR, _WORKER_MODEL, _WORKER_SEED
+    global _WORKER_INDEX, _WORKER_ACTOR_REQUEST_QUEUE
+    global _WORKER_ACTOR_RESPONSE_QUEUE, _WORKER_ACTOR_TIMEOUT_SECONDS
 
     _configure_worker_torch_threads()
+    _WORKER_INDEX = int(worker_index)
     _WORKER_SEED = int(seed) + int(worker_index) * 100_003
+    _WORKER_ACTOR_REQUEST_QUEUE = actor_request_queue
+    _WORKER_ACTOR_RESPONSE_QUEUE = actor_response_queue
+    _WORKER_ACTOR_TIMEOUT_SECONDS = float(actor_timeout_seconds)
     env = DaxiguaEnv(config=env_config)
 
     _WORKER_MODEL = None
-    if model_config is not None:
+    centralized_actor = actor_request_queue is not None
+    if model_config is not None and not centralized_actor:
         _WORKER_MODEL = GNNQNetwork(**model_config)
         _WORKER_MODEL.eval()
 
@@ -114,6 +181,11 @@ def _worker_init(
         graph_builder=GraphBuilder(),
         replay_buffer=local_buffer,
         model=_WORKER_MODEL,
+        q_value_evaluator=(
+            _worker_remote_q_values
+            if centralized_actor
+            else None
+        ),
         seed=_WORKER_SEED,
         worker_id=worker_index,
         causal_replay_buffer=local_causal_buffer,
@@ -133,7 +205,10 @@ def _worker_sync_model(state_dict, policy_version=None):
     """把主进程 online model 参数同步到当前 worker。"""
 
     if _WORKER_MODEL is None:
-        return False
+        # centralized actor 的参数保存在主进程，但 worker-local 归因上下文仍要
+        # 使用同一个 policy_version。
+        _WORKER_COLLECTOR.set_policy_version(policy_version)
+        return _WORKER_ACTOR_REQUEST_QUEUE is not None
 
     state_dict = _load_from_bytes(state_dict)
     _WORKER_MODEL.load_state_dict(state_dict)
@@ -256,7 +331,11 @@ class ParallelRolloutCollector:
             counterfactual_enabled=False,
             counterfactual_ring_size=32,
             counterfactual_proposal_sample_rate=1.0,
-            episode_id_start=0):
+            episode_id_start=0,
+            centralized_actor_inference=False,
+            actor_batch_size=16,
+            actor_batch_wait_ms=2.0,
+            actor_request_timeout_seconds=120.0):
         """创建多进程 collector。
 
         参数：
@@ -274,6 +353,9 @@ class ParallelRolloutCollector:
         - `counterfactual_proposal_sample_rate`: 常规 proposal 的稳定传输抽样率；
           高价值合成候选始终保留。
         - `episode_id_start`: 每个 worker 恢复后首局使用的 episode id。
+        - `centralized_actor_inference`: 将 worker 的 greedy Q 请求汇总到主进程
+          actor model，按微批量在主模型所在设备推理；适合 GPU 资源充足时使用。
+        - `actor_batch_size` / `actor_batch_wait_ms`: 单批请求上限和短暂聚合窗口。
         """
 
         worker_count = int(worker_count)
@@ -322,6 +404,26 @@ class ParallelRolloutCollector:
         episode_id_start = int(episode_id_start)
         if episode_id_start < 0:
             raise ValueError('episode_id_start must be non-negative')
+        if not isinstance(centralized_actor_inference, bool):
+            raise TypeError('centralized_actor_inference must be bool')
+        actor_batch_size = int(actor_batch_size)
+        actor_batch_wait_ms = float(actor_batch_wait_ms)
+        actor_request_timeout_seconds = float(
+            actor_request_timeout_seconds
+        )
+        if actor_batch_size <= 0:
+            raise ValueError('actor_batch_size must be positive')
+        if actor_batch_wait_ms < 0.0:
+            raise ValueError('actor_batch_wait_ms must be non-negative')
+        if actor_request_timeout_seconds <= 0.0:
+            raise ValueError(
+                'actor_request_timeout_seconds must be positive'
+            )
+        if centralized_actor_inference and (
+                model is None or model_config is None):
+            raise ValueError(
+                'centralized actor inference requires model and model_config'
+            )
 
         self.worker_count = worker_count
         self.env_config = env_config
@@ -339,16 +441,47 @@ class ParallelRolloutCollector:
             counterfactual_proposal_sample_rate
         )
         self.episode_id_start = episode_id_start
+        self.centralized_actor_inference = (
+            centralized_actor_inference
+        )
+        self.actor_batch_size = actor_batch_size
+        self.actor_batch_wait_seconds = actor_batch_wait_ms / 1000.0
+        self.actor_request_timeout_seconds = (
+            actor_request_timeout_seconds
+        )
         self._counterfactual_proposal_outbox = []
         self._closed = False
         self._model_synced = False
         self._policy_sync_count = 0
         self.attribution_finalization_summaries = ()
         self._worker_pending_event_counts = [0] * worker_count
+        self._actor_model = None
+        self._actor_lock = threading.Lock()
+        self._actor_stop = threading.Event()
+        self._actor_thread = None
+        self._actor_failure = None
+        self._actor_stats_lock = threading.Lock()
+        self.actor_inference_requests = 0
+        self.actor_inference_batches = 0
+        self.actor_inference_max_batch = 0
+        self.actor_inference_seconds = 0.0
 
         # 使用 spawn 而不是 Linux 默认 fork，避免主进程已经初始化 CUDA 后 fork 出
-        # worker 导致 CUDA/驱动状态异常。worker 只在 CPU 上做采样推理。
+        # worker 导致 CUDA/驱动状态异常。集中 actor 开启时 worker 不持有模型。
         context = multiprocessing.get_context('spawn')
+        self._actor_request_queue = (
+            context.Queue(maxsize=max(4, worker_count * 4))
+            if centralized_actor_inference
+            else None
+        )
+        self._actor_response_queues = (
+            tuple(
+                context.Queue(maxsize=4)
+                for _ in range(worker_count)
+            )
+            if centralized_actor_inference
+            else (None,) * worker_count
+        )
         self._executors = tuple(
             ProcessPoolExecutor(
                 max_workers=1,
@@ -367,16 +500,160 @@ class ParallelRolloutCollector:
                     self.counterfactual_ring_size,
                     self.counterfactual_proposal_sample_rate,
                     self.episode_id_start,
+                    self._actor_request_queue,
+                    self._actor_response_queues[worker_index],
+                    self.actor_request_timeout_seconds,
                 ),
             )
             for worker_index in range(self.worker_count)
         )
+        if centralized_actor_inference:
+            # actor 使用独立参数副本，训练线程可以继续更新 online model；参数只在
+            # worker_sync_interval 边界受锁保护地刷新。
+            device = next(model.parameters()).device
+            self._actor_model = GNNQNetwork(**model_config).to(device)
+            self._actor_model.eval()
+            self._actor_thread = threading.Thread(
+                target=self._run_actor_service,
+                name='daxigua-gpu-actor',
+                daemon=True,
+            )
+            self._actor_thread.start()
 
     @property
     def model_synced(self):
         """主进程模型是否至少成功同步到全部 rollout worker 一次。"""
 
         return self._model_synced
+
+    @property
+    def actor_mean_batch_size(self):
+        """返回集中 actor 已完成请求的平均微批量大小。"""
+
+        return self.actor_stats_snapshot()['mean_batch_size']
+
+    def actor_stats_snapshot(self):
+        """原子读取集中 actor 的累计统计，供日志/门禁保持字段自洽。"""
+
+        with self._actor_stats_lock:
+            requests = self.actor_inference_requests
+            batches = self.actor_inference_batches
+            return {
+                'requests': requests,
+                'batches': batches,
+                'mean_batch_size': (
+                    requests / batches
+                    if batches > 0
+                    else 0.0
+                ),
+                'max_batch': self.actor_inference_max_batch,
+                'seconds': self.actor_inference_seconds,
+            }
+
+    def _run_actor_service(self):
+        """持续汇总各 worker 请求并在主进程设备上做批量 Q 推理。"""
+
+        import torch
+
+        while not self._actor_stop.is_set():
+            try:
+                request = self._actor_request_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if request is None:
+                break
+
+            requests = [request]
+            deadline = (
+                time.perf_counter()
+                + self.actor_batch_wait_seconds
+            )
+            while len(requests) < self.actor_batch_size:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0.0:
+                    break
+                try:
+                    requests.append(
+                        self._actor_request_queue.get(
+                            timeout=remaining
+                        )
+                    )
+                except queue.Empty:
+                    break
+
+            started_at = time.perf_counter()
+            try:
+                graphs = tuple(
+                    _load_from_bytes(payload)
+                    for _worker_index, _request_id, payload
+                    in requests
+                )
+                graph_batch = collate_graph_tensors(graphs)
+                with self._actor_lock, torch.inference_mode():
+                    q_values = self._actor_model(
+                        graph_batch
+                    ).detach().cpu()
+                for (
+                        worker_index,
+                        request_id,
+                        _payload,
+                    ), (action_start, action_end) in zip(
+                        requests,
+                        graph_batch.action_slices):
+                    values = tuple(float(value) for value in (
+                        q_values[action_start:action_end].tolist()
+                    ))
+                    self._actor_response_queues[worker_index].put(
+                        (request_id, values, None),
+                        timeout=self.actor_request_timeout_seconds,
+                    )
+            except Exception as exc:
+                self._actor_failure = (
+                    f'{type(exc).__name__}: {exc}'
+                )
+                for worker_index, request_id, _payload in requests:
+                    try:
+                        self._actor_response_queues[worker_index].put(
+                            (request_id, (), self._actor_failure),
+                            timeout=1.0,
+                        )
+                    except Exception:
+                        pass
+            finally:
+                with self._actor_stats_lock:
+                    self.actor_inference_requests += len(requests)
+                    self.actor_inference_batches += 1
+                    self.actor_inference_max_batch = max(
+                        self.actor_inference_max_batch,
+                        len(requests),
+                    )
+                    self.actor_inference_seconds += (
+                        time.perf_counter() - started_at
+                    )
+
+    def _stop_actor_service(self):
+        """停止集中 actor 线程并关闭跨进程队列。"""
+
+        if self._actor_thread is None:
+            return
+        self._actor_stop.set()
+        try:
+            self._actor_request_queue.put_nowait(None)
+        except (queue.Full, ValueError):
+            pass
+        self._actor_thread.join(timeout=10.0)
+        if self._actor_thread.is_alive():
+            raise RuntimeError(
+                'centralized actor service did not stop cleanly'
+            )
+        self._actor_thread = None
+        for actor_queue in (
+                self._actor_request_queue,
+                *self._actor_response_queues):
+            if actor_queue is None:
+                continue
+            actor_queue.close()
+            actor_queue.join_thread()
 
     def close(self):
         """关闭 worker 进程池。"""
@@ -408,7 +685,10 @@ class ParallelRolloutCollector:
         finally:
             for executor in self._executors:
                 executor.shutdown(wait=True, cancel_futures=True)
-            self._closed = True
+            try:
+                self._stop_actor_service()
+            finally:
+                self._closed = True
         return self.attribution_finalization_summaries
 
     def sync_model(self, model=None, policy_version=None):
@@ -431,7 +711,22 @@ class ParallelRolloutCollector:
             if not policy_version:
                 raise ValueError('policy_version must not be empty')
         self.policy_version = policy_version
-        state_bytes = _save_to_bytes(state_dict)
+        if self.centralized_actor_inference:
+            if self._actor_failure is not None:
+                raise RuntimeError(
+                    'centralized actor service has failed: '
+                    f'{self._actor_failure}'
+                )
+            with self._actor_lock:
+                self._actor_model.load_state_dict(
+                    state_dict,
+                    strict=True,
+                )
+                self._actor_model.eval()
+            # 参数无需跨进程复制；仍通知 worker 更新因果样本中的策略版本。
+            state_bytes = None
+        else:
+            state_bytes = _save_to_bytes(state_dict)
         futures = tuple(
             executor.submit(
                 _worker_sync_model,
@@ -441,7 +736,10 @@ class ParallelRolloutCollector:
             for executor in self._executors
         )
         for future in futures:
-            future.result()
+            if not future.result():
+                raise RuntimeError(
+                    'parallel worker rejected model synchronization'
+                )
         self._model_synced = True
 
     def collect_steps(self, step_count, epsilon=1.0):
@@ -454,6 +752,11 @@ class ParallelRolloutCollector:
         """提交一次异步并行采集任务，返回可等待的 handle。"""
 
         self._ensure_open()
+        if self._actor_failure is not None:
+            raise RuntimeError(
+                'centralized actor service has failed: '
+                f'{self._actor_failure}'
+            )
         step_count = int(step_count)
         if step_count <= 0:
             raise ValueError('step_count must be positive')
@@ -489,6 +792,11 @@ class ParallelRolloutCollector:
 
         self._ensure_open()
         results = tuple(future.result() for future in handle.futures)
+        if self._actor_failure is not None:
+            raise RuntimeError(
+                'centralized actor service has failed: '
+                f'{self._actor_failure}'
+            )
         wall_seconds = time.perf_counter() - handle.started_at
 
         all_transitions = []

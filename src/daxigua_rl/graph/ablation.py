@@ -1,13 +1,13 @@
-"""GNN 图特征消融工具。
+"""GNN 图特征与虚拟结构消融工具。
 
-消融层只负责把已经构建好的 `GraphData` 中部分特征置零。
-它不修改游戏状态，也不改变图的节点数量、边数量或特征维度。
-这样不同实验之间可以保持完全一致的模型输入形状，便于对比。
+普通消融只把已经构建好的 ``GraphData`` 中部分特征置零，保持拓扑不变。
+若某类虚拟节点的存在本身就会泄漏被消融信息（例如 ``chain_motif``），配置还可
+显式删除该类节点及其关联边；特征维度仍保持一致。
 """
 
 from dataclasses import dataclass, field
 
-from .schema import EDGE_TYPES, NODE_TYPES, GraphData
+from .schema import EDGE_TYPES, NODE_TYPES, GraphData, GraphEdgeRef
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ class FeatureAblationConfig:
     disabled_edge_feature_groups: tuple = field(default_factory=tuple)    # 预定义边特征组名称。
     disabled_node_masks: tuple = field(default_factory=tuple)             # 更精确的节点遮罩规则。
     disabled_edge_masks: tuple = field(default_factory=tuple)             # 更精确的边遮罩规则。
+    dropped_node_types: tuple = field(default_factory=tuple)              # 删除会以拓扑本身泄漏信息的虚拟节点类型。
 
 
 # 节点特征组。每个组可以只作用于某一种节点，避免统一特征矩阵里的同名字段被误伤。
@@ -60,6 +61,57 @@ NODE_FEATURE_GROUPS = {
             'max_level',
             'empty_space_ratio',
         ), target_type='global'),                                                        # 屏蔽全局局面摘要。
+    ),
+    'fruit_structure': (
+        FeatureMask((
+            'reachable_action_fraction',
+            'top_visible_ratio',
+            'partner_reachable',
+            'partner_count',
+            'reachable_partner_count',
+            'support_parent_count',
+            'supported_child_count',
+            'burial_depth',
+            'inversion_count',
+            'critical_blocker_count',
+            'connected_to_top_space',
+        ), target_type='board_fruit'),                                                   # 屏蔽 StateAnalysis 提供的单果结构摘要。
+    ),
+    'action_lane_structure': (
+        FeatureMask((
+            'q0_landing_depth',
+            'q0_is_safe',
+            'q0_blocker_count',
+        ), target_type='action'),                                                        # 屏蔽 q0 与动作列对齐的落点/安全摘要。
+    ),
+    'global_structure': (
+        FeatureMask((
+            'has_state_analysis',
+            'analysis_valid',
+            'analysis_degraded',
+            'top_connected_capacity',
+            'recoverability',
+            'chain_readiness',
+            'top_connected_free_space_ratio',
+            'sealed_cavity_ratio',
+            'sealed_cavity_count',
+        ), target_type='global'),                                                        # 屏蔽 C/R/K 与自由空间拓扑摘要。
+    ),
+    'chain_motif': (
+        FeatureMask((
+            'is_chain_motif_node',
+            'level',
+            'motif_is_merge_pair',
+            'motif_is_level_ladder',
+            'motif_base_level',
+            'motif_member_count',
+            'motif_depth',
+            'motif_readiness',
+            'motif_trigger_action_fraction',
+            'motif_current_queue_compatible',
+            'motif_future_queue_compatible',
+            'motif_future_queue_weight',
+        ), target_type='chain_motif'),                                                   # 保留 motif 节点但屏蔽其结构内容，便于固定图形状做消融。
     ),
 }
 
@@ -133,6 +185,58 @@ EDGE_FEATURE_GROUPS = {
             'is_near_boundary',
         ), target_type='board_fruit_to_boundary'),                                       # 屏蔽场上水果与边界之间的距离/风险关系。
     ),
+    'fruit_structure': (
+        FeatureMask((
+            'is_contact_relation',
+            'is_support_relation',
+            'is_caps_relation',
+            'is_bridges_relation',
+            'is_reachable_partner_relation',
+            'is_critical_blocker_relation',
+            'is_inversion_blocker_relation',
+            'structure_confidence',
+        ), target_type='board_fruit_to_board_fruit'),                                    # 屏蔽水果之间的显式结构关系。
+        FeatureMask((
+            'action_reaches_fruit',
+            'is_q0_first_blocker',
+        ), target_type='action_to_board_fruit'),                                         # 屏蔽按 action offset 对齐的可达/第一阻挡关系。
+    ),
+    'chain_motif': (
+        FeatureMask((
+            'is_board_chain_motif_edge',
+            'motif_role_pair_member',
+            'motif_role_chain_target',
+            'motif_stage',
+            'motif_trigger_now',
+            'motif_future_queue',
+            'motif_preserve',
+            'motif_break_risk',
+            'motif_relation_strength',
+        ), target_type='board_fruit_to_chain_motif'),
+        FeatureMask((
+            'is_queue_chain_motif_edge',
+            'queue_index',
+            'motif_role_pair_member',
+            'motif_role_chain_target',
+            'motif_stage',
+            'motif_trigger_now',
+            'motif_future_queue',
+            'motif_preserve',
+            'motif_break_risk',
+            'motif_relation_strength',
+        ), target_type='queue_fruit_to_chain_motif'),
+        FeatureMask((
+            'is_action_chain_motif_edge',
+            'motif_role_pair_member',
+            'motif_role_chain_target',
+            'motif_stage',
+            'motif_trigger_now',
+            'motif_future_queue',
+            'motif_preserve',
+            'motif_break_risk',
+            'motif_relation_strength',
+        ), target_type='action_to_chain_motif'),                                         # 屏蔽 motif 的成员角色、时序和动作风险关系。
+    ),
 }
 
 
@@ -152,6 +256,21 @@ ABLATION_PRESETS = {
     'no_action_board_relation': FeatureAblationConfig(
         disabled_edge_feature_groups=('action_board_spatial', 'action_board_level'),
     ),                                                                                    # 去掉动作和场上水果之间的直接关系，只保留动作自身特征。
+    'no_structure_analysis': FeatureAblationConfig(
+        disabled_node_feature_groups=(
+            'fruit_structure',
+            'action_lane_structure',
+            'global_structure',
+            'chain_motif',
+        ),
+        disabled_edge_feature_groups=(
+            'fruit_structure',
+            'chain_motif',
+        ),
+        # motif 数量、成员连接和动作连接的拓扑本身就是 StateAnalysis 输出，
+        # 仅把特征置零仍会泄漏结构，因此完整消融必须删除这些虚拟节点及关联边。
+        dropped_node_types=('chain_motif',),
+    ),                                                                                    # 屏蔽普通结构特征，并移除会泄漏 motif 的虚拟拓扑。
 }
 
 
@@ -170,8 +289,9 @@ class GraphAblator:
     def apply(self, graph):
         """返回消融后的新图。
 
-        原始 `graph` 不会被修改；新图的维度、节点编号、边编号保持不变，
-        只有被遮罩的特征列会被置为 0。
+        原始 ``graph`` 不会被修改。普通遮罩保持节点/边编号不变；若配置了
+        ``dropped_node_types``，关联节点和边会被删除并规范重编号，但节点/边
+        特征维度不变。
         """
 
         node_masks = self._collect_node_masks()
@@ -196,13 +316,85 @@ class GraphAblator:
             label='edge',
         )
 
-        return GraphData(
+        masked_graph = GraphData(
             node_features=node_features,
             edge_index=graph.edge_index,
             edge_features=edge_features,
             node_refs=graph.node_refs,
             edge_refs=graph.edge_refs,
             action_node_indices=graph.action_node_indices,
+            action_indices=graph.action_indices,
+            node_feature_names=graph.node_feature_names,
+            edge_feature_names=graph.edge_feature_names,
+        )
+        return self._drop_configured_node_types(masked_graph)
+
+    def _drop_configured_node_types(self, graph):
+        """删除指定虚拟节点及关联边，避免拓扑成为消融侧信道。"""
+
+        dropped_types = frozenset(self.config.dropped_node_types)
+        if not dropped_types:
+            return graph
+        unknown_types = dropped_types.difference(NODE_TYPES)
+        if unknown_types:
+            raise KeyError(
+                'unknown dropped node types: '
+                + ', '.join(sorted(unknown_types))
+            )
+        protected_types = dropped_types.intersection(
+            {'action', 'global'}
+        )
+        if protected_types:
+            raise ValueError(
+                'action/global nodes cannot be dropped from a policy graph: '
+                + ', '.join(sorted(protected_types))
+            )
+
+        kept_old_indices = tuple(
+            node_index
+            for node_index, ref in enumerate(graph.node_refs)
+            if ref.node_type not in dropped_types
+        )
+        old_to_new = {
+            old_index: new_index
+            for new_index, old_index in enumerate(kept_old_indices)
+        }
+
+        edge_index = []
+        edge_features = []
+        edge_refs = []
+        for (source, target), features, ref in zip(
+                graph.edge_index,
+                graph.edge_features,
+                graph.edge_refs):
+            if source not in old_to_new or target not in old_to_new:
+                continue
+            new_source = old_to_new[source]
+            new_target = old_to_new[target]
+            edge_index.append((new_source, new_target))
+            edge_features.append(features)
+            edge_refs.append(GraphEdgeRef(
+                edge_type=ref.edge_type,
+                source_node=new_source,
+                target_node=new_target,
+            ))
+
+        return GraphData(
+            node_features=tuple(
+                graph.node_features[index]
+                for index in kept_old_indices
+            ),
+            edge_index=tuple(edge_index),
+            edge_features=tuple(edge_features),
+            node_refs=tuple(
+                graph.node_refs[index]
+                for index in kept_old_indices
+            ),
+            edge_refs=tuple(edge_refs),
+            action_node_indices=tuple(
+                old_to_new[index]
+                for index in graph.action_node_indices
+            ),
             action_indices=graph.action_indices,
             node_feature_names=graph.node_feature_names,
             edge_feature_names=graph.edge_feature_names,

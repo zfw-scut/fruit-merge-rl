@@ -7,8 +7,9 @@
 本项目同时包含基于 `pygame` / `pymunk` 的《合成大西瓜》桌面游戏，以及基于
 PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境封装已经删除，当前
 `daxigua_rl` 是重新设计后的 Reward V2、Double DQN + 3-step、完整状态归因、
-预算反事实和局部 Shapley 实现。游戏本体通过稳定接口供训练侧使用，始终不反向依赖
-自动化代码。
+显式结构关系与连锁 motif、关系感知 dueling GNN、六维结构辅助监督、预算反事实、
+局部 Shapley 和集中式 GPU actor 实现。游戏本体通过稳定接口供训练侧使用，始终不
+反向依赖自动化代码。
 
 ## 核心源码
 
@@ -36,20 +37,21 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/attribution/counterfactual_runner.py` | 在独立 CPU 进程中恢复 `EngineSnapshot`，先验证 factual branch，再运行有限替代动作、Reward V2 回报和冻结 target bootstrap；只有可复现结果才能转成因果样本。 | `freeze_target_policy_payload()`、`run_counterfactual_task()`、`counterfactual_result_to_causal_samples()` |
 | `src/daxigua_rl/attribution/local_shapley_runner.py` | 对极少数高价值协同事件运行局部物理 Shapley。按实际轨迹逐步检查 grand coalition，缓存 2～4 个候选的 subset，使用配对排列并执行效率残差门禁。 | `LocalShapleyTask`、`LocalShapleyResult`、`run_local_shapley_task()`、`local_shapley_result_to_causal_samples()` |
 | `src/daxigua_rl/graph/` | GNN 图构建相关代码。负责把游戏状态和动作候选转换成模型输入图，并提供训练实验用的特征消融层。 | `GraphBuilder`、`GraphAblator` |
-| `src/daxigua_rl/graph/schema.py` | 框架无关的图数据结构和节点/边特征名。 | `GraphData`、`GraphNodeRef`、`GraphEdgeRef`、`NODE_FEATURE_NAMES`、`EDGE_FEATURE_NAMES` |
-| `src/daxigua_rl/graph/builder.py` | 从 `GameState` 和 `ActionCandidate` 构建 GNN 输入图；几何、接触和投放路径关系使用真实碰撞半径，图维度保持不变。 | `GraphBuilder.build()` |
-| `src/daxigua_rl/graph/ablation.py` | 图特征消融工具。在不改变图维度的前提下按配置置零部分节点或边特征。 | `GraphAblator`、`FeatureAblationConfig`、`FeatureMask`、`ABLATION_PRESETS` |
+| `src/daxigua_rl/graph/schema.py` | 框架无关的结构图契约。除水果/队列/动作/全局/边界外定义 `chain_motif` 节点，以及支撑、盖压、桥接、伙伴、blocker、motif 角色和逐动作触发特征；训练特征不编码任意对象 ID。 | `GraphData`、`GraphNodeRef`、`GraphEdgeRef`、`NODE_FEATURE_NAMES`、`EDGE_FEATURE_NAMES` |
+| `src/daxigua_rl/graph/builder.py` | 从 `GameState`、动作候选和可选的同边界 `StateAnalysis` 构建 GNN 输入图；投影可达性、C/R/K、空腔、显式水果关系、q0 落点及 `merge_pair` / `level_ladder` motif。省略分析时新增列为零且不创建 motif。 | `GraphBuilder.build(state, action_candidates, state_analysis=None)` |
+| `src/daxigua_rl/graph/ablation.py` | 图消融工具。普通 preset 保持拓扑并按配置置零特征；`no_structure_analysis` 还会删除 motif 虚拟节点及关联边，避免节点数量和连接关系侧漏 V2 结构内容。特征维度保持不变。 | `GraphAblator`、`FeatureAblationConfig`、`FeatureMask`、`ABLATION_PRESETS` |
 | `src/daxigua_rl/graph/tensor.py` | PyTorch 张量转换层。把框架无关 `GraphData` 转成单图 `GraphTensor`，并把多张图拼成不连通 `GraphBatch`。 | `graph_to_tensor()`、`collate_graph_tensors()`、`GraphTensor`、`GraphBatch` |
-| `src/daxigua_rl/models/` | 强化学习模型代码。当前只包含最小 GNN-Q 前向模型，不包含训练循环。 | `GNNQNetwork` |
-| `src/daxigua_rl/models/gnn_q.py` | 统一图 message passing Q 网络。输入 `GraphData`、`GraphTensor` 或 `GraphBatch`，输出单图或批量扁平动作 Q 值。 | `GNNQNetwork.forward()`、`MessagePassingLayer` |
+| `src/daxigua_rl/models/` | 强化学习模型代码。当前包含关系感知 dueling GNN-Q 与共享结构辅助头，不包含训练循环。 | `GNNQNetwork` |
+| `src/daxigua_rl/models/gnn_q.py` | 关系 gate + attention 的 message passing 网络；从 global 节点读取 `V(s)`、从动作节点读取中心化 `A(s,a)`，并复用同一编码输出每动作六维结构预测。 | `GNNQNetwork.forward()`、`GNNQNetwork.forward_with_aux()`、`MessagePassingLayer`、`STRUCTURE_PREDICTION_NAMES` |
 | `src/daxigua_rl/training/` | 强化学习训练侧组件。包含 n-step 张量经验、冷热 TD replay、因果 replay 接入、单/多进程采集、Double DQN 更新、预算反事实/局部 Shapley 协调和版本化 checkpoint。 | `TensorTransition`、`ReplayBuffer`、`NStepTransitionAccumulator`、`DQNTrainer`、`CounterfactualCoordinator` |
 | `src/daxigua_rl/training/identity.py` | 定义一次训练 run 内稳定、可哈希、可跨进程序列化的轨迹身份。 | `TransitionKey(worker_id, episode_id, step_index)` |
-| `src/daxigua_rl/training/tensor_transition.py` | DQN 张量化经验记录。保存 CPU `GraphTensor` 和实际 `bootstrap_steps`，支持 1～3 步 episode 尾部及 `gamma**bootstrap_steps`。 | `TensorTransition` |
+| `src/daxigua_rl/training/tensor_transition.py` | DQN 张量化经验记录。保存 CPU `GraphTensor`、实际 `bootstrap_steps` 和可选的本窗口起始动作一步 `StructuralTarget`；结构 target 不随 3-step reward 累加。 | `TensorTransition` |
+| `src/daxigua_rl/training/structural_targets.py` | 从相邻稳定 `StateAnalysis` 与本步物理证据构造六维、逐维带 mask、限制在 `[-1,1]` 的一步结构监督；提供 14-byte float16 replay payload。 | `StructuralTarget`、`build_structural_target()`、`STRUCTURAL_TARGET_DIMENSIONS` |
 | `src/daxigua_rl/training/n_step.py` | 每 worker 独立的 n-step 累加器。正式训练聚合 3-step reward，在 terminated/truncated 或显式 flush 时输出自然缩短的尾部。 | `NStepTransitionAccumulator` |
 | `src/daxigua_rl/training/replay_buffer.py` | DQN 固定容量经验回放池。支持纯内存和热内存 + 冷磁盘；checkpoint 在内存模式精确恢复，在 hybrid 模式有界保存热层并明确报告 omitted cold count。 | `ReplayBuffer`、`checkpoint_state_dict()`、`load_checkpoint_state_dict()` |
-| `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。串联 Reward V2、StateAnalyzer、AttributionTracker、规则因果样本、3-step return、32 边界快照环和反事实 proposal，完整分析仍留在 worker。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
-| `src/daxigua_rl/training/parallel_collector.py` | Windows spawn 多进程 rollout 调度器。各 worker 独立持有环境、归因器、n-step 和快照环；主进程回收 transition、因果样本、proposal 与轻量聚合统计，worker 内 PyTorch 限为单线程。 | `ParallelRolloutCollector`、`WorkerAttributionFinalization` |
-| `src/daxigua_rl/training/dqn.py` | Double DQN + n-step 更新器。online 网络选择 bootstrap 动作、target 网络估值，同时联合 TD、规则排序和反事实/局部 Shapley Huber loss；非有限值在 optimizer 前 fail-fast。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
+| `src/daxigua_rl/training/collector.py` | 单进程 rollout 采集器。串联 Reward V2、结构图、一步结构 target、StateAnalyzer、AttributionTracker、规则因果样本、3-step return、32 边界快照环和反事实 proposal；完整分析对象仍留在 worker。 | `RolloutCollector`、`EpsilonGreedyPolicy`、`RolloutStats` |
+| `src/daxigua_rl/training/parallel_collector.py` | spawn 多进程 rollout 调度器。各 worker 独立持有环境、分析器、归因器、n-step 和快照环；可把 greedy 图请求集中到主进程设备上的独立 actor 副本，按数量/等待窗口做微批推理。 | `ParallelRolloutCollector`、`actor_mean_batch_size`、`WorkerAttributionFinalization` |
+| `src/daxigua_rl/training/dqn.py` | Double DQN + n-step 更新器。online 网络选择 bootstrap 动作、target 网络估值，同时联合 TD、masked 六维结构、规则排序和反事实/局部 Shapley Huber loss；非有限值在 optimizer 前 fail-fast。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
 | `src/daxigua_rl/training/counterfactual_coordinator.py` | 主进程反事实协调器。冻结 target payload、登记真实步、执行软/硬 token 预算、调度独立 CPU runner，并把可复现结果写入因果 replay；预算接口同时供 Shapley 使用。 | `CounterfactualCoordinator`、`recommended_counterfactual_worker_count()` |
 | `src/daxigua_rl/training/local_shapley_coordinator.py` | 以一个独立 worker 管理极稀疏局部 Shapley 的筛选、共享预算预留、pending 重试、结果门禁与因果样本写入。 | `LocalShapleyCoordinator`、`LocalShapleyCoordinatorStats` |
 | `src/daxigua_rl/training/checkpointing.py` | 原子、版本化训练 checkpoint。维护 run manifest、规范配置指纹、Python/PyTorch/CUDA RNG、可选组件状态及严格 resume 配置校验。 | `RunManifest`、`atomic_torch_save()`、`build_training_checkpoint()`、`load_training_checkpoint()` |
@@ -58,7 +60,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。用于测试降低 fps、最大物理帧、稳定帧和 Pymunk 迭代次数后的速度收益与游戏分布偏移。 | `python -m daxigua_rl.scripts.compare_physics_modes --checkpoint ...`；输出 `summary.csv`、`episode_metrics.csv` 和 `plots/physics_mode_comparison.png`。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线。 | `train_dqn_causal_smoke_5k.toml`、`train_dqn_causal_calibration_10k.toml`、`train_dqn_causal_500k.toml` |
-| `configs/train_dqn_fast30_parallel.toml` | 完整算法/环境基线：500k、fast30、8 worker、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套阶段配置继承它。 | `train_dqn.py --config ...` |
+| `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：500k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套阶段配置继承它。 | `train_dqn.py --config ...` |
 | `configs/train_dqn_causal_smoke_5k.toml` | 第一次完整因果训练的 5000-update 集成烟测配置；算法与物理语义不降级，只覆盖规模和日志频率。 | 运行后才可记录烟测结论。 |
 | `configs/train_dqn_causal_calibration_10k.toml` | 10000-update 规模标定配置；若稀疏事件样本不足，可通过 CLI 覆盖从 update 0 另起独立 25000 校准。 | 不直接改变总步数恢复；用于校准量级，不预先代表已通过。 |
 | `configs/train_dqn_causal_500k.toml` | 第一次 500000-update 大规模训练的稳定启动名，继承完整冻结基线。 | 只在 preflight、烟测和标定门禁完成后启动。 |
@@ -73,7 +75,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `assets/fruits.zip` | 原始水果图片压缩包归档。 | 不参与运行，只作资源备份。 |
 | `README.md` | 项目总入口，包含手动游戏、完整因果训练概览、preflight、三阶段配置和恢复说明。 | 不记录尚未产生的烟测结果。 |
 | `requirements.txt` | 游戏与物理基础依赖。 | 固定 `pygame` 和 `pymunk`；快照重演还校验 Chipmunk 构建版本。 |
-| `requirements-training.txt` | 训练侧 Python 依赖版本。 | 复用 `requirements.txt` 并固定 PyTorch、matplotlib；CUDA wheel 来源应按目标驱动选择。 |
+| `requirements-training.txt` | 训练侧 Python 依赖版本。 | 当前 RTX 5090 正式环境固定 PyTorch 2.12.1 和 matplotlib 3.11.1；PyTorch 从官方 cu130 源安装，preflight 要求 `2.12.1+cu130` / CUDA runtime 13.0。 |
 | `LICENSE` | 开源许可证。 | Apache 2.0。 |
 
 ## 辅助工具
@@ -86,13 +88,18 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |
 | `tools/monitor_cgroup_memory.py` | Linux cgroup-v2 内存旁路监控。分别记录原始余量、`inactive_file` 页缓存、可回收工作集余量和 `memory.events`。 | 云容器训练时与通用资源监控并行运行；避免 checkpoint/replay 文件缓存造成假性低内存告警，同时保留真实 OOM/pressure 硬门禁。 |
 | `tools/temporary_rollout_smoke_test.py` | 临时 GNN rollout 验证脚本。用于检查 `DaxiguaEnv -> GraphBuilder -> GNNQNetwork -> step()` 链路是否闭合。 | 不是正式训练入口；验证完成或正式训练脚本落地后可删除或改造。 |
-| `tools/preflight_training.py` | 正式训练前只做短计算、不创建训练 run 的门禁。验证 TOML、Python/Pymunk/Chipmunk、CUDA 前后向、完整因果 optimizer step、局部 Shapley 物理重演、`EngineSnapshot` 多次确定性重演、磁盘和 CPU 余量。 | JSON 写入 `runs/preflight/latest.json`；任一 required check 失败时返回非零。 |
+| `tools/preflight_training.py` | 正式训练前只做短计算、不创建训练 run 的门禁。验证 V2 正式参数、Python/Pymunk/Chipmunk、cu130 CUDA 前后向、六维结构与完整因果 optimizer step、局部 Shapley 物理重演、`EngineSnapshot` 多次确定性重演、磁盘和 CPU 余量。 | JSON 写入 `runs/preflight/latest.json`；任一 required check 失败时返回非零。 |
 
 ## 测试目录
 
 | 路径 | 作用 | 备注 |
 | --- | --- | --- |
 | `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向、next_graph 缓存、分层 replay、并行 collector、Reward V2 分析统计和 DQN 更新链路。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
+| `tests/test_structure_graph.py` | V2 结构图契约测试。覆盖水果/全局结构特征、显式关系方向、motif 角色与逐动作 mask、q0 blocker、无分析零回退、1/3/7 动作映射、无 ID 泄漏和结构消融。 | 使用标准库 `unittest`。 |
+| `tests/test_structure_aware_gnn.py` | 关系 gate/attention、dueling Q 和共享六维辅助头测试。覆盖单图/批图等价、动作 slice 隔离、输出范围和梯度。 | 使用标准库 `unittest`，依赖 PyTorch。 |
+| `tests/test_structural_targets.py` | 六维一步结构 target、有效 mask、物理连锁谱系、terminal、float16 payload、旧 transition 和 n-step 保留语义测试。 | 使用标准库 `unittest`。 |
+| `tests/test_structural_dqn_loss.py` | DQN 结构辅助训练测试。验证只监督实际动作、逐维 mask、`lambda_structural` 加权、旧无 target 样本和非有限值 fail-fast。 | 使用标准库 `unittest`，依赖 PyTorch。 |
+| `tests/test_centralized_actor_inference.py` | 集中式 actor 的 CPU 集成测试。验证多 worker 请求、微批统计、参数同步、采集结果和干净关闭；正式 CUDA 吞吐仍在云端烟测验证。 | 使用标准库 `unittest`，依赖 PyTorch multiprocessing。 |
 | `tests/test_attribution_foundations.py` | 完整状态归因基础语义测试。验证稳定窗口、truncated bootstrap、真实碰撞半径、图几何和 worker/episode/step 身份键。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
 | `tests/test_attribution_schema.py` | `StateAnalysis` 数据契约测试。验证深只读、15 位 mask、队列槽位、跨对象引用、时间语义、pickle 和真实 Windows spawn 往返。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
 | `tests/test_state_analyzer.py` | `StateAnalyzer` 人工几何场景测试。验证空棋盘、解析投放列与并列 blocker、支撑方向、伙伴/merge/ladder motif、封闭空腔、输入降级和左右镜像。 | 使用标准库 `unittest`，不依赖 Pymunk 随机稳定过程。 |
@@ -124,9 +131,10 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
+| `docs/rl/STRUCTURE_AWARE_GNN_V2.md` | 当前结构感知 GNN 与首次新架构长训的主规格。 | 记录关系图、连锁 motif、关系 GNN、六维辅助监督、集中式 actor、无泄漏/非奖励边界、启用参数、指标以及旧 checkpoint/replay 不兼容范围。 |
 | `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、局部 Shapley、测试和长训流程；实现步骤 1～11 已落地，烟测/标定/正式长训结果仍须按实际运行记录。 |
 | `docs/rl/FIRST_500K_RUNBOOK.md` | 第一次 500k 完整因果训练的执行手册。 | 固定 Ubuntu/CUDA 安装、全量测试、preflight、三阶段命令、监控/停止阈值、恢复语义和归档顺序。 |
-| `docs/rl/gnn_daxigua_design_reference.md` | GNN 状态图节点、边和特征语义参考。 | 当前 `radius` 节点特征和相关几何边特征均表示真实碰撞半径。 |
+| `docs/rl/gnn_daxigua_design_reference.md` | 最初 GNN 几何状态图的背景参考。 | 当前可执行结构图与训练契约已由 `STRUCTURE_AWARE_GNN_V2.md` 接续；`radius` 仍表示真实碰撞半径。 |
 | `docs/rl/INTERFACE_V0.md` | RL v0 接口说明。 | 记录 `HeadlessGame`、`DaxiguaEnv`、状态数据和边界规则。 |
 | `docs/rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md` | 训练速度优化计划。 | 记录 profiling、next_graph 缓存、并行采样、fast physics、图构建优化和日志频率等优化顺序。 |
 | `docs/training_runs/FIRST_500K_READINESS.md` | 第一次 500k 的阶段证据与批准清单。 | 只填写实际测试/preflight/run 产物；明确区分已通过、运行中、待运行和未获准。 |
@@ -161,11 +169,13 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
   访问游戏；在 worker 内缓存前后 `StateAnalysis` 并计算 Reward V2。
 - `merge_utility()` / `compute_state_potential()` / `compute_reward()`：Reward V2
   纯函数入口，分别负责指数合成效用、C/R/K potential 和相邻状态 shaping。
-- `GraphBuilder`：把无渲染游戏状态和候选动作转换成框架无关 `GraphData`，供后续 GNN/Q 网络使用。
-- `GraphAblator`：训练实验用的图特征消融层，通过置零特征对比不同信息组对模型的影响。
+- `GraphBuilder`：把无渲染游戏状态、候选动作和同边界 `StateAnalysis` 转换成结构
+  `GraphData`；显式编码支撑/遮挡/伙伴/可达关系与连锁 motif，不编码对象身份。
+- `GraphAblator`：训练实验用的图消融层；普通信息组通过置零特征对比，完整结构消融还会移除 motif 虚拟拓扑。
 - `graph_to_tensor()`：把 `GraphData` 转成 PyTorch 张量，形成 `node_features`、`edge_index`、`edge_features` 和 `action_node_indices`。
 - `collate_graph_tensors()`：把多张 `GraphTensor` 拼成不连通 `GraphBatch`，记录每张图的 action slice。
-- `GNNQNetwork`：当前 GNN-Q 前向模型，输入单图输出 `[action_count]`，输入 `GraphBatch` 输出 `[total_action_count]`。
+- `GNNQNetwork`：关系 gate/attention + dueling Q 模型；`forward()` 输出扁平动作
+  Q，`forward_with_aux()` 复用编码并额外输出 `[total_action_count, 6]` 结构预测。
 - `TensorTransition`：正式 TD 主链路使用的张量化经验记录，保存 CPU
   `GraphTensor`、n-step reward 和实际 `bootstrap_steps`；图特征用 `float16`
   降低 replay 常驻内存。
@@ -179,15 +189,17 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
   `AttributionTracker`、规则因果样本生成、n-step 聚合和反事实 proposal 构建。
 - `ParallelRolloutCollector`：多进程经验采集器，多个 worker 并行推进 headless
   物理并分别维护 StateAnalyzer/AttributionTracker/n-step/快照环，主进程统一写
-  replay 并排空 proposal；可通过 `--async-rollout` 与 DQN 更新重叠。
+  replay 并排空 proposal；可通过 `--async-rollout` 与 DQN 更新重叠，并把 greedy
+  请求集中到主进程 GPU actor 做微批推理。
 - `CausalReplayBuffer` / `RuleCausalSampleBuilder`：把 confirmed 历史事件与原状态图
   关联成独立动作对监督，分层采样且不修改主 replay。
 - `CounterfactualCoordinator`：以冻结 target policy 和共享 token 账本异步执行
   有预算的物理分支，原动作不能复现时不生成标签。
 - `LocalShapleyCoordinator`：仅选择配置比例内的高价值协同事件，和普通反事实共享
   10% 硬预算，并在 grand coalition / 效率检查后写入样本。
-- `DQNTrainer`：Double DQN + n-step 更新器，联合 TD、规则排序和反事实/Shapley
-  SmoothL1Loss，并记录因果 batch、正确率与额外耗时。
+- `DQNTrainer`：Double DQN + n-step 更新器，联合 TD、六维 masked 结构辅助、
+  规则排序和反事实/Shapley SmoothL1Loss，并记录结构有效量、误差、因果 batch、
+  正确率与额外耗时。
 - `train_dqn.py`：完整训练入口，除 CSV、评估和曲线外，还保存反事实预算/重演、
   Shapley、主/因果 replay、运行指纹及 warmup/shutdown/resume/failure sidecar；
   checkpoint 支持严格配置校验和 hot-resume。

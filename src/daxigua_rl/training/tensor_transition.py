@@ -11,6 +11,8 @@ from operator import index
 
 from daxigua_rl.graph.tensor import GraphTensor
 
+from .structural_targets import StructuralTarget
+
 
 @dataclass(frozen=True)
 class TensorTransition:
@@ -49,6 +51,10 @@ class TensorTransition:
     # 不能把缩短的 terminal/truncated 尾部仍按固定 gamma ** 3 折扣。
     bootstrap_steps: int = 1
 
+    # 当前动作的一步结构监督。它不随 n-step reward 累计；聚合经验始终保留
+    # 窗口起始动作自己的 target。None 保持旧 replay/调用方完全兼容。
+    structural_target: StructuralTarget | None = None
+
     def __post_init__(self):
         """做轻量一致性检查，避免训练时才发现图和动作错位。"""
 
@@ -56,6 +62,15 @@ class TensorTransition:
         object.__setattr__(self, 'reward', float(self.reward))
         object.__setattr__(self, 'terminated', bool(self.terminated))
         object.__setattr__(self, 'truncated', bool(self.truncated))
+        if (
+                self.structural_target is not None
+                and not isinstance(
+                    self.structural_target,
+                    StructuralTarget,
+                )):
+            raise TypeError(
+                'structural_target must be StructuralTarget or None'
+            )
         if isinstance(self.bootstrap_steps, bool):
             raise TypeError('bootstrap_steps must be an integer')
         try:

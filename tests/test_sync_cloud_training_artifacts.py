@@ -42,6 +42,7 @@ def _complete_artifacts() -> dict[str, bytes]:
         ).encode(),
         'plots/training_curves.png': png,
         'plots/reward_breakdown_curves.png': png,
+        'plots/structure_learning_curves.png': png,
     }
 
 

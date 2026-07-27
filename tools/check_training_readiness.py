@@ -36,7 +36,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
-READINESS_SCHEMA_VERSION = 2
+READINESS_SCHEMA_VERSION = 3
 DEFAULT_SHAPING_P95_LIMIT = (2.0 ** 1.5) * 0.25
 DEFAULT_BASELINE_CONFIG = (
     PROJECT_ROOT / 'configs' / 'train_dqn_causal_500k.toml'
@@ -109,6 +109,24 @@ REPRODUCTION_OUTCOME_METRIC_FIELDS = frozenset(
     )
 )
 
+STRUCTURAL_SUPERVISION_METRIC_FIELDS = frozenset(
+    {
+        'structural_loss',
+        'weighted_structural_loss',
+        'structural_valid_count',
+        'structural_sample_count',
+        'structural_mean_abs_error',
+    }
+)
+CENTRAL_ACTOR_METRIC_FIELDS = frozenset(
+    {
+        'actor_inference_requests',
+        'actor_inference_batches',
+        'actor_inference_mean_batch_size',
+        'actor_inference_max_batch',
+        'actor_inference_seconds',
+    }
+)
 REQUIRED_METRIC_FIELDS = frozenset(
     {
         'update_step',
@@ -162,7 +180,11 @@ REQUIRED_METRIC_FIELDS = frozenset(
         'checkpoint_step_materialization',
         'checkpoint_extra_materialization',
     }
-) | REPRODUCTION_OUTCOME_METRIC_FIELDS
+) | (
+    REPRODUCTION_OUTCOME_METRIC_FIELDS
+    | STRUCTURAL_SUPERVISION_METRIC_FIELDS
+    | CENTRAL_ACTOR_METRIC_FIELDS
+)
 REQUIRED_EPISODE_FIELDS = frozenset(
     {
         'episode_index',
@@ -2473,6 +2495,9 @@ def audit_training_run(
         'reward_curves': _artifact_info(
             run_dir / 'plots' / 'reward_breakdown_curves.png'
         ),
+        'structure_learning_curves': _artifact_info(
+            run_dir / 'plots' / 'structure_learning_curves.png'
+        ),
     }
     missing_or_empty = [
         name
@@ -2859,6 +2884,311 @@ def audit_training_run(
         max_counterfactual_batch_size=_max_number(
             metrics_rows,
             'counterfactual_batch_size',
+        ),
+    )
+
+    # V2 的结构头只在实际执行动作上学习一步结构变化。仅有字段存在并不能证明
+    # 链路贯通：必须在同一个 optimizer step 中看到有效维度、非零原始 loss，
+    # 以及乘上正式 lambda 后的非零加权项。逐行检查还会阻止计数越界或日志中的
+    # weighted loss 与配置不一致。
+    lambda_structural = _finite_number(
+        config_args.get('lambda_structural')
+    )
+    structural_rows = []
+    structural_invalid_rows = []
+    structural_optimizer_rows = []
+    for row_index, row in enumerate(metrics_rows, start=1):
+        values = {
+            field: _number(row, field)
+            for field in STRUCTURAL_SUPERVISION_METRIC_FIELDS
+        }
+        missing = sorted(
+            field
+            for field, value in values.items()
+            if value is None
+        )
+        reasons = []
+        if missing:
+            reasons.append(f'missing_or_nonfinite={missing!r}')
+        else:
+            loss = values['structural_loss']
+            weighted_loss = values['weighted_structural_loss']
+            valid_count = values['structural_valid_count']
+            sample_count = values['structural_sample_count']
+            mean_abs_error = values[
+                'structural_mean_abs_error'
+            ]
+            valid_integer = _nonnegative_count(valid_count)
+            sample_integer = _nonnegative_count(sample_count)
+            if loss < 0.0:
+                reasons.append('structural_loss_negative')
+            if weighted_loss < 0.0:
+                reasons.append('weighted_structural_loss_negative')
+            if mean_abs_error < 0.0:
+                reasons.append('structural_mean_abs_error_negative')
+            if valid_integer is None:
+                reasons.append('structural_valid_count_not_count')
+            if sample_integer is None:
+                reasons.append('structural_sample_count_not_count')
+            if (
+                    valid_integer is not None
+                    and sample_integer is not None
+                    and valid_integer > 6 * sample_integer):
+                reasons.append(
+                    'structural_valid_count_exceeds_six_per_sample'
+                )
+            if (
+                    lambda_structural is not None
+                    and not math.isclose(
+                        weighted_loss,
+                        lambda_structural * loss,
+                        rel_tol=1e-6,
+                        abs_tol=1e-9,
+                    )):
+                reasons.append(
+                    'weighted_structural_loss_lambda_mismatch'
+                )
+            if (
+                    not reasons
+                    # 第六维仅凭 PhysicsResult 即可有效；要求平均至少五维，
+                    # 才能证明依赖相邻完整 StateAnalysis 的前五维不曾全部
+                    # 失效，避免“只有 chain/terminal 标签”冒充完整结构监督。
+                    and valid_integer >= 5 * sample_integer
+                    and sample_integer > 0
+                    and loss > 0.0
+                    and weighted_loss > 0.0
+                    and mean_abs_error > 0.0):
+                structural_optimizer_rows.append(row_index)
+        structural_rows.append(values)
+        if reasons:
+            structural_invalid_rows.append(
+                {
+                    'row': row_index,
+                    'update_step': _number(row, 'update_step'),
+                    'reasons': reasons,
+                }
+            )
+    structural_config_enabled = (
+        lambda_structural is not None
+        and lambda_structural > 0.0
+    )
+    structural_gate_passed = (
+        structural_config_enabled
+        and len(structural_rows) == len(metrics_rows)
+        and not structural_invalid_rows
+        and bool(structural_optimizer_rows)
+    )
+    _add_check(
+        checks,
+        'structural_supervision_targets_reached_optimizer',
+        structural_gate_passed,
+        lambda_structural=lambda_structural,
+        config_enabled=structural_config_enabled,
+        optimizer_evidence_rows=structural_optimizer_rows,
+        optimizer_evidence_updates=[
+            _number(metrics_rows[index - 1], 'update_step')
+            for index in structural_optimizer_rows
+        ],
+        invalid_rows=structural_invalid_rows,
+        max_valid_count=_max_number(
+            metrics_rows,
+            'structural_valid_count',
+        ),
+        max_sample_count=_max_number(
+            metrics_rows,
+            'structural_sample_count',
+        ),
+        max_structural_loss=_max_number(
+            metrics_rows,
+            'structural_loss',
+        ),
+        max_weighted_structural_loss=_max_number(
+            metrics_rows,
+            'weighted_structural_loss',
+        ),
+        minimum_mean_valid_dimensions_for_evidence=5.0,
+        interpretation=(
+            'a non-zero weighted structural loss with a valid target '
+            'on the same logged update proves that the auxiliary term '
+            'was part of that optimizer objective; at least five valid '
+            'dimensions per sampled target are required so the always-'
+            'available chain/terminal dimension cannot pass alone'
+        ),
+    )
+
+    # 集中 actor 的统计是进程段累计值，resume 后允许按 sidecar 划分的新段归零。
+    # 异步采集可能已预取下一批，因此不能要求它与当前 metrics 行的 collect_steps
+    # 一一对齐；但累计统计自身必须闭合。正式证据至少要出现一次 greedy 请求和
+    # 实际微批，同时每行都应满足 requests / batches == mean_batch_size，且最大
+    # 批量不超过配置。
+    centralized_actor_enabled = (
+        config_args.get('centralized_actor_inference') is True
+    )
+    configured_actor_batch_size = _nonnegative_count(
+        config_args.get('actor_batch_size')
+    )
+    actor_rows = []
+    actor_invalid_rows = []
+    actor_activity_rows = []
+    actor_counter_fields = (
+        'actor_inference_requests',
+        'actor_inference_batches',
+        'actor_inference_max_batch',
+    )
+    for row_index, row in enumerate(metrics_rows, start=1):
+        values = {
+            field: _number(row, field)
+            for field in CENTRAL_ACTOR_METRIC_FIELDS
+        }
+        reasons = []
+        if any(value is None for value in values.values()):
+            reasons.append('missing_or_nonfinite_actor_metric')
+        else:
+            normalized_counts = {
+                field: _nonnegative_count(values[field])
+                for field in actor_counter_fields
+            }
+            if any(
+                    value is None
+                    for value in normalized_counts.values()):
+                reasons.append('actor_counter_not_nonnegative_integer')
+            requests = normalized_counts[
+                'actor_inference_requests'
+            ]
+            batches = normalized_counts['actor_inference_batches']
+            maximum = normalized_counts[
+                'actor_inference_max_batch'
+            ]
+            mean = values['actor_inference_mean_batch_size']
+            seconds = values['actor_inference_seconds']
+            if mean < 0.0:
+                reasons.append('actor_mean_batch_size_negative')
+            if seconds < 0.0:
+                reasons.append('actor_inference_seconds_negative')
+            if requests is not None and batches is not None:
+                if batches > requests:
+                    reasons.append('actor_batches_exceed_requests')
+                if requests == 0:
+                    if (
+                            batches != 0
+                            or maximum not in {0, None}
+                            or mean != 0.0
+                            or seconds != 0.0):
+                        reasons.append(
+                            'zero_requests_have_nonzero_activity'
+                        )
+                elif batches == 0:
+                    reasons.append(
+                        'positive_requests_without_batches'
+                    )
+                else:
+                    expected_mean = requests / batches
+                    if not math.isclose(
+                            mean,
+                            expected_mean,
+                            rel_tol=1e-6,
+                            abs_tol=1e-9):
+                        reasons.append(
+                            'actor_mean_batch_size_mismatch'
+                        )
+                    if maximum is None or maximum <= 0:
+                        reasons.append('actor_max_batch_not_positive')
+                    elif not 1.0 <= mean <= maximum:
+                        reasons.append(
+                            'actor_mean_outside_one_to_max'
+                        )
+                    if (
+                            configured_actor_batch_size is not None
+                            and maximum is not None
+                            and maximum
+                            > configured_actor_batch_size):
+                        reasons.append(
+                            'actor_max_batch_exceeds_config'
+                        )
+                    if seconds <= 0.0:
+                        reasons.append(
+                            'actor_activity_without_positive_seconds'
+                        )
+                    if not reasons:
+                        actor_activity_rows.append(row_index)
+        actor_rows.append(values)
+        if reasons:
+            actor_invalid_rows.append(
+                {
+                    'row': row_index,
+                    'update_step': _number(row, 'update_step'),
+                    'reasons': reasons,
+                }
+            )
+
+    actor_reset_fields = (
+        'actor_inference_requests',
+        'actor_inference_batches',
+        'actor_inference_max_batch',
+        'actor_inference_seconds',
+    )
+    actor_unexpected_resets = {}
+    for field in actor_reset_fields:
+        values = tuple(
+            _number(row, field)
+            for row in metrics_rows
+        )
+        actor_unexpected_resets[field] = [
+            index
+            for index, (left, right) in enumerate(
+                zip(values, values[1:]),
+                start=1,
+            )
+            if (
+                left is not None
+                and right is not None
+                and right < left
+                and index not in resume_segment_starts
+            )
+        ]
+    actor_gate_passed = (
+        centralized_actor_enabled
+        and configured_actor_batch_size is not None
+        and configured_actor_batch_size > 0
+        and len(actor_rows) == len(metrics_rows)
+        and not actor_invalid_rows
+        and bool(actor_activity_rows)
+        and not any(actor_unexpected_resets.values())
+    )
+    _add_check(
+        checks,
+        'centralized_actor_inference_activity',
+        actor_gate_passed,
+        centralized_actor_inference=centralized_actor_enabled,
+        configured_actor_batch_size=configured_actor_batch_size,
+        activity_rows=actor_activity_rows,
+        activity_updates=[
+            _number(metrics_rows[index - 1], 'update_step')
+            for index in actor_activity_rows
+        ],
+        invalid_rows=actor_invalid_rows,
+        unexpected_reset_indices=actor_unexpected_resets,
+        resume_segment_start_indices=list(
+            resume_segment_starts
+        ),
+        max_requests=_max_number(
+            metrics_rows,
+            'actor_inference_requests',
+        ),
+        max_batches=_max_number(
+            metrics_rows,
+            'actor_inference_batches',
+        ),
+        max_observed_batch=_max_number(
+            metrics_rows,
+            'actor_inference_max_batch',
+        ),
+        interpretation=(
+            'positive centralized actor requests are direct evidence '
+            'that at least one non-random (greedy) action used the '
+            'main-process micro-batch service; counters are cumulative '
+            'within a process segment and may include a prefetched next '
+            'rollout, so they are not matched to per-row collect_steps'
         ),
     )
 

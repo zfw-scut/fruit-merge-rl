@@ -235,7 +235,7 @@ class NStepTransitionAccumulatorTest(unittest.TestCase):
 
 
 class ReplaySegmentNstepCompatibilityTest(unittest.TestCase):
-    def test_version_two_round_trip_preserves_bootstrap_steps(self):
+    def test_version_three_round_trip_preserves_bootstrap_steps(self):
         graph = _graph()
         transition = _transition(
             graph,
@@ -246,8 +246,9 @@ class ReplaySegmentNstepCompatibilityTest(unittest.TestCase):
         replay = ReplayBuffer(capacity=4)
 
         payload = replay._pack_segment((transition,))
-        self.assertEqual(payload['version'], 2)
-        self.assertEqual(payload['records'][0][-1], 3)
+        self.assertEqual(payload['version'], 3)
+        self.assertEqual(payload['records'][0][6], 3)
+        self.assertIsNone(payload['records'][0][7])
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             path = Path(tmp_dir) / 'segment.pt'
@@ -258,6 +259,29 @@ class ReplaySegmentNstepCompatibilityTest(unittest.TestCase):
             })[0]
 
         self.assertEqual(restored.bootstrap_steps, 3)
+        self.assertAlmostEqual(restored.reward, 1.5)
+
+    def test_version_two_segment_preserves_bootstrap_steps(self):
+        graph = _graph()
+        legacy_payload = {
+            'version': 2,
+            'graphs': (graph,),
+            'records': (
+                (0, 0, 1.5, 0, False, False, 3),
+            ),
+        }
+        replay = ReplayBuffer(capacity=4)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / 'legacy_v2_segment.pt'
+            torch.save(legacy_payload, path)
+            restored = replay._load_segment({
+                'path': str(path),
+                'count': 1,
+            })[0]
+
+        self.assertEqual(restored.bootstrap_steps, 3)
+        self.assertIsNone(restored.structural_target)
         self.assertAlmostEqual(restored.reward, 1.5)
 
     def test_version_one_segment_defaults_to_single_step(self):
@@ -278,6 +302,7 @@ class ReplaySegmentNstepCompatibilityTest(unittest.TestCase):
             })[0]
 
         self.assertEqual(restored.bootstrap_steps, 1)
+        self.assertIsNone(restored.structural_target)
         self.assertAlmostEqual(restored.reward, 2.0)
 
 

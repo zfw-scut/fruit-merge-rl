@@ -61,6 +61,12 @@ class DaxiguaEnv:
         # StateAnalysis 只在当前 worker 的环境内缓存，不写入主 ReplayBuffer。
         # 采集器会为正式训练显式传入 TransitionKey；直接使用环境时则采用本地键。
         self._cached_state_analysis = None
+        # 构图现在会在动作执行前复用 StateAnalyzer 的结构结果。初始边界第一次
+        # prepare 时产生的耗时必须延迟到随后的 step info 中记账，否则把分析从
+        # ``step()`` 前移会让性能日志凭空少一次调用。
+        self._prepared_analysis_calls = 0
+        self._prepared_analysis_seconds = 0.0
+        self._prepared_analysis_degraded_count = 0
         self._direct_episode_id = -1
         self._episode_done = True
 
@@ -104,6 +110,7 @@ class DaxiguaEnv:
             state_analyzer=state_analyzer,
         )
         env._cached_state_analysis = None
+        env._reset_prepared_analysis_stats()
         # 快照不携带 rollout 的 worker/episode 身份；显式 TransitionKey 会原样
         # 使用。直接调用 step() 时则从一个新的本地 episode 0 开始。
         env._direct_episode_id = 0
@@ -120,6 +127,7 @@ class DaxiguaEnv:
 
         obs = self.game.reset(seed=seed, fruit_queue=fruit_queue)
         self._cached_state_analysis = None
+        self._reset_prepared_analysis_stats()
         self._direct_episode_id += 1
         self._episode_done = False
         info = {
@@ -131,6 +139,62 @@ class DaxiguaEnv:
         """返回当前可选离散投放动作。"""
 
         return self.game.get_action_candidates(self.config.action_count)
+
+    def prepare_state_analysis(self, transition_key=None):
+        """返回并缓存当前动作前边界的 ``StateAnalysis``。
+
+        GNN 构图发生在 ``step()`` 之前，而 Reward V2 原先只需要在 ``step()``
+        内部取得分析。这个窄接口把同一份 worker-local 分析提前暴露给构图器；
+        随后的 ``step()`` 会按相同 ``TransitionKey`` 命中缓存，不会重复扫描
+        15 条投放列或自由空间栅格。
+
+        ``transition_key=None`` 主要供反事实 target policy 等直接环境调用者使用。
+        若显式 rollout 已经缓存了带真实 worker 身份的分析，则直接返回该对象，
+        不用本地身份覆盖它。
+        """
+
+        if self._episode_done:
+            raise RuntimeError(
+                'environment must be reset before preparing StateAnalysis'
+            )
+
+        state = self.game.get_state()
+        cached = self._cached_state_analysis
+        if cached is not None and transition_key is None:
+            if cached.transition_key.step_index != state.step_count:
+                raise RuntimeError(
+                    'cached StateAnalysis step is out of sync with the '
+                    'current game state'
+                )
+            return cached
+
+        transition_key = self._resolve_transition_key(
+            state,
+            transition_key,
+        )
+        if cached is not None:
+            if cached.transition_key != transition_key:
+                raise RuntimeError(
+                    'cached StateAnalysis key is out of sync with the '
+                    f'prepared transition: {cached.transition_key!r} != '
+                    f'{transition_key!r}'
+                )
+            return cached
+
+        analysis = self._analyze_state(
+            state,
+            transition_key,
+            stable_boundary=True,
+        )
+        self._cached_state_analysis = analysis
+        self._prepared_analysis_calls += 1
+        self._prepared_analysis_seconds += float(
+            analysis.diagnostics.analysis_seconds
+        )
+        self._prepared_analysis_degraded_count += int(
+            analysis.diagnostics.degraded
+        )
+        return analysis
 
     def step(self, action_index, *, transition_key=None):
         """执行一次投放动作。
@@ -151,9 +215,12 @@ class DaxiguaEnv:
             previous_obs,
             transition_key,
         )
-        analysis_calls = 0
-        analysis_seconds = 0.0
-        degraded_count = 0
+        # ``prepare_state_analysis()`` 可能已经为当前图完成了分析。这里先接过
+        # 延迟统计再清零，保证每次真实调用只在一个 transition 中记账一次。
+        analysis_calls = self._prepared_analysis_calls
+        analysis_seconds = self._prepared_analysis_seconds
+        degraded_count = self._prepared_analysis_degraded_count
+        self._reset_prepared_analysis_stats()
         cache_hit = False
 
         previous_analysis = self._cached_state_analysis
@@ -222,6 +289,7 @@ class DaxiguaEnv:
             # truncated 的 final analysis 只用于本 transition 的 shaping/bootstrap，
             # 不得跨 reset 复用到新 episode。
             self._cached_state_analysis = None
+            self._reset_prepared_analysis_stats()
         else:
             self._cached_state_analysis = next_analysis
 
@@ -245,6 +313,13 @@ class DaxiguaEnv:
             'action_candidates': self.action_candidates() if not terminated else (),
         }
         return obs, reward, terminated, truncated, info
+
+    def _reset_prepared_analysis_stats(self):
+        """清空动作前预分析的延迟性能账本。"""
+
+        self._prepared_analysis_calls = 0
+        self._prepared_analysis_seconds = 0.0
+        self._prepared_analysis_degraded_count = 0
 
     def _resolve_transition_key(self, state, transition_key):
         """选择 collector 显式身份或直接环境调用的本地身份。"""

@@ -5,6 +5,11 @@
 本索引由 `tools/export_training_catalog.py` 从本地 `runs/` 自动提取。
 数值只代表 CSV 中已经落盘的最后状态，不代表后台进程退出前尚未写入的数据。
 
+> 架构边界：本页当前列出的模型均早于 2026-07-28 的结构感知 V2。旧 H128/L3
+> checkpoint、hot/cold replay 和 causal replay 不能续训 V2；旧分数只作历史对照。
+> V2 的正式阶段状态以
+> [`FIRST_500K_READINESS.md`](FIRST_500K_READINESS.md) 为准。
+
 ## 训练实验
 
 | Run | 状态 | Updates | Env Steps | Episodes | 平均分 | 中位数 | 最高分 | Eval 最佳 | 数据体积 |

@@ -27,9 +27,12 @@ __all__ = [
     'ReplayBuffer',
     'RolloutCollector',
     'RolloutStats',
+    'STRUCTURAL_TARGET_DIMENSIONS',
+    'StructuralTarget',
     'TensorTransition',
     'TransitionKey',
     'WorkerAttributionFinalization',
+    'build_structural_target',
     'recommended_counterfactual_worker_count',
 ]
 
@@ -124,6 +127,25 @@ def __getattr__(name):
         from .tensor_transition import TensorTransition
 
         return TensorTransition
+
+    if name in {
+            'STRUCTURAL_TARGET_DIMENSIONS',
+            'StructuralTarget',
+            'build_structural_target'}:
+        from .structural_targets import (
+            STRUCTURAL_TARGET_DIMENSIONS,
+            StructuralTarget,
+            build_structural_target,
+        )
+
+        exports = {
+            'STRUCTURAL_TARGET_DIMENSIONS': (
+                STRUCTURAL_TARGET_DIMENSIONS
+            ),
+            'StructuralTarget': StructuralTarget,
+            'build_structural_target': build_structural_target,
+        }
+        return exports[name]
 
     if name == 'TransitionKey':
         from .identity import TransitionKey

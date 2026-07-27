@@ -153,6 +153,9 @@ class NStepTransitionAccumulator:
             terminated=final.terminated,
             truncated=final.truncated,
             bootstrap_steps=length,
+            # 结构 target 是动作后的一步监督，绝不能像 reward 一样跨窗口求和。
+            # 每条 n-step 经验只继承其起始动作对应的 target。
+            structural_target=window[0].structural_target,
         )
 
 

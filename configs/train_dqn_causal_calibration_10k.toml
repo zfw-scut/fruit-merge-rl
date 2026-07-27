@@ -2,7 +2,7 @@
 extends = "train_dqn_fast30_parallel.toml"
 
 [runtime]
-run_dir = "runs/dqn_causal_calibration_10k"
+run_dir = "runs/dqn_structure_v2_calibration_10k"
 
 [training]
 total_updates = 10000

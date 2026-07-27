@@ -331,7 +331,7 @@ collector 接入；confirmed 事件会和 worker 暂存的原 transition 图上�
 当前 `daxigua_rl.graph` 包提供：
 
 - `GraphBuilder`: 将 `GameState` 和 `ActionCandidate` 转换成框架无关的 `GraphData`。
-- `GraphAblator`: 在不改变图维度的前提下按配置置零部分节点或边特征，用于消融研究。
+- `GraphAblator`: 按配置置零节点/边特征；需要消除虚拟拓扑侧信道时还可删除指定虚拟节点类型，特征维度保持不变。
 
 当前优化后的图特征维度：
 

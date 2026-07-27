@@ -384,11 +384,13 @@ class RewardV2CollectorIntegrationTest(unittest.TestCase):
             ((9, 0, 0), (9, 0, 1)),
         )
         self.assertEqual(stats.state_analysis_calls, 3)
-        self.assertEqual(stats.state_analysis_cache_hits, 1)
+        # 结构图在首步前主动准备分析，第二步继续复用上一动作的 next_analysis；
+        # 两个 step 都不应在 env.step() 内重复扫描状态。
+        self.assertEqual(stats.state_analysis_cache_hits, 2)
         self.assertEqual(stats.state_analysis_degraded_count, 0)
         self.assertGreaterEqual(stats.state_analysis_seconds, 0.0)
         self.assertGreaterEqual(stats.mean_state_analysis_ms, 0.0)
-        self.assertEqual(stats.state_analysis_cache_hit_rate, 0.5)
+        self.assertEqual(stats.state_analysis_cache_hit_rate, 1.0)
         self.assertEqual(len(stats.potential_shaping_abs_values), 2)
         self.assertAlmostEqual(
             stats.potential_shaping_abs_values[0],

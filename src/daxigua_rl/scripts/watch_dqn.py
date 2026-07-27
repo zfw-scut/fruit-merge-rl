@@ -12,12 +12,14 @@ from pathlib import Path
 
 import torch
 
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT, StateAnalyzer
 from daxigua_rl.graph import GraphBuilder
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.playable_adapter import board_action_candidates, board_game_state
 from daxigua_rl.training.checkpointing import (
     extract_inference_checkpoint,
 )
+from daxigua_rl.training.identity import TransitionKey
 
 
 def parse_args():
@@ -83,6 +85,7 @@ class DQNVisualController:
         self.device = device
         self.decision_delay_ms = int(decision_delay_ms)
         self.print_actions = print_actions
+        self.state_analyzer = StateAnalyzer()
 
         # pending 动作让模型先把预览水果移动到目标位置，再短暂停顿后投放。
         self.pending_action = None
@@ -122,7 +125,25 @@ class DQNVisualController:
         if not actions:
             raise RuntimeError('no action candidates while board is ready to drop')
 
-        graph = self.graph_builder.build(state, actions)
+        state_analysis = None
+        if len(actions) == ANALYSIS_ACTION_COUNT:
+            # 观看入口没有 worker/episode 归因状态机；仅需一个当前边界内部一致的
+            # key 来运行同一静态分析器。step_count 已足以保证当前水果引用对齐。
+            state_analysis = self.state_analyzer.analyze(
+                state,
+                actions,
+                TransitionKey(
+                    worker_id=0,
+                    episode_id=0,
+                    step_index=int(state.step_count),
+                ),
+                stable_boundary=True,
+            )
+        graph = self.graph_builder.build(
+            state,
+            actions,
+            state_analysis=state_analysis,
+        )
         with torch.no_grad():
             q_values = self.model(graph).detach().cpu()
 

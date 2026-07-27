@@ -29,6 +29,10 @@ from daxigua_rl.graph.tensor import collate_graph_tensors
 from daxigua_rl.reward import merge_utility
 
 from .replay_buffer import ReplayBuffer
+from .structural_targets import (
+    STRUCTURAL_TARGET_DIMENSIONS,
+    STRUCTURAL_TARGET_DIMENSION_COUNT,
+)
 from .tensor_transition import TensorTransition
 
 
@@ -71,6 +75,12 @@ class DQNTrainerConfig:
 
     # 反事实回报差值和局部 Shapley 监督的共同权重。
     lambda_counterfactual: float = 0.10
+
+    # 当前动作真实后继状态产生的六维结构辅助监督。它只训练共享编码器和
+    # action-conditioned 预测头，不向环境 reward 复制任何连锁价值。
+    # 通用 Trainer 默认保持关闭，兼容只实现 forward() 的测试/外部模型；
+    # 正式训练入口显式启用，避免结构监督在实验配置中被隐式打开。
+    lambda_structural: float = 0.0
 
     # 把反事实回报差值归一化到与 Q 排序相近的量级；默认采用 7 级合成效用。
     counterfactual_return_scale: float = merge_utility(7)
@@ -149,6 +159,11 @@ class DQNTrainStats:
     weighted_rule_rank_loss: float = 0.0
     counterfactual_loss: float = 0.0
     weighted_counterfactual_loss: float = 0.0
+    structural_loss: float = 0.0
+    weighted_structural_loss: float = 0.0
+    structural_valid_count: int = 0
+    structural_sample_count: int = 0
+    structural_mean_abs_error: float = 0.0
 
     # 规则方向正确率、达到完整 margin 的比例，以及经验差值符号正确率。
     rule_pair_accuracy: float = 0.0
@@ -283,10 +298,37 @@ class DQNTrainer:
         current_collate_seconds = time.perf_counter() - current_collate_start
 
         online_forward_start = time.perf_counter()
-        current_q_flat = self.online_model(current_graph_batch)
+        structural_predictions_flat = None
+        if self.config.lambda_structural > 0.0:
+            if not hasattr(self.online_model, 'forward_with_aux'):
+                raise TypeError(
+                    'positive lambda_structural requires a model with '
+                    'forward_with_aux()'
+                )
+            model_output = self.online_model.forward_with_aux(
+                current_graph_batch
+            )
+            if tuple(model_output.prediction_names) != tuple(
+                    STRUCTURAL_TARGET_DIMENSIONS):
+                raise RuntimeError(
+                    'model structural prediction schema does not match '
+                    'StructuralTarget'
+                )
+            current_q_flat = model_output.q_values
+            structural_predictions_flat = (
+                model_output.structure_predictions
+            )
+        else:
+            current_q_flat = self.online_model(current_graph_batch)
         self._synchronize_model_device()
         online_forward_seconds = time.perf_counter() - online_forward_start
         current_q_tensor = self._select_current_q(current_q_flat, current_graph_batch, batch)
+        structural_result = self._compute_structural_loss(
+            transitions=batch,
+            graph_batch=current_graph_batch,
+            predictions=structural_predictions_flat,
+            reference_tensor=current_q_tensor,
+        )
 
         # target 同样批量计算：所有可 bootstrap 的 next_graph 拼成一张不连通大图。
         target_start = time.perf_counter()
@@ -311,16 +353,23 @@ class DQNTrainer:
             self.config.lambda_counterfactual
             * counterfactual_loss
         )
+        structural_loss = structural_result['loss']
+        weighted_structural_loss = (
+            self.config.lambda_structural
+            * structural_loss
+        )
         loss = (
             td_loss
             + weighted_rule_rank_loss
             + weighted_counterfactual_loss
+            + weighted_structural_loss
         )
         self._require_finite('current_q', current_q_tensor)
         self._require_finite('target', target_tensor)
         self._require_finite('td_loss', td_loss)
         self._require_finite('rule_rank_loss', rule_rank_loss)
         self._require_finite('counterfactual_loss', counterfactual_loss)
+        self._require_finite('structural_loss', structural_loss)
         self._require_finite('total_loss', loss)
 
         self.optimizer.zero_grad(set_to_none=True)
@@ -383,6 +432,21 @@ class DQNTrainer:
                 weighted_counterfactual_loss=float(
                     weighted_counterfactual_loss.detach().cpu().item()
                 ),
+                structural_loss=float(
+                    structural_loss.detach().cpu().item()
+                ),
+                weighted_structural_loss=float(
+                    weighted_structural_loss.detach().cpu().item()
+                ),
+                structural_valid_count=structural_result[
+                    'valid_count'
+                ],
+                structural_sample_count=structural_result[
+                    'sample_count'
+                ],
+                structural_mean_abs_error=structural_result[
+                    'mean_abs_error'
+                ],
                 rule_pair_accuracy=causal_result[
                     'rule_pair_accuracy'
                 ],
@@ -623,6 +687,104 @@ class DQNTrainer:
         )
         return q_values.index_select(0, selected_indices)
 
+    def _compute_structural_loss(
+            self,
+            *,
+            transitions,
+            graph_batch,
+            predictions,
+            reference_tensor):
+        """计算实际动作的一步结构辅助 Huber loss。
+
+        ``TensorTransition`` 中的 target 只来自该窗口起始动作的相邻状态；即使
+        TD reward 已聚合成 3-step，也不会把未来几步结构变化错误累加到当前动作。
+        未提供或逐维无效的标签通过 bit mask 完全排除。
+        """
+
+        zero = reference_tensor.sum() * 0.0
+        result = {
+            'loss': zero,
+            'valid_count': 0,
+            'sample_count': 0,
+            'mean_abs_error': 0.0,
+        }
+        if predictions is None:
+            return result
+        if predictions.dim() != 2 or int(
+                predictions.shape[1]
+        ) != STRUCTURAL_TARGET_DIMENSION_COUNT:
+            raise ValueError(
+                'structure_predictions must have shape '
+                '[total_action_count, structural_target_dim]'
+            )
+        if int(predictions.shape[0]) != graph_batch.action_count:
+            raise ValueError(
+                'structure_predictions action dimension does not match '
+                'GraphBatch'
+            )
+
+        selected_indices = torch.tensor(
+            [
+                action_start + transition.action_offset
+                for transition, (action_start, _action_end)
+                in zip(transitions, graph_batch.action_slices)
+            ],
+            dtype=torch.long,
+            device=predictions.device,
+        )
+        selected_predictions = predictions.index_select(
+            0,
+            selected_indices,
+        )
+
+        target_rows = []
+        mask_rows = []
+        sample_count = 0
+        for transition in transitions:
+            target = transition.structural_target
+            if target is None:
+                target_rows.append(
+                    (0.0,) * STRUCTURAL_TARGET_DIMENSION_COUNT
+                )
+                mask_rows.append(
+                    (False,) * STRUCTURAL_TARGET_DIMENSION_COUNT
+                )
+                continue
+            sample_count += int(target.has_valid_values)
+            target_rows.append(target.values)
+            mask_rows.append(target.validity)
+
+        targets = torch.tensor(
+            target_rows,
+            dtype=selected_predictions.dtype,
+            device=selected_predictions.device,
+        )
+        valid_mask = torch.tensor(
+            mask_rows,
+            dtype=torch.bool,
+            device=selected_predictions.device,
+        )
+        valid_count = int(valid_mask.sum().detach().cpu().item())
+        result['valid_count'] = valid_count
+        result['sample_count'] = sample_count
+        if valid_count == 0:
+            return result
+
+        element_losses = F.smooth_l1_loss(
+            selected_predictions,
+            targets,
+            reduction='none',
+        )
+        loss = element_losses.masked_select(valid_mask).mean()
+        absolute_errors = (
+            selected_predictions.detach() - targets
+        ).abs().masked_select(valid_mask)
+        result['loss'] = loss
+        result['mean_abs_error'] = float(
+            absolute_errors.mean().cpu().item()
+        )
+        return result
+
     def _compute_target_values(self, transitions, selected_q):
         """批量计算 Double DQN n-step TD target。
 
@@ -839,7 +1001,8 @@ class DQNTrainer:
             raise ValueError('causal_update_interval must be positive')
         for field_name in (
                 'lambda_rule',
-                'lambda_counterfactual'):
+                'lambda_counterfactual',
+                'lambda_structural'):
             value = getattr(self.config, field_name)
             if not math.isfinite(value) or value < 0.0:
                 raise ValueError(f'{field_name} must be finite and non-negative')

@@ -3,7 +3,7 @@
 
 训练目录里的 checkpoint 和 ReplayBuffer 通常达到 GiB 级，不适合为了查看曲线而
 整体下载。本工具只在远端选择固定白名单内的配置、指标、归因/恢复/故障 JSON 和
-两张标准训练图，通过一条 SSH 连接把它们打成只读 tar 流，再在本地经过路径、类型、
+三张标准训练图，通过一条 SSH 连接把它们打成只读 tar 流，再在本地经过路径、类型、
 大小和内容校验后以目录事务写入目标目录。
 
 认证完全交给系统 OpenSSH：可以使用 ssh-agent、密钥、交互式密码提示，或调用方
@@ -45,6 +45,7 @@ COMPLETE_REQUIRED_PATHS = (
     'counterfactual_shutdown.json',
     'plots/training_curves.png',
     'plots/reward_breakdown_curves.png',
+    'plots/structure_learning_curves.png',
 )
 EXPECTED_OPTIONAL_PATHS = tuple(
     path for path in COMPLETE_REQUIRED_PATHS if path not in BASE_REQUIRED_PATHS
@@ -84,6 +85,7 @@ ALLOWED_PLOT_NAMES = frozenset(
     {
         'training_curves.png',
         'reward_breakdown_curves.png',
+        'structure_learning_curves.png',
     }
 )
 WINDOWS_RESERVED_STEMS = frozenset(
@@ -189,7 +191,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         '--require-complete',
         action='store_true',
         help=(
-            '要求 config、两份 CSV、warmup、两个 shutdown 和两张标准曲线'
+            '要求 config、两份 CSV、warmup、两个 shutdown 和三张标准曲线'
             '全部存在，并达到配置目标 update；适合阶段结束归档。'
         ),
     )

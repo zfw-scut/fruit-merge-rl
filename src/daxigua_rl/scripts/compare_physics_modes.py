@@ -396,18 +396,20 @@ def run_episode(mode, args, action_count, reward_config, model, graph_builder, d
         if not candidates:
             break
 
-        action_offset = choose_action(
-            model=model,
-            graph_builder=graph_builder,
-            obs=obs,
-            candidates=candidates,
-            action_rng=action_rng,
-            device=device,
-        )
         transition_key = TransitionKey(
             worker_id=0,
             episode_id=episode_index,
             step_index=_step_index,
+        )
+        action_offset = choose_action(
+            model=model,
+            graph_builder=graph_builder,
+            env=env,
+            obs=obs,
+            candidates=candidates,
+            action_rng=action_rng,
+            device=device,
+            transition_key=transition_key,
         )
         obs, reward, terminated, truncated, info = env.step(
             action_offset,
@@ -469,13 +471,26 @@ def run_episode(mode, args, action_count, reward_config, model, graph_builder, d
     )
 
 
-def choose_action(model, graph_builder, obs, candidates, action_rng, device):
+def choose_action(
+        model,
+        graph_builder,
+        env,
+        obs,
+        candidates,
+        action_rng,
+        device,
+        transition_key):
     """根据 checkpoint 模型或随机策略选择动作。"""
 
     if model is None:
         return action_rng.randrange(len(candidates))
 
-    graph = graph_builder.build(obs, candidates)
+    state_analysis = env.prepare_state_analysis(transition_key)
+    graph = graph_builder.build(
+        obs,
+        candidates,
+        state_analysis=state_analysis,
+    )
     with torch.no_grad():
         q_values = model(graph).detach().cpu()
     return int(torch.argmax(q_values).item())

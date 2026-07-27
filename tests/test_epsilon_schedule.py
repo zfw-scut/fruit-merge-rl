@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from daxigua_rl.scripts.train_dqn import (
     linear_epsilon,
+    online_policy_version,
     scheduled_epsilon,
     should_sync_parallel_workers,
 )
@@ -83,6 +84,17 @@ class EpsilonScheduleTest(unittest.TestCase):
                 model_synced=True,
             )
         )
+
+    def test_online_policy_version_is_absolute_across_resume(self):
+        """恢复进程不能把不同权重重新命名为 parallel-sync-1。"""
+
+        self.assertEqual(online_policy_version(0), 'online-update-00000000')
+        self.assertEqual(
+            online_policy_version(12_345),
+            'online-update-00012345',
+        )
+        with self.assertRaises(ValueError):
+            online_policy_version(-1)
 
     def test_extended_resume_does_not_reexpand_smooth_exploration(self):
         args = self._args()

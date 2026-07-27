@@ -310,7 +310,12 @@ def run_rollout(args):
         step_started_at = time.perf_counter()
 
         graph_started_at = time.perf_counter()
-        graph = graph_builder.build(obs, candidates)
+        state_analysis = env.prepare_state_analysis()
+        graph = graph_builder.build(
+            obs,
+            candidates,
+            state_analysis=state_analysis,
+        )
         graph_finished_at = time.perf_counter()
 
         # smoke test 不训练模型，所以关闭梯度追踪，减少开销并避免误以为这里在更新参数。

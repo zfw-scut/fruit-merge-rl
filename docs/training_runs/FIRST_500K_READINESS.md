@@ -1,40 +1,52 @@
 # 第一次 500k 完整因果训练就绪记录
 
-状态：云端正式 5k/10k 均已通过；500k 未启动，磁盘门禁未通过
+状态：结构感知 V2 证据已重置；新 5k/10k/500k 均未启动、未获准
 
-最后更新：2026-07-27
+最后更新：2026-07-28
 
 运行手册：`../rl/FIRST_500K_RUNBOOK.md`
 
 ## 1. 当前结论
 
-训练前实现已经完成并通过本地、云端各 312 项全量回归。云端提交 `368cc9b` 的正式
-500k 配置 preflight 返回 `ready=true`、无 warning，随后从 update 0 运行的全新
-5k v5 已正常完成并通过 readiness schema v2。该运行同时覆盖 strict / numeric
-jitter / semantic divergence 三态物理复现门、共享预算、普通反事实、局部 Shapley、
-checkpoint 恢复和资源收尾。
+2026-07-28 引入的结构感知 V2 改变了主模型训练语义：`StateAnalysis` 的可达、
+支撑、遮挡、空腔和 C/R/K 被投影进图，`merge_pair` / `level_ladder` 成为显式
+motif，GNN 使用 relation gate + attention 和 dueling 读出，同时新增六维一步
+结构辅助监督与集中式 GPU actor。正式基线也从 H128/L3、3 rollout、batch 64
+调整为 H256/L4、16 rollout、batch 128。
 
-独立 10k 于 2026-07-27 22:21:56（Asia/Shanghai）在同一提交上从 update 0
-启动，并于 23:28:08 正常完成。它获得 6 个 strict Shapley 结果和 18 个样本，
-同时真实覆盖 numeric jitter 与 semantic divergence，不需要另起 25k。
+因此下文 2026-07-27 的 312 项测试、preflight、5k 和 10k 只保留为 **V1 历史
+证据**。它们证明旧版完整归因/反事实/Shapley 链路曾闭合，但不能批准 V2 的
+500k，也不能提供可续训的 checkpoint 或 replay。V2 必须在最终 commit 上重新执行
+全量测试、preflight、全新 5k 和全新 10k，全部从 update 0 开始。
 
-5k 后云盘剩余约 70 GiB；10k 采用 65 GiB 最低启动、45 GiB 优雅停止、40 GiB
-硬停止的临时短跑门禁并最终剩余 53.018 GiB。短跑本身通过，但这不能替代 500k
-启动前至少 80 GiB 的正式磁盘门槛。当前唯一已知启动阻塞是存储余量；未获得新的
-历史产物删除/迁移授权前，不进行清理，也不启动 500k。
+新方案的设计、无未来泄漏/非奖励边界、参数和兼容表见
+[`../rl/STRUCTURE_AWARE_GNN_V2.md`](../rl/STRUCTURE_AWARE_GNN_V2.md)。
 
 | 阶段 | 状态 | 结论 |
 | --- | --- | --- |
-| 源码与单元测试 | 已通过 | 本地与云端均为 312 项，0 failure / 0 error |
-| 60-update 本地探针 | 已完成 | 仅作性能/闭环证据，不替代 5k |
-| 干净 HEAD 20-update 探针 | 已完成 | 规则与反事实监督均实际进入 optimizer，不替代 5k |
-| 正式配置 preflight | 云端已通过 | commit `368cc9b`，`ready=true`、32/32 快照、无 warning |
-| 5k 冒烟 | 已通过 | 5000/5000；四个阶段退出码均为 0，readiness `ready=true` |
-| 10k 校准 | 已通过 | 10000/10000；四个阶段退出码均为 0，readiness `ready=true` |
-| 可选独立 25k 校准 | 不需要 | 10k 已有 6 个 strict Shapley 结果、18 个样本并进入 optimizer |
-| 500k 正式训练 | 未启动、未获准 | 训练链路门禁通过；等待最终复验和磁盘恢复到 ≥80 GiB |
+| V2 源码与单元测试 | 本地 364/364 通过 | 2026-07-28；compileall 与 diff check 同时通过，最终 commit 待下方登记 |
+| V2 正式配置 preflight | 本地功能链通过；云端资源门禁待运行 | 本机已覆盖 H256/L4、结构 loss、16-worker 集中 actor、CUDA 与物理链；本机仅 16 核，不能替代新服务器资源验收 |
+| V2 5k 冒烟 | 未启动 | 全新空目录、update 0；旧 V1 5k 不替代 |
+| V2 10k 校准 | 未启动 | 全新空目录、update 0；旧 V1 10k 不替代 |
+| V2 可选独立 25k 校准 | 待定 | 只在 10k 稀疏证据不足时决定 |
+| V2 500k 正式训练 | 未启动、未获准 | 等待前述门禁和新服务器最终资源复验 |
 
-## 2. 冻结源码身份
+## 2. V2 冻结源码身份
+
+本节旧值已失效，必须由 V2 最终提交和新 preflight 重新填写：
+
+| 项目 | V2 当前证据 |
+| --- | --- |
+| 分支 | `codex/work-1` |
+| 目标 GPU | RTX 5090 32 GiB；待 V2 preflight 实测登记 |
+| 目标训练环境 | PyTorch `2.12.1+cu130`、CUDA runtime 13.0；待门禁确认 |
+| 最终训练 commit | 待填 |
+| 工作树 clean | 待确认 |
+| 全量测试 | 2026-07-28：本地 364/364 通过；compileall、diff check 通过 |
+| 正式配置 SHA-256 | 待填 |
+| 正式配置解析指纹 | 待填 |
+
+以下是 V1 历史身份，仅用于解释旧短跑：
 
 | 项目 | 当前证据 |
 | --- | --- |
@@ -46,10 +58,24 @@ checkpoint 恢复和资源收尾。
 | 正式配置 SHA-256 | `08c35479ddabd1cb383cd2287a94a457ae951b80acef483c3177e64b37ed2541` |
 | 正式配置解析指纹 | `6cceea5075e97f62938c8f4fa70690ebaf50253ea22b1f131271815dcbc95a64` |
 
-如果 5k/10k 后修改了任何训练语义，必须更新本节、重新跑全量测试和 32 次 preflight，
-不能沿用旧证据。
+V2 正是一次训练语义修改，因此已经触发证据重置。以后若 V2 5k/10k 后再次修改图
+schema、模型、Reward、loss、采集或物理语义，仍必须再次更新本节并重跑门禁。
 
-## 3. 当前本地证据
+提交前的本地正式配置探针还得到以下功能证据：
+
+- RTX 4070 Laptop GPU 上 H256/L4 模型 Q 输出为 15，结构输出为 15×6；
+- 16 个 rollout worker 完成两次模型同步和 32 个 greedy actor 请求，合并成
+  2 个 16 图 GPU batch，全部 worker/actor/queue 干净关闭；
+- batch 128 完整因果 optimizer step 消费 768/768 个结构维度，结构与反事实 loss
+  均非零，CUDA 峰值约 2.84 GiB；
+- 局部 Shapley 与 EngineSnapshot 原动作复现通过。
+
+该次本地报告的总 `ready=false` 是预期结果：执行时工作树尚未提交，且本机只有 16
+个有效 CPU 核，无法同时为 16 个 rollout worker 和 6 个反事实 worker 保留资源。
+它只证明功能链路，不批准云端短跑；最终 commit 后仍须在 RTX 5090 服务器重新运行
+完整 preflight。
+
+## 3. V1 历史本地证据
 
 已完成的有效小规模运行：
 
@@ -87,7 +113,7 @@ checkpoint 的 online/target 模型、Adam 与 CPU/CUDA RNG 均通过真实恢�
 旧的 245/286 项测试和早期 commit 只属于此前历史版本，不得把它们登记为本轮
 结果。本轮训练语义提交的最终全量回归为 312 项全部通过，身份见第 2 节。
 
-## 4. Preflight 状态
+## 4. V1 历史 Preflight 状态
 
 | 检查 | 当前结果 | 说明 |
 | --- | --- | --- |
@@ -107,7 +133,7 @@ checkpoint 的 online/target 模型、Adam 与 CPU/CUDA RNG 均通过真实恢�
 500k 最终启动证据。10k 和文档提交完成后必须重新运行正式 preflight；在可用磁盘
 恢复到至少 80 GiB 之前，`output_disk_free` 应按失败处理，不能通过降低正式阈值绕过。
 
-## 5. 5k 冒烟记录
+## 5. V1 历史 5k 冒烟记录
 
 状态：**已通过**
 
@@ -160,7 +186,7 @@ GPU utilization 平均 10.41%、p95 27%、峰值 32%，显存峰值 4166 MiB；t
 16.273 GiB、有效可用内存最低 16.426 GiB。swap 与 low/high/max/OOM/OOM-kill
 事件增量均为 0。训练瓶颈主要在 CPU 物理模拟，不在 GPU。
 
-## 6. 10k 校准记录
+## 6. V1 历史 10k 校准记录
 
 状态：**已通过**
 
@@ -213,10 +239,9 @@ orientation / angular velocity 最大误差为 0 / 0.0017626 / 0.0013093 /
 进入 optimizer；普通反事实的 strict、numeric 与 semantic 三态也已全部出现。
 增加 25k 不再用于补足缺失的链路证据，只会额外消耗当前紧张的磁盘空间。
 
-## 7. 云服务器复验
+## 7. V1 历史云服务器复验
 
-状态：训练提交与 5k/10k 均已复验；最终证据提交不改变训练语义，500k
-exact-commit preflight 仍受 80 GiB 磁盘门禁阻塞。
+状态：以下只记录旧 V100 服务器和 V1 训练，不代表当前 V2 新服务器门禁。
 
 | 检查 | 云端结果 |
 | --- | --- |
@@ -236,22 +261,26 @@ exact-commit preflight 仍受 80 GiB 磁盘门禁阻塞。
 
 ## 8. 500k 启动批准清单
 
-全部打勾前保持“未获准”：
+以下全部针对 V2，旧 V1 的勾选不继承。全部打勾前保持“未获准”：
 
-- [x] 5k 正常完成，本文第 5 节所有硬门禁通过。
-- [x] 10k 或获批的独立 25k 正常完成，第 6 节已给出结论。
-- [x] 没有未解释的 NaN、死锁、snapshot/reproduction failure 或预算超限。
-- [x] Reward shaping p95、StateAnalyzer degraded 和 truncated 比例符合运行手册。
-- [x] 规则与物理反事实均真实进入 optimizer；Shapley 稀疏状态已解释。
-- [x] 正式配置没有在短跑后被无记录修改。
-- [ ] 最终 commit 已提交，工作树 clean。
-- [ ] 云服务器重新完成依赖、CUDA、全量测试和 32 次 preflight。
-- [ ] 云端正式输出盘可用空间恢复到至少 80 GiB。
-- [x] 正式输出目录为空，不会覆盖历史 run。
+- [ ] V2 最终 commit 已提交，工作树 clean，全量测试和 compile 零失败。
+- [ ] 新服务器完成依赖、CUDA、32 次快照和正式配置 preflight。
+- [ ] 全新 V2 5k 正常完成，图 schema、结构 target、checkpoint/replay 均闭合。
+- [ ] 全新 V2 10k（或获批的独立 25k）正常完成并给出标定结论。
+- [ ] TD/结构/规则/反事实 loss 无 NaN/Inf，结构有效 target 持续进入 optimizer。
+- [ ] 集中 actor 无 timeout/失败，request/batch/sync/关闭统计闭合。
+- [ ] H256/L4、batch 128、16 rollout、6 物理 worker 的吞吐、内存和 GPU 可承受
+  500k。
+- [ ] Reward shaping、StateAnalyzer degraded、truncated 和物理复现率符合手册。
+- [ ] 规则与物理反事实真实进入 optimizer，Shapley 稀疏状态已解释，10% 硬预算
+  未超限。
+- [ ] 正式配置没有在 V2 短跑后被无记录修改。
+- [ ] 云端输出盘满足最终 preflight 门槛。
+- [ ] 正式输出目录为空，不会覆盖或读取任何旧 run/replay。
 - [ ] 旁路资源监控已经启动。
-- [ ] checkpoint 恢复命令和训练产物备份位置已确认。
+- [ ] 同一 V2 run 的 checkpoint 恢复命令和训练产物备份位置已确认。
 
-批准状态：**未获准；当前阻塞为云盘只剩 53.018 GiB**
+批准状态：**未获准；等待 V2 最终 commit、preflight、5k 和 10k 新证据**
 
 批准人/时间：待填
 
