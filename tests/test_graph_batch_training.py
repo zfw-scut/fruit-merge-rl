@@ -100,6 +100,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
         self.assertEqual(stats.batch_size, 8)
         self.assertEqual(stats.update_step, 1)
         self.assertTrue(torch.isfinite(torch.tensor(stats.loss)))
+        self.assertEqual(stats.td_loss, stats.loss)
 
     def test_collector_reuses_next_graph_as_next_current_graph(self):
         """非终止 step 的 next_graph 应被下一步直接复用，减少重复构图。"""
@@ -200,6 +201,32 @@ class GraphBatchTrainingTest(unittest.TestCase):
             sampled = replay_buffer.sample(8)
             self.assertEqual(len(sampled), 8)
             self.assertTrue(all(isinstance(item, TensorTransition) for item in sampled))
+
+            checkpoint_state = replay_buffer.checkpoint_state_dict()
+            restored = ReplayBuffer(
+                capacity=16,
+                seed=999,
+                hot_capacity=5,
+                cold_dir=Path(tmp_dir) / 'restored_cold',
+                segment_size=4,
+                cold_cache_size=8,
+                cold_sample_ratio=0.5,
+                cold_cache_refresh_interval=1,
+            )
+            restored.validate_checkpoint_manifest(
+                replay_buffer.checkpoint_manifest()
+            )
+            restored.load_checkpoint_state_dict(checkpoint_state)
+            self.assertEqual(
+                checkpoint_state['resume_policy'],
+                'hot_only',
+            )
+            self.assertEqual(len(restored), 5)
+            self.assertEqual(
+                checkpoint_state['omitted_cold_count'],
+                11,
+            )
+            self.assertTrue(restored.is_ready(5))
 
             optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
             trainer = DQNTrainer(

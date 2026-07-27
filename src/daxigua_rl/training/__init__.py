@@ -11,10 +11,16 @@ from .replay_buffer import ReplayBuffer
 
 
 __all__ = [
+    'CounterfactualCoordinator',
+    'CounterfactualCoordinatorActivityStats',
+    'CounterfactualCoordinatorPoll',
+    'CounterfactualCoordinatorStats',
+    'CounterfactualCoordinatorSubmission',
     'DQNTrainer',
     'DQNTrainerConfig',
     'DQNTrainStats',
     'EpsilonGreedyPolicy',
+    'NStepTransitionAccumulator',
     'ParallelCollectHandle',
     'ParallelRolloutCollector',
     'ReplayBuffer',
@@ -23,11 +29,48 @@ __all__ = [
     'TensorTransition',
     'TransitionKey',
     'WorkerAttributionFinalization',
+    'recommended_counterfactual_worker_count',
 ]
 
 
 def __getattr__(name):
     """懒加载依赖 torch 的训练组件。"""
+
+    if name in {
+            'CounterfactualCoordinator',
+            'CounterfactualCoordinatorActivityStats',
+            'CounterfactualCoordinatorPoll',
+            'CounterfactualCoordinatorStats',
+            'CounterfactualCoordinatorSubmission',
+            'recommended_counterfactual_worker_count'}:
+        from .counterfactual_coordinator import (
+            CounterfactualCoordinator,
+            CounterfactualCoordinatorActivityStats,
+            CounterfactualCoordinatorPoll,
+            CounterfactualCoordinatorStats,
+            CounterfactualCoordinatorSubmission,
+            recommended_counterfactual_worker_count,
+        )
+
+        exports = {
+            'CounterfactualCoordinator': CounterfactualCoordinator,
+            'CounterfactualCoordinatorActivityStats': (
+                CounterfactualCoordinatorActivityStats
+            ),
+            'CounterfactualCoordinatorPoll': (
+                CounterfactualCoordinatorPoll
+            ),
+            'CounterfactualCoordinatorStats': (
+                CounterfactualCoordinatorStats
+            ),
+            'CounterfactualCoordinatorSubmission': (
+                CounterfactualCoordinatorSubmission
+            ),
+            'recommended_counterfactual_worker_count': (
+                recommended_counterfactual_worker_count
+            ),
+        }
+        return exports[name]
 
     if name in {'EpsilonGreedyPolicy', 'RolloutCollector', 'RolloutStats'}:
         from .collector import EpsilonGreedyPolicy, RolloutCollector, RolloutStats
@@ -67,6 +110,11 @@ def __getattr__(name):
             'DQNTrainStats': DQNTrainStats,
         }
         return exports[name]
+
+    if name == 'NStepTransitionAccumulator':
+        from .n_step import NStepTransitionAccumulator
+
+        return NStepTransitionAccumulator
 
     if name == 'TensorTransition':
         from .tensor_transition import TensorTransition

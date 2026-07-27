@@ -257,6 +257,111 @@ class ReplayBuffer:
         if self._disk_enabled and self._pending_cold:
             self._write_pending_segment()
 
+    def checkpoint_manifest(self):
+        """返回恢复前必须一致的存储契约。
+
+        hybrid 模式刻意只把热层写入训练 checkpoint。冷段本身已经是独立、
+        可恢复读取的磁盘产物，但滚动容量会在后续训练中删除旧段，因此 checkpoint
+        不能安全引用一组可能过期的段文件。恢复时使用热层重新起步，既能立即达到
+        batch 门槛，也避免每次模型 checkpoint 再复制整份冷 replay。
+        """
+
+        return {
+            'kind': 'dqn-replay-buffer',
+            'schema_version': 1,
+            'capacity': self.capacity,
+            'hot_capacity': self.hot_capacity,
+            'disk_enabled': self._disk_enabled,
+            'segment_size': self.segment_size,
+            'cold_cache_size': self.cold_cache_size,
+            'cold_sample_ratio': self.cold_sample_ratio,
+            'cold_cache_refresh_interval': (
+                self.cold_cache_refresh_interval
+            ),
+        }
+
+    def validate_checkpoint_manifest(self, manifest):
+        """在改写当前 replay 前拒绝不兼容的恢复配置。"""
+
+        expected = self.checkpoint_manifest()
+        if not isinstance(manifest, dict):
+            raise ValueError('replay checkpoint manifest must be a mapping')
+        for field_name, expected_value in expected.items():
+            if manifest.get(field_name) != expected_value:
+                raise ValueError(
+                    'replay checkpoint manifest mismatch for '
+                    f'{field_name}: checkpoint={manifest.get(field_name)!r} '
+                    f'current={expected_value!r}'
+                )
+
+    def checkpoint_state_dict(self):
+        """返回有界 checkpoint 状态。
+
+        纯内存模式精确保存整个环；正式 hybrid 模式只保存最近 ``hot_capacity``
+        条经验和采样 RNG。状态同时记录被省略的冷经验数，恢复报告可以明确说明
+        这是一次 hot-resume，而不是伪装成逐位完全恢复。
+        """
+
+        if self._disk_enabled:
+            items = tuple(self._hot_items)
+            policy = 'hot_only'
+        else:
+            items = self.to_tuple()
+            policy = 'exact'
+        return {
+            'schema_version': 1,
+            'resume_policy': policy,
+            'items': items,
+            'rng_state': self._rng.getstate(),
+            'sample_calls': self._sample_calls,
+            'next_segment_index': self._next_segment_index,
+            'source_total_count': len(self),
+            'omitted_cold_count': max(0, len(self) - len(items)),
+        }
+
+    def load_checkpoint_state_dict(self, state):
+        """恢复 exact 内存 replay 或 hybrid 的有界热层快照。"""
+
+        if not isinstance(state, dict):
+            raise ValueError('replay checkpoint state must be a mapping')
+        if state.get('schema_version') != 1:
+            raise ValueError(
+                'unsupported replay checkpoint schema version: '
+                f'{state.get("schema_version")!r}'
+            )
+        expected_policy = 'hot_only' if self._disk_enabled else 'exact'
+        if state.get('resume_policy') != expected_policy:
+            raise ValueError(
+                'replay checkpoint resume policy mismatch: '
+                f'checkpoint={state.get("resume_policy")!r} '
+                f'current={expected_policy!r}'
+            )
+        items = tuple(state.get('items', ()))
+        if len(items) > self.capacity:
+            raise ValueError('replay checkpoint contains more than capacity')
+        if self._disk_enabled and len(items) > self.hot_capacity:
+            raise ValueError(
+                'hybrid replay checkpoint exceeds hot capacity'
+            )
+        if any(not isinstance(item, TensorTransition) for item in items):
+            raise TypeError(
+                'replay checkpoint items must be TensorTransition'
+            )
+
+        # 新构造的 resume buffer 尚未登记旧冷段，clear 不会删除磁盘上的历史
+        # 文件。保留递增段号可确保后续写入不会覆盖那些诊断产物。
+        self.clear()
+        self.extend(items)
+        self._sample_calls = int(state.get('sample_calls', 0))
+        self._next_segment_index = max(
+            0,
+            int(state.get('next_segment_index', 0)),
+        )
+        try:
+            self._rng.setstate(state['rng_state'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError('invalid replay RNG checkpoint state') from exc
+
     def _push_memory(self, transition):
         """纯内存模式下按环形 buffer 写入。"""
 
@@ -341,10 +446,13 @@ class ReplayBuffer:
                 add_graph(transition.next_graph),
                 bool(transition.terminated),
                 bool(transition.truncated),
+                int(transition.bootstrap_steps),
             ))
 
         return {
-            'version': 1,
+            # version 2 新增 bootstrap_steps。加载器仍接受 version 1，
+            # 并把旧单步经验显式还原为 bootstrap_steps=1。
+            'version': 2,
             'graphs': tuple(graphs),
             'records': tuple(records),
         }
@@ -363,9 +471,42 @@ class ReplayBuffer:
         import torch
 
         payload = torch.load(segment['path'], map_location='cpu', weights_only=False)
+        version = int(payload.get('version', 1))
+        if version not in {1, 2}:
+            raise ValueError(
+                f'unsupported replay segment version: {version}'
+            )
         graphs = payload['graphs']
         transitions = []
-        for graph_index, action_offset, reward, next_graph_index, terminated, truncated in payload['records']:
+        for record in payload['records']:
+            if version == 1:
+                if len(record) != 6:
+                    raise ValueError(
+                        'version 1 replay record must contain 6 fields'
+                    )
+                (
+                    graph_index,
+                    action_offset,
+                    reward,
+                    next_graph_index,
+                    terminated,
+                    truncated,
+                ) = record
+                bootstrap_steps = 1
+            else:
+                if len(record) != 7:
+                    raise ValueError(
+                        'version 2 replay record must contain 7 fields'
+                    )
+                (
+                    graph_index,
+                    action_offset,
+                    reward,
+                    next_graph_index,
+                    terminated,
+                    truncated,
+                    bootstrap_steps,
+                ) = record
             next_graph = None if next_graph_index is None else graphs[next_graph_index]
             transitions.append(TensorTransition(
                 graph=graphs[graph_index],
@@ -374,6 +515,7 @@ class ReplayBuffer:
                 next_graph=next_graph,
                 terminated=terminated,
                 truncated=truncated,
+                bootstrap_steps=bootstrap_steps,
             ))
         return transitions
 

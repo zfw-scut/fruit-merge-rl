@@ -7,6 +7,7 @@ CPU `GraphTensor`，方便 replay buffer 采样后直接拼成 `GraphBatch`。
 from __future__ import annotations
 
 from dataclasses import dataclass
+from operator import index
 
 from daxigua_rl.graph.tensor import GraphTensor
 
@@ -41,6 +42,13 @@ class TensorTransition:
     # 环境流程意义上的截断。
     truncated: bool
 
+    # 当前 reward 中实际累计了多少个连续环境步。
+    #
+    # 单步经验保持为 1；3-step accumulator 产生的经验通常为 3，episode
+    # 尾部则可能为 1 或 2。DQN bootstrap 必须使用 gamma ** bootstrap_steps，
+    # 不能把缩短的 terminal/truncated 尾部仍按固定 gamma ** 3 折扣。
+    bootstrap_steps: int = 1
+
     def __post_init__(self):
         """做轻量一致性检查，避免训练时才发现图和动作错位。"""
 
@@ -48,11 +56,26 @@ class TensorTransition:
         object.__setattr__(self, 'reward', float(self.reward))
         object.__setattr__(self, 'terminated', bool(self.terminated))
         object.__setattr__(self, 'truncated', bool(self.truncated))
+        if isinstance(self.bootstrap_steps, bool):
+            raise TypeError('bootstrap_steps must be an integer')
+        try:
+            bootstrap_steps = index(self.bootstrap_steps)
+        except TypeError as exc:
+            raise TypeError(
+                'bootstrap_steps must be an integer'
+            ) from exc
+        if bootstrap_steps <= 0:
+            raise ValueError('bootstrap_steps must be positive')
+        object.__setattr__(self, 'bootstrap_steps', bootstrap_steps)
 
         if not isinstance(self.graph, GraphTensor):
             raise TypeError(f'graph must be GraphTensor, got {type(self.graph)!r}')
         if self.next_graph is not None and not isinstance(self.next_graph, GraphTensor):
             raise TypeError(f'next_graph must be GraphTensor or None, got {type(self.next_graph)!r}')
+        if self.terminated and self.truncated:
+            raise ValueError(
+                'transition cannot be both terminated and truncated'
+            )
 
         if self.action_count <= 0:
             raise ValueError('graph must contain at least one action node')

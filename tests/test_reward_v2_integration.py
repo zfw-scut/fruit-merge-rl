@@ -14,6 +14,7 @@ from daxigua.core.state import (
     ActionCandidate,
     BoardGeometry,
     DropResult,
+    EngineActionOutcome,
     GameState,
     PhysicsResult,
 )
@@ -150,6 +151,22 @@ class _ScriptedGame:
             done=result.done,
         )
         return result
+
+    def execute_action(self, drop_x, *, max_frames=None, stable_frames=15):
+        drop_result = self.drop_at(drop_x)
+        physics_result = self.advance_physics(
+            max_frames=max_frames,
+            until_stable=True,
+            stable_frames=stable_frames,
+        )
+        return EngineActionOutcome(
+            drop_result=drop_result,
+            physics_result=physics_result,
+            final_state=self.get_state(),
+            fail_count=0,
+            next_fruit_id=self._state.step_count + 1,
+            rng_state=(),
+        )
 
 
 class _CountingAnalyzer(StateAnalyzer):

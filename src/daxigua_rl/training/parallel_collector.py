@@ -13,6 +13,7 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from io import BytesIO
 
+from daxigua_rl.attribution.causal_replay import CausalReplayBuffer
 from daxigua_rl.env import DaxiguaEnv
 from daxigua_rl.graph import GraphBuilder
 from daxigua_rl.models import GNNQNetwork
@@ -25,6 +26,29 @@ from .replay_buffer import ReplayBuffer
 _WORKER_COLLECTOR = None
 _WORKER_MODEL = None
 _WORKER_SEED = 0
+
+
+def _configure_worker_torch_threads():
+    """限制每个 rollout worker 的 Torch CPU 线程，避免 num_envs² 过额调度。"""
+
+    import torch
+
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        # inter-op 线程池在进程内开始并行工作后不能再次修改；intra-op=1
+        # 仍是防止 8 workers × 8 threads 过额调度的关键门禁。
+        pass
+    return torch.get_num_threads(), torch.get_num_interop_threads()
+
+
+def _worker_torch_thread_counts():
+    """测试/诊断当前 worker Torch 线程配置。"""
+
+    import torch
+
+    return torch.get_num_threads(), torch.get_num_interop_threads()
 
 
 @dataclass(frozen=True)
@@ -43,15 +67,28 @@ class WorkerAttributionFinalization:
 
     worker_id: int
     cancelled_pending_count: int
+    n_step_flush_emitted: int = 0
     event_type_counts: tuple = ()
     resolution_reason_counts: tuple = ()
 
 
-def _worker_init(worker_index, env_config, model_config, seed):
+def _worker_init(
+        worker_index,
+        env_config,
+        model_config,
+        seed,
+        n_step,
+        gamma,
+        causal_enabled,
+        policy_version,
+        counterfactual_enabled,
+        counterfactual_ring_size,
+        episode_id_start):
     """初始化 worker 进程内长期复用的环境、模型和 collector。"""
 
     global _WORKER_COLLECTOR, _WORKER_MODEL, _WORKER_SEED
 
+    _configure_worker_torch_threads()
     _WORKER_SEED = int(seed) + int(worker_index) * 100_003
     env = DaxiguaEnv(config=env_config)
 
@@ -62,7 +99,15 @@ def _worker_init(worker_index, env_config, model_config, seed):
 
     # worker 内部的 replay buffer 只是临时收集容器。真正长期保存经验的 replay
     # buffer 位于主进程，worker 每次 collect 后会把 transition 打包返回。
-    local_buffer = ReplayBuffer(capacity=1, seed=_WORKER_SEED)
+    local_buffer = ReplayBuffer(
+        capacity=max(1, int(n_step)),
+        seed=_WORKER_SEED,
+    )
+    local_causal_buffer = (
+        CausalReplayBuffer(capacity=256, seed=_WORKER_SEED)
+        if causal_enabled
+        else None
+    )
     _WORKER_COLLECTOR = RolloutCollector(
         env=env,
         graph_builder=GraphBuilder(),
@@ -70,10 +115,17 @@ def _worker_init(worker_index, env_config, model_config, seed):
         model=_WORKER_MODEL,
         seed=_WORKER_SEED,
         worker_id=worker_index,
+        causal_replay_buffer=local_causal_buffer,
+        n_step=n_step,
+        gamma=gamma,
+        policy_version=policy_version,
+        counterfactual_enabled=counterfactual_enabled,
+        counterfactual_ring_size=counterfactual_ring_size,
+        episode_id_start=episode_id_start,
     )
 
 
-def _worker_sync_model(state_dict):
+def _worker_sync_model(state_dict, policy_version=None):
     """把主进程 online model 参数同步到当前 worker。"""
 
     if _WORKER_MODEL is None:
@@ -82,6 +134,7 @@ def _worker_sync_model(state_dict):
     state_dict = _load_from_bytes(state_dict)
     _WORKER_MODEL.load_state_dict(state_dict)
     _WORKER_MODEL.eval()
+    _WORKER_COLLECTOR.set_policy_version(policy_version)
     return True
 
 
@@ -93,18 +146,67 @@ def _worker_collect(step_count, epsilon):
 
     step_count = int(step_count)
     if step_count <= 0:
-        return (), RolloutStats(steps=0, episodes=0, total_reward=0.0)
+        return _save_to_bytes(((), (), ())), RolloutStats(
+            steps=0,
+            episodes=0,
+            total_reward=0.0,
+        )
 
     # 每次调用使用一个刚好足够大的临时 buffer，避免 worker 内保留历史 replay，
     # 也避免小容量 buffer 在 collect 中途覆盖刚采集到的 transition。
-    local_buffer = ReplayBuffer(capacity=step_count, seed=_WORKER_SEED + step_count)
+    local_buffer = ReplayBuffer(
+        capacity=(
+            step_count
+            + _WORKER_COLLECTOR.n_step
+            - 1
+        ),
+        seed=_WORKER_SEED + step_count,
+    )
     _WORKER_COLLECTOR.replay_buffer = local_buffer
+    local_causal_buffer = None
+    if _WORKER_COLLECTOR.rule_causal_builder is not None:
+        local_causal_buffer = CausalReplayBuffer(
+            capacity=max(256, step_count),
+            seed=_WORKER_SEED + step_count,
+        )
+        _WORKER_COLLECTOR.causal_replay_buffer = local_causal_buffer
     stats = _WORKER_COLLECTOR.collect_steps(step_count, epsilon=epsilon)
-    return _save_to_bytes(local_buffer.to_tuple()), stats
+    causal_samples = (
+        local_causal_buffer.to_tuple()
+        if local_causal_buffer is not None
+        else ()
+    )
+    proposals = _WORKER_COLLECTOR.drain_counterfactual_proposals()
+    # proposal 很稀疏；仅在实际生成时额外测一次其独立序列化体积，避免把同批
+    # transition/causal bytes 全部误记到反事实监控项。真正传输仍只有下面一个
+    # 共享 payload，图引用继续享受 torch.save memo 去重。
+    proposal_serialized_bytes = (
+        len(_save_to_bytes(proposals))
+        if proposals
+        else 0
+    )
+    # transition、causal sample 和 proposal 共用一次 torch.save，保留同一
+    # GraphTensor 的 pickle memo 引用，避免动作图和物理来源重复存储。
+    payload = _save_to_bytes((
+        local_buffer.to_tuple(),
+        causal_samples,
+        proposals,
+    ))
+    stats = replace(
+        stats,
+        causal_samples_emitted=len(causal_samples),
+        causal_buffer_size=len(causal_samples),
+        counterfactual_proposals_serialized=len(proposals),
+        counterfactual_proposal_serialized_bytes=(
+            proposal_serialized_bytes
+        ),
+        counterfactual_proposal_outbox_size=len(proposals),
+    )
+    return payload, stats
 
 
 def _worker_finalize_attribution():
-    """在进程退出前显式取消 pending，并只返回轻量计数。"""
+    """在进程退出前取消归因 pending，并返回尚未上送的 n-step 尾巴。"""
 
     if _WORKER_COLLECTOR is None:
         raise RuntimeError('parallel rollout worker is not initialized')
@@ -115,11 +217,20 @@ def _worker_finalize_attribution():
         counts[event.event_type] = counts.get(event.event_type, 0) + 1
         reason = event.resolution_reason or 'unknown'
         reason_counts[reason] = reason_counts.get(reason, 0) + 1
-    return WorkerAttributionFinalization(
+    summary = WorkerAttributionFinalization(
         worker_id=_WORKER_COLLECTOR.worker_id,
         cancelled_pending_count=len(events),
+        n_step_flush_emitted=(
+            _WORKER_COLLECTOR.close_n_step_flush_emitted
+        ),
         event_type_counts=tuple(sorted(counts.items())),
         resolution_reason_counts=tuple(sorted(reason_counts.items())),
+    )
+    return (
+        _save_to_bytes(
+            _WORKER_COLLECTOR.close_n_step_transitions
+        ),
+        summary,
     )
 
 
@@ -137,7 +248,14 @@ class ParallelRolloutCollector:
             replay_buffer,
             model_config=None,
             model=None,
-            seed=0):
+            seed=0,
+            causal_replay_buffer=None,
+            n_step=1,
+            gamma=0.99,
+            policy_version=None,
+            counterfactual_enabled=False,
+            counterfactual_ring_size=32,
+            episode_id_start=0):
         """创建多进程 collector。
 
         参数：
@@ -147,6 +265,12 @@ class ParallelRolloutCollector:
         - `model_config`: 创建 worker 侧 GNNQNetwork 所需参数；epsilon < 1 时需要。
         - `model`: 主进程 online model；用于周期性同步参数到 worker。
         - `seed`: worker 随机种子基准。
+        - `causal_replay_buffer`: 主进程长期因果经验池；None 表示关闭规则归因输出。
+        - `n_step` / `gamma`: 每个 worker 独立持有的有序 n-step 聚合配置。
+        - `policy_version`: 首次模型同步前使用的采样策略版本。
+        - `counterfactual_enabled`: 是否让 worker 捕获快照并输出稀疏 proposal。
+        - `counterfactual_ring_size`: 每个 worker 的稳定边界历史环容量。
+        - `episode_id_start`: 每个 worker 恢复后首局使用的 episode id。
         """
 
         worker_count = int(worker_count)
@@ -154,6 +278,36 @@ class ParallelRolloutCollector:
             raise ValueError('worker_count must be greater than 1')
         if not isinstance(replay_buffer, ReplayBuffer):
             raise TypeError(f'replay_buffer must be ReplayBuffer, got {type(replay_buffer)!r}')
+        if (
+                causal_replay_buffer is not None
+                and not isinstance(
+                    causal_replay_buffer,
+                    CausalReplayBuffer)):
+            raise TypeError(
+                'causal_replay_buffer must be CausalReplayBuffer or None'
+            )
+        # 复用单进程 accumulator 的严格参数校验，且不在主进程保留多余状态。
+        from .n_step import NStepTransitionAccumulator
+        n_step_config = NStepTransitionAccumulator(
+            n_step=n_step,
+            gamma=gamma,
+        )
+        if policy_version is not None:
+            policy_version = str(policy_version).strip()
+            if not policy_version:
+                raise ValueError('policy_version must not be empty')
+        if not isinstance(counterfactual_enabled, bool):
+            raise TypeError('counterfactual_enabled must be bool')
+        counterfactual_ring_size = int(counterfactual_ring_size)
+        if counterfactual_ring_size <= 0:
+            raise ValueError(
+                'counterfactual_ring_size must be positive'
+            )
+        if isinstance(episode_id_start, bool):
+            raise TypeError('episode_id_start must be an integer')
+        episode_id_start = int(episode_id_start)
+        if episode_id_start < 0:
+            raise ValueError('episode_id_start must be non-negative')
 
         self.worker_count = worker_count
         self.env_config = env_config
@@ -161,8 +315,17 @@ class ParallelRolloutCollector:
         self.model_config = model_config
         self.model = model
         self.seed = int(seed)
+        self.causal_replay_buffer = causal_replay_buffer
+        self.n_step = n_step_config.n_step
+        self.gamma = n_step_config.gamma
+        self.policy_version = policy_version
+        self.counterfactual_enabled = counterfactual_enabled
+        self.counterfactual_ring_size = counterfactual_ring_size
+        self.episode_id_start = episode_id_start
+        self._counterfactual_proposal_outbox = []
         self._closed = False
         self._model_synced = False
+        self._policy_sync_count = 0
         self.attribution_finalization_summaries = ()
         self._worker_pending_event_counts = [0] * worker_count
 
@@ -174,7 +337,19 @@ class ParallelRolloutCollector:
                 max_workers=1,
                 mp_context=context,
                 initializer=_worker_init,
-                initargs=(worker_index, self.env_config, self.model_config, self.seed),
+                initargs=(
+                    worker_index,
+                    self.env_config,
+                    self.model_config,
+                    self.seed,
+                    self.n_step,
+                    self.gamma,
+                    self.causal_replay_buffer is not None,
+                    self.policy_version,
+                    self.counterfactual_enabled,
+                    self.counterfactual_ring_size,
+                    self.episode_id_start,
+                ),
             )
             for worker_index in range(self.worker_count)
         )
@@ -189,17 +364,30 @@ class ParallelRolloutCollector:
                 executor.submit(_worker_finalize_attribution)
                 for executor in self._executors
             )
-            self.attribution_finalization_summaries = tuple(
+            results = tuple(
                 future.result()
                 for future in futures
             )
+            tail_transitions = []
+            summaries = []
+            for transition_bytes, summary in results:
+                transitions = _load_from_bytes(transition_bytes)
+                if len(transitions) != summary.n_step_flush_emitted:
+                    raise RuntimeError(
+                        'parallel worker close returned an n-step tail '
+                        'that does not match finalization stats'
+                    )
+                tail_transitions.extend(transitions)
+                summaries.append(summary)
+            self.replay_buffer.extend(tail_transitions)
+            self.attribution_finalization_summaries = tuple(summaries)
         finally:
             for executor in self._executors:
                 executor.shutdown(wait=True, cancel_futures=True)
             self._closed = True
         return self.attribution_finalization_summaries
 
-    def sync_model(self, model=None):
+    def sync_model(self, model=None, policy_version=None):
         """把主进程模型参数同步到所有 worker。"""
 
         self._ensure_open()
@@ -211,9 +399,21 @@ class ParallelRolloutCollector:
             name: parameter.detach().cpu()
             for name, parameter in model.state_dict().items()
         }
+        self._policy_sync_count += 1
+        if policy_version is None:
+            policy_version = f'parallel-sync-{self._policy_sync_count}'
+        else:
+            policy_version = str(policy_version).strip()
+            if not policy_version:
+                raise ValueError('policy_version must not be empty')
+        self.policy_version = policy_version
         state_bytes = _save_to_bytes(state_dict)
         futures = tuple(
-            executor.submit(_worker_sync_model, state_bytes)
+            executor.submit(
+                _worker_sync_model,
+                state_bytes,
+                policy_version,
+            )
             for executor in self._executors
         )
         for future in futures:
@@ -269,30 +469,72 @@ class ParallelRolloutCollector:
 
         all_transitions = []
         worker_stats = []
-        for worker_index, (transition_bytes, stats) in zip(
+        all_causal_samples = []
+        all_proposals = []
+        for worker_index, (payload_bytes, stats) in zip(
                 handle.worker_indices,
                 results):
-            transitions = _load_from_bytes(transition_bytes)
-            if len(transitions) != stats.steps or len(stats.transition_keys) != stats.steps:
+            transitions, causal_samples, proposals = _load_from_bytes(
+                payload_bytes
+            )
+            if (
+                    len(transitions)
+                    != stats.replay_transitions_emitted):
                 raise RuntimeError(
-                    'parallel worker returned misaligned transitions, stats, or transition keys'
+                    'parallel worker returned replay transition count '
+                    'that does not match emitted stats'
+                )
+            if len(stats.transition_keys) != stats.steps:
+                raise RuntimeError(
+                    'parallel worker returned raw transition keys that '
+                    'do not match environment step stats'
+                )
+            if len(causal_samples) != stats.causal_samples_emitted:
+                raise RuntimeError(
+                    'parallel worker returned causal sample count that '
+                    'does not match emitted stats'
+                )
+            if (
+                    len(proposals)
+                    != stats.counterfactual_proposals_serialized):
+                raise RuntimeError(
+                    'parallel worker returned proposal count that does '
+                    'not match serialization stats'
                 )
             all_transitions.extend(transitions)
+            all_causal_samples.extend(causal_samples)
+            all_proposals.extend(proposals)
             worker_stats.append(stats)
             self._worker_pending_event_counts[worker_index] = int(
                 stats.attribution_pending_event_count
             )
 
         self.replay_buffer.extend(all_transitions)
+        if all_causal_samples:
+            if self.causal_replay_buffer is None:
+                raise RuntimeError(
+                    'parallel worker emitted causal samples without a '
+                    'main-process causal replay buffer'
+                )
+            self.causal_replay_buffer.extend(all_causal_samples)
+        self._counterfactual_proposal_outbox.extend(all_proposals)
         merged = _merge_rollout_stats(
             worker_stats=worker_stats,
             buffer_size=len(self.replay_buffer),
             collect_seconds=wall_seconds,
+            causal_buffer_size=(
+                len(self.causal_replay_buffer)
+                if self.causal_replay_buffer is not None
+                else 0
+            ),
         )
         return replace(
             merged,
             attribution_pending_event_count=sum(
                 self._worker_pending_event_counts
+            ),
+            counterfactual_proposal_outbox_size=len(
+                self._counterfactual_proposal_outbox
             ),
         )
 
@@ -313,8 +555,19 @@ class ParallelRolloutCollector:
         if self._closed:
             raise RuntimeError('parallel rollout collector is closed')
 
+    def drain_counterfactual_proposals(self):
+        """取出并清空所有 worker 已回传、尚未交给调度器的 proposal。"""
 
-def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
+        proposals = tuple(self._counterfactual_proposal_outbox)
+        self._counterfactual_proposal_outbox.clear()
+        return proposals
+
+
+def _merge_rollout_stats(
+        worker_stats,
+        buffer_size,
+        collect_seconds,
+        causal_buffer_size=0):
     """把多个 worker 返回的 `RolloutStats` 合并成一份统计。"""
 
     steps = sum(stats.steps for stats in worker_stats)
@@ -355,13 +608,44 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
     attribution_chain_merge_count = 0
     attribution_max_chain_depth = 0
     attribution_event_status_counts = {}
+    attribution_confidence_tier_counts = {}
     attribution_delays = []
+    merge_level_counts = {}
+    max_fruit_level = 0
     physics_frames_total = 0
     fruit_count_total = 0
     graph_node_count_total = 0
     graph_edge_count_total = 0
     graph_cache_hits = 0
     graph_cache_misses = 0
+    replay_transitions_emitted = 0
+    n_step_pending_count = 0
+    n_step_forced_flush_emitted = 0
+    causal_rule_build_calls = 0
+    causal_rule_build_seconds = 0.0
+    causal_rule_input_event_count = 0
+    causal_rule_eligible_event_count = 0
+    causal_rule_budget_count = 0
+    causal_rule_samples_generated = 0
+    causal_samples_pushed = 0
+    causal_samples_emitted = 0
+    causal_context_count = 0
+    causal_rule_skip_reason_counts = {}
+    counterfactual_snapshot_calls = 0
+    counterfactual_snapshot_seconds = 0.0
+    counterfactual_snapshot_failures = 0
+    counterfactual_history_evictions = 0
+    counterfactual_history_size = 0
+    counterfactual_proposal_build_calls = 0
+    counterfactual_proposal_build_seconds = 0.0
+    counterfactual_proposal_input_event_count = 0
+    counterfactual_proposal_confirmed_event_count = 0
+    counterfactual_proposal_budget_count = 0
+    counterfactual_proposals_generated = 0
+    counterfactual_proposals_serialized = 0
+    counterfactual_proposal_serialized_bytes = 0
+    counterfactual_proposal_outbox_size = 0
+    counterfactual_proposal_skip_reason_counts = {}
 
     step_offset = 0
     for stats in worker_stats:
@@ -423,13 +707,107 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
                 attribution_event_status_counts.get(key, 0)
                 + int(count)
             )
+        for tier, count in stats.attribution_confidence_tier_counts:
+            attribution_confidence_tier_counts[tier] = (
+                attribution_confidence_tier_counts.get(tier, 0)
+                + int(count)
+            )
         attribution_delays.extend(stats.attribution_delays)
+        for level, count in stats.merge_level_counts:
+            merge_level_counts[int(level)] = (
+                merge_level_counts.get(int(level), 0)
+                + int(count)
+            )
+        max_fruit_level = max(
+            max_fruit_level,
+            int(stats.max_fruit_level),
+        )
         physics_frames_total += stats.physics_frames_total
         fruit_count_total += stats.fruit_count_total
         graph_node_count_total += stats.graph_node_count_total
         graph_edge_count_total += stats.graph_edge_count_total
         graph_cache_hits += stats.graph_cache_hits
         graph_cache_misses += stats.graph_cache_misses
+        replay_transitions_emitted += (
+            stats.replay_transitions_emitted
+        )
+        n_step_pending_count += stats.n_step_pending_count
+        n_step_forced_flush_emitted += (
+            stats.n_step_forced_flush_emitted
+        )
+        causal_rule_build_calls += stats.causal_rule_build_calls
+        causal_rule_build_seconds += (
+            stats.causal_rule_build_seconds
+        )
+        causal_rule_input_event_count += (
+            stats.causal_rule_input_event_count
+        )
+        causal_rule_eligible_event_count += (
+            stats.causal_rule_eligible_event_count
+        )
+        causal_rule_budget_count += stats.causal_rule_budget_count
+        causal_rule_samples_generated += (
+            stats.causal_rule_samples_generated
+        )
+        causal_samples_pushed += stats.causal_samples_pushed
+        causal_samples_emitted += stats.causal_samples_emitted
+        causal_context_count += stats.causal_context_count
+        for reason, count in stats.causal_rule_skip_reason_counts:
+            causal_rule_skip_reason_counts[reason] = (
+                causal_rule_skip_reason_counts.get(reason, 0)
+                + int(count)
+            )
+        counterfactual_snapshot_calls += (
+            stats.counterfactual_snapshot_calls
+        )
+        counterfactual_snapshot_seconds += (
+            stats.counterfactual_snapshot_seconds
+        )
+        counterfactual_snapshot_failures += (
+            stats.counterfactual_snapshot_failures
+        )
+        counterfactual_history_evictions += (
+            stats.counterfactual_history_evictions
+        )
+        counterfactual_history_size += (
+            stats.counterfactual_history_size
+        )
+        counterfactual_proposal_build_calls += (
+            stats.counterfactual_proposal_build_calls
+        )
+        counterfactual_proposal_build_seconds += (
+            stats.counterfactual_proposal_build_seconds
+        )
+        counterfactual_proposal_input_event_count += (
+            stats.counterfactual_proposal_input_event_count
+        )
+        counterfactual_proposal_confirmed_event_count += (
+            stats.counterfactual_proposal_confirmed_event_count
+        )
+        counterfactual_proposal_budget_count += (
+            stats.counterfactual_proposal_budget_count
+        )
+        counterfactual_proposals_generated += (
+            stats.counterfactual_proposals_generated
+        )
+        counterfactual_proposals_serialized += (
+            stats.counterfactual_proposals_serialized
+        )
+        counterfactual_proposal_serialized_bytes += (
+            stats.counterfactual_proposal_serialized_bytes
+        )
+        counterfactual_proposal_outbox_size += (
+            stats.counterfactual_proposal_outbox_size
+        )
+        for reason, count in (
+                stats.counterfactual_proposal_skip_reason_counts):
+            counterfactual_proposal_skip_reason_counts[reason] = (
+                counterfactual_proposal_skip_reason_counts.get(
+                    reason,
+                    0,
+                )
+                + int(count)
+            )
 
     return RolloutStats(
         steps=steps,
@@ -454,6 +832,73 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
         random_actions=random_actions,
         greedy_actions=greedy_actions,
         buffer_size=buffer_size,
+        replay_transitions_emitted=replay_transitions_emitted,
+        n_step_pending_count=n_step_pending_count,
+        n_step_forced_flush_emitted=(
+            n_step_forced_flush_emitted
+        ),
+        causal_rule_build_calls=causal_rule_build_calls,
+        causal_rule_build_seconds=causal_rule_build_seconds,
+        causal_rule_input_event_count=(
+            causal_rule_input_event_count
+        ),
+        causal_rule_eligible_event_count=(
+            causal_rule_eligible_event_count
+        ),
+        causal_rule_budget_count=causal_rule_budget_count,
+        causal_rule_samples_generated=(
+            causal_rule_samples_generated
+        ),
+        causal_samples_pushed=causal_samples_pushed,
+        causal_samples_emitted=causal_samples_emitted,
+        causal_rule_skip_reason_counts=tuple(sorted(
+            causal_rule_skip_reason_counts.items()
+        )),
+        causal_buffer_size=int(causal_buffer_size),
+        causal_context_count=causal_context_count,
+        counterfactual_snapshot_calls=(
+            counterfactual_snapshot_calls
+        ),
+        counterfactual_snapshot_seconds=(
+            counterfactual_snapshot_seconds
+        ),
+        counterfactual_snapshot_failures=(
+            counterfactual_snapshot_failures
+        ),
+        counterfactual_history_evictions=(
+            counterfactual_history_evictions
+        ),
+        counterfactual_history_size=counterfactual_history_size,
+        counterfactual_proposal_build_calls=(
+            counterfactual_proposal_build_calls
+        ),
+        counterfactual_proposal_build_seconds=(
+            counterfactual_proposal_build_seconds
+        ),
+        counterfactual_proposal_input_event_count=(
+            counterfactual_proposal_input_event_count
+        ),
+        counterfactual_proposal_confirmed_event_count=(
+            counterfactual_proposal_confirmed_event_count
+        ),
+        counterfactual_proposal_budget_count=(
+            counterfactual_proposal_budget_count
+        ),
+        counterfactual_proposals_generated=(
+            counterfactual_proposals_generated
+        ),
+        counterfactual_proposals_serialized=(
+            counterfactual_proposals_serialized
+        ),
+        counterfactual_proposal_serialized_bytes=(
+            counterfactual_proposal_serialized_bytes
+        ),
+        counterfactual_proposal_outbox_size=(
+            counterfactual_proposal_outbox_size
+        ),
+        counterfactual_proposal_skip_reason_counts=tuple(sorted(
+            counterfactual_proposal_skip_reason_counts.items()
+        )),
         collect_seconds=collect_seconds,
         graph_build_seconds=graph_build_seconds,
         tensor_convert_seconds=tensor_convert_seconds,
@@ -492,7 +937,12 @@ def _merge_rollout_stats(worker_stats, buffer_size, collect_seconds):
             for (event_type, status), count
             in sorted(attribution_event_status_counts.items())
         ),
+        attribution_confidence_tier_counts=tuple(sorted(
+            attribution_confidence_tier_counts.items()
+        )),
         attribution_delays=tuple(attribution_delays),
+        merge_level_counts=tuple(sorted(merge_level_counts.items())),
+        max_fruit_level=max_fruit_level,
         physics_frames_total=physics_frames_total,
         fruit_count_total=fruit_count_total,
         graph_node_count_total=graph_node_count_total,
