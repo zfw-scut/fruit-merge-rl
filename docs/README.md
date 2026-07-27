@@ -13,20 +13,39 @@
 ## 当前 RL 开发入口
 
 - `rl/CAUSAL_ATTRIBUTION_V1.md`: 第一次大规模训练采用的 Reward V2、完整状态归因、
-  因果 Q 排序和稀疏反事实实现规格。
-- `rl/INTERFACE_V0.md`: 当前已经实现的 RL 环境、状态、经验和训练接口。
+  因果 Q 排序、预算反事实和局部 Shapley 规格；正文保留从设计到落地的历史语境。
+- `rl/INTERFACE_V0.md`: 当前已经实现的 RL 环境、状态、快照、经验、因果训练、
+  checkpoint 与恢复接口。
+- `rl/FIRST_500K_RUNBOOK.md`: 云端安装、全量测试、preflight、5k/10k/500k
+  阶段门禁、监控、停止和 checkpoint 恢复手册。
 - `rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md`: 当前训练吞吐优化和 fast 物理模式说明。
+- `training_runs/FIRST_500K_READINESS.md`: 第一次 500k 的唯一就绪证据表；区分
+  已完成检查、运行中阶段和待运行阶段，不能用配置存在或中间 CSV 替代结论。
 
-完整状态归因实现顺序中的前六步已经落地：terminated/truncated bootstrap 语义、
-真实物理半径、`(worker_id, episode_id, step_index)` 轨迹键，以及可跨 Windows
-spawn/pickle 的只读 `StateAnalysis` 数据契约；`StateAnalyzer` 已实现 15 动作解析
-投放列、q0～q3 顶部连通容量、规范最小水果探针自由空间、支撑/伙伴图和基础连锁
-motif。环境现在在 worker 内缓存相邻分析并计算 Reward V2：真实合成按等级指数计值，
-状态 shaping 使用 `0.6C+0.3R+0.1K`，不再包含存活、高度或持续危险奖励。每个
-collector worker 还维护 `AttributionTracker`，追踪完整水果谱系、合成唯一价值包、
-铺垫兑现、渐进封路责任和 pending 的确认/撤销/中断；终局动作另有只供归因的后状态
-分析。完整分析和事件仍不写入主 replay。下一步实现 `CausalReplayBuffer` 与规则
-Q 排序 loss。
+完整状态归因的训练代码已经贯通：环境使用 Reward V2；采集侧生成 3-step return、
+规则因果样本和有界反事实 proposal；更新器使用 Double DQN，并把 TD、
+规则 Q 排序与反事实/局部 Shapley 差值监督联合训练。`EngineSnapshot` 保存并校验
+完整 Pymunk、队列、RNG 和 episode 状态，反事实只在原动作可复现后生成标签。
+`CounterfactualCoordinator` 与 `LocalShapleyCoordinator` 共用软预算和 10% 硬账本，
+队列或预算不足时丢弃任务而不阻塞 rollout。
+
+训练 checkpoint 已版本化并采用原子替换，保存 online/target/optimizer、更新计数、
+Python/PyTorch/CUDA RNG、主 replay 和 `CausalReplayBuffer` 状态及运行/配置指纹。
+hybrid 主 replay 恢复时只恢复有界热层，并在 sidecar 中明确记录为 hot-resume，
+不会把未保存的冷层宣称为精确恢复。
+
+第一次正式长训前的三个阶段分别由以下配置承载：
+
+1. `configs/train_dqn_causal_smoke_5k.toml`：5000 更新烟测；
+2. `configs/train_dqn_causal_calibration_10k.toml`：10000 更新标定，必要时从
+   update 0 另起独立 25000 更新校准；连续延长虽可保持冻结的 epsilon horizon，
+   但必须作为不同证据单独标记；
+3. `configs/train_dqn_causal_500k.toml`：500000 更新正式配置。
+
+`tools/preflight_training.py` 是启动前门禁，覆盖配置、CUDA、依赖版本、
+`EngineSnapshot` 重演、完整因果 optimizer step、局部 Shapley 物理链路、磁盘和
+CPU 余量。配置和门禁已经存在不等于对应烟测/标定已经完成；实际结果应在运行后写入
+`training_runs/`，本文不预先声明结果。
 
 ## 建议阅读顺序
 

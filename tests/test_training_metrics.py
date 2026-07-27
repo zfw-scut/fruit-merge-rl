@@ -16,10 +16,12 @@ from daxigua_rl.scripts.train_dqn import (
     EpisodeLogger,
     build_env_config,
     build_metric_row,
+    clear_active_failure_diagnostic,
     close_training_resources,
     evaluate_policy,
     load_config_defaults,
     parse_args,
+    process_counterfactual_rollout,
     validate_args,
     write_attribution_warmup_summary,
 )
@@ -28,6 +30,20 @@ from daxigua_rl.training.collector import RolloutStats
 
 class TrainingMetricsTest(unittest.TestCase):
     """验证训练脚本新增的评估和 episode 指标。"""
+
+    def test_successful_resume_clears_only_active_failure_pointer(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            run_dir = Path(tmp_dir)
+            latest = run_dir / 'failure_latest.json'
+            history = run_dir / 'failure_20260727_000000_000000.json'
+            latest.write_text('{}', encoding='utf-8')
+            history.write_text('{}', encoding='utf-8')
+
+            clear_active_failure_diagnostic(run_dir)
+            clear_active_failure_diagnostic(run_dir)
+
+            self.assertFalse(latest.exists())
+            self.assertTrue(history.exists())
 
     def test_episode_logger_writes_one_row_per_finished_episode(self):
         """EpisodeLogger 应把每个已结束 episode 单独写入 CSV。"""
@@ -248,7 +264,11 @@ class TrainingMetricsTest(unittest.TestCase):
             eval_stats=None,
             best_eval_score=float('-inf'),
             best_eval_update=0,
-            timing={'elapsed': 2.0},
+            timing={
+                'elapsed': 2.0,
+                'completed_updates': 3,
+                'completed_env_steps': 8,
+            },
             causal_replay_stats={
                 'total_count': 9,
                 'stratum_counts': {
@@ -264,6 +284,21 @@ class TrainingMetricsTest(unittest.TestCase):
                 'estimated_unique_graph_bytes': 1234,
                 'estimated_graph_sharing_saved_bytes': 567,
             },
+            counterfactual_stats=SimpleNamespace(
+                enabled=True,
+                worker_count=2,
+                pending_task_count=3,
+                candidate_pool_capacity=256,
+                candidate_pool_count=4,
+                cumulative=SimpleNamespace(
+                    candidate_offers=11,
+                    candidate_pool_evictions=2,
+                    candidate_dispatch_attempts=7,
+                    candidate_dispatch_admitted=6,
+                    candidate_close_dropped=1,
+                ),
+                scheduler=None,
+            ),
         )
 
         self.assertEqual(row['td_loss'], 0.8)
@@ -284,6 +319,24 @@ class TrainingMetricsTest(unittest.TestCase):
         self.assertEqual(row['causal_replay_counterfactual_count'], 2)
         self.assertEqual(row['causal_replay_shared_tensor_bytes'], 1234)
         self.assertEqual(row['causal_replay_saved_tensor_bytes'], 567)
+        self.assertEqual(row['counterfactual_candidate_pool_capacity'], 256)
+        self.assertEqual(row['counterfactual_candidate_pool_count'], 4)
+        self.assertEqual(row['counterfactual_candidate_offers'], 11)
+        self.assertEqual(row['counterfactual_candidate_pool_evictions'], 2)
+        self.assertEqual(
+            row['counterfactual_candidate_dispatch_attempts'],
+            7,
+        )
+        self.assertEqual(
+            row['counterfactual_candidate_dispatch_admitted'],
+            6,
+        )
+        self.assertEqual(
+            row['counterfactual_candidate_close_dropped'],
+            1,
+        )
+        self.assertEqual(row['updates_per_second'], 1.5)
+        self.assertEqual(row['env_steps_per_second'], 4.0)
         self.assertEqual(row['collect_mean_reward_total'], 2.5)
         self.assertEqual(row['collect_mean_task_reward'], 2.0)
         self.assertEqual(row['collect_mean_potential_shaping_reward'], 0.4)
@@ -335,11 +388,98 @@ class TrainingMetricsTest(unittest.TestCase):
             '"REACHABILITY_SEALED":{"pending":2}}',
         )
 
+    def test_counterfactual_rollout_routes_shapley_before_pool_offer(self):
+        calls = []
+        shapley_proposal = object()
+        ordinary_proposal = object()
+
+        collector = SimpleNamespace(
+            drain_counterfactual_proposals=lambda: (
+                calls.append(('drain',))
+                or (shapley_proposal, ordinary_proposal)
+            ),
+        )
+        coordinator = SimpleNamespace(
+            target_policy='target-policy',
+            stats=SimpleNamespace(
+                scheduler=SimpleNamespace(real_steps=77),
+            ),
+            record_real_steps=lambda steps, dispatch_candidates: calls.append((
+                'record_real_steps',
+                steps,
+                dispatch_candidates,
+            )),
+            offer_many=lambda proposals: (
+                calls.append(('offer_many', tuple(proposals)))
+                or ('ordinary-submission',)
+            ),
+            poll=lambda: calls.append(('counterfactual_poll',)),
+        )
+
+        def consider(proposal, policy, *, created_real_step):
+            calls.append((
+                'shapley_consider',
+                proposal,
+                policy,
+                created_real_step,
+            ))
+            return SimpleNamespace(
+                skip_counterfactual=(
+                    proposal is shapley_proposal
+                ),
+            )
+
+        shapley = SimpleNamespace(
+            retry_pending=lambda: calls.append(('shapley_retry',)),
+            consider=consider,
+            poll=lambda: calls.append(('shapley_poll',)),
+        )
+
+        submissions = process_counterfactual_rollout(
+            collector,
+            coordinator,
+            SimpleNamespace(steps=12),
+            shapley_coordinator=shapley,
+        )
+
+        self.assertEqual(submissions, ('ordinary-submission',))
+        self.assertEqual(
+            calls,
+            [
+                ('record_real_steps', 12, False),
+                ('shapley_retry',),
+                ('drain',),
+                (
+                    'shapley_consider',
+                    shapley_proposal,
+                    'target-policy',
+                    77,
+                ),
+                (
+                    'shapley_consider',
+                    ordinary_proposal,
+                    'target-policy',
+                    77,
+                ),
+                ('offer_many', (ordinary_proposal,)),
+                ('counterfactual_poll',),
+                ('shapley_poll',),
+            ],
+        )
+
     def test_warmup_attribution_summary_is_kept_separate(self):
         stats = RolloutStats(
             steps=8,
             episodes=0,
             total_reward=0.0,
+            counterfactual_snapshot_failures=0,
+            state_analysis_calls=8,
+            state_analysis_degraded_count=1,
+            potential_shaping_abs_values=(
+                0.1,
+                0.2,
+                0.3,
+            ),
             attribution_tracker_calls=8,
             attribution_tracker_seconds=0.04,
             attribution_events_created=3,
@@ -362,7 +502,19 @@ class TrainingMetricsTest(unittest.TestCase):
             )
 
         self.assertEqual(payload['phase'], 'warmup')
+        self.assertEqual(payload['schema_version'], 1)
         self.assertEqual(payload['steps'], 8)
+        self.assertEqual(
+            payload['counterfactual_snapshot_failures'],
+            0,
+        )
+        self.assertEqual(payload['state_analysis_calls'], 8)
+        self.assertEqual(payload['state_analysis_degraded_count'], 1)
+        self.assertEqual(payload['state_analysis_degraded_rate'], 0.125)
+        self.assertAlmostEqual(
+            payload['p95_abs_potential_shaping_reward'],
+            0.29,
+        )
         self.assertEqual(payload['events_created'], 3)
         self.assertEqual(payload['pending_event_count_at_end'], 1)
         self.assertEqual(payload['mean_attribution_delay'], 3.0)

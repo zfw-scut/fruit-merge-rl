@@ -73,6 +73,10 @@ from daxigua_rl.scripts.train_dqn import (  # noqa: E402
 )
 from daxigua_rl.training.dqn import DQNTrainer, DQNTrainerConfig  # noqa: E402
 from daxigua_rl.training.checkpointing import config_fingerprint  # noqa: E402
+from daxigua_rl.training.counterfactual_coordinator import (  # noqa: E402
+    effective_cpu_count,
+    recommended_counterfactual_worker_count,
+)
 from daxigua_rl.training.identity import TransitionKey  # noqa: E402
 from daxigua_rl.training.tensor_transition import TensorTransition  # noqa: E402
 from daxigua_rl.reward import merge_utility  # noqa: E402
@@ -82,6 +86,33 @@ PINNED_PYMUNK_VERSION = '7.3.0'
 PINNED_CHIPMUNK_VERSION = (
     '2.0.1-ade7ed72849e60289eefb7a41e79ae6322fefaf3'
 )
+PINNED_TORCH_VERSION = '2.12.1+cu130'
+PINNED_CUDA_RUNTIME = '13.0'
+
+FORMAL_500K_CONFIG_CONTRACT = {
+    'total_updates': 500_000,
+    'warmup_steps': 5_000,
+    'batch_size': 64,
+    'replay_capacity': 100_000,
+    'hot_replay_capacity': 8_000,
+    'n_step': 3,
+    'causal_replay_capacity': 20_000,
+    'causal_batch_size': 32,
+    'causal_update_interval': 2,
+    'counterfactual_workers': 4,
+    'counterfactual_max_alternatives': 2,
+    'shapley_candidate_limit': 3,
+    'action_count': 15,
+    'num_envs': 8,
+}
+FORMAL_500K_FLOAT_CONTRACT = {
+    'lambda_rule': 0.15,
+    'lambda_cf': 0.10,
+    'counterfactual_cost_ratio': 0.06,
+    'counterfactual_hard_limit': 0.10,
+    'counterfactual_proposal_sample_rate': 0.0625,
+    'shapley_event_ratio_max': 0.0005,
+}
 
 
 def parse_args(argv=None):
@@ -107,10 +138,75 @@ def parse_args(argv=None):
     parser.add_argument(
         '--min-free-gb',
         type=float,
-        default=40.0,
+        default=80.0,
         help='训练输出盘最低可用空间；包含热 replay 与因果 replay checkpoint 余量。',
     )
+    parser.add_argument(
+        '--min-memory-gb',
+        type=float,
+        default=32.0,
+        help='正式长训主机最低物理内存；64 GiB 为推荐值。',
+    )
+    parser.add_argument(
+        '--min-available-memory-gb',
+        type=float,
+        default=8.0,
+        help='启动时最低可用物理内存，避免与其它大进程争抢并触发分页。',
+    )
     return parser.parse_args(argv)
+
+
+def _formal_500k_config_audit(training_args):
+    """核对首轮正式训练不可被 smoke 配置或关闭归因的配置替代。"""
+
+    mismatches = {}
+    for field_name, expected in FORMAL_500K_CONFIG_CONTRACT.items():
+        actual = getattr(training_args, field_name, None)
+        if actual != expected:
+            mismatches[field_name] = {
+                'actual': actual,
+                'expected': expected,
+            }
+    for field_name, expected in FORMAL_500K_FLOAT_CONTRACT.items():
+        actual = getattr(training_args, field_name, None)
+        if (
+                not isinstance(actual, (int, float))
+                or not math.isfinite(float(actual))
+                or not math.isclose(
+                    float(actual),
+                    expected,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )):
+            mismatches[field_name] = {
+                'actual': actual,
+                'expected': expected,
+            }
+    required_flags = {
+        'async_rollout': True,
+        'counterfactual_enabled': True,
+        'shapley_enabled': True,
+    }
+    for field_name, expected in required_flags.items():
+        actual = getattr(training_args, field_name, None)
+        if actual is not expected:
+            mismatches[field_name] = {
+                'actual': actual,
+                'expected': expected,
+            }
+    device = str(getattr(training_args, 'device', ''))
+    if not device.startswith('cuda'):
+        mismatches['device'] = {
+            'actual': device,
+            'expected': 'cuda or cuda:<index>',
+        }
+    return {
+        'passed': not mismatches,
+        'mismatches': mismatches,
+        'integer_contract': dict(FORMAL_500K_CONFIG_CONTRACT),
+        'float_contract': dict(FORMAL_500K_FLOAT_CONTRACT),
+        'required_flags': required_flags,
+    }
 
 
 def _check(name, passed, *, required=True, **details):
@@ -120,6 +216,149 @@ def _check(name, passed, *, required=True, **details):
         'required': bool(required),
         'details': details,
     }
+
+
+def _physical_memory_status():
+    """返回跨平台 ``(total_bytes, available_bytes)``，无法探测时为 None。"""
+
+    if os.name == 'nt':
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            class MemoryStatusEx(ctypes.Structure):
+                _fields_ = (
+                    ('dwLength', wintypes.DWORD),
+                    ('dwMemoryLoad', wintypes.DWORD),
+                    ('ullTotalPhys', ctypes.c_ulonglong),
+                    ('ullAvailPhys', ctypes.c_ulonglong),
+                    ('ullTotalPageFile', ctypes.c_ulonglong),
+                    ('ullAvailPageFile', ctypes.c_ulonglong),
+                    ('ullTotalVirtual', ctypes.c_ulonglong),
+                    ('ullAvailVirtual', ctypes.c_ulonglong),
+                    ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+                )
+
+            status = MemoryStatusEx()
+            status.dwLength = ctypes.sizeof(MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(
+                    ctypes.byref(status)):
+                return int(status.ullTotalPhys), int(status.ullAvailPhys)
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+
+    meminfo_path = Path('/proc/meminfo')
+    try:
+        meminfo = {}
+        for line in meminfo_path.read_text(
+                encoding='ascii').splitlines():
+            name, value = line.split(':', 1)
+            meminfo[name] = int(value.strip().split()[0]) * 1024
+        total = meminfo.get('MemTotal')
+        available = meminfo.get(
+            'MemAvailable',
+            meminfo.get('MemFree'),
+        )
+        if total and available is not None:
+            return _apply_cgroup_memory_limit(
+                int(total),
+                int(available),
+            )
+    except (OSError, TypeError, ValueError):
+        pass
+
+    try:
+        page_size = os.sysconf('SC_PAGE_SIZE')
+        total_pages = os.sysconf('SC_PHYS_PAGES')
+        available_pages = os.sysconf('SC_AVPHYS_PAGES')
+        return _apply_cgroup_memory_limit(
+            int(page_size * total_pages),
+            int(page_size * available_pages),
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None, None
+
+
+def _apply_cgroup_memory_limit(total_bytes, available_bytes):
+    """将宿主机内存收紧到当前 Linux cgroup 的 limit/usage。"""
+
+    candidates = []
+
+    def ancestor_dirs(root, relative_group):
+        current = root / relative_group
+        while True:
+            yield current
+            if current == root:
+                break
+            parent = current.parent
+            if parent == current or root not in parent.parents and parent != root:
+                break
+            current = parent
+
+    try:
+        cgroup_lines = Path('/proc/self/cgroup').read_text(
+            encoding='ascii',
+        ).splitlines()
+    except OSError:
+        cgroup_lines = ()
+    for line in cgroup_lines:
+        fields = line.split(':', 2)
+        if len(fields) != 3:
+            continue
+        _hierarchy, controllers, group_path = fields
+        relative_group = group_path.strip().lstrip('/')
+        if not controllers:
+            for group_dir in ancestor_dirs(
+                    Path('/sys/fs/cgroup'),
+                    relative_group):
+                candidates.append((
+                    group_dir / 'memory.max',
+                    group_dir / 'memory.current',
+                ))
+        elif 'memory' in controllers.split(','):
+            root = Path('/sys/fs/cgroup/memory')
+            for group_dir in ancestor_dirs(root, relative_group):
+                candidates.append((
+                    group_dir / 'memory.limit_in_bytes',
+                    group_dir / 'memory.usage_in_bytes',
+                ))
+    candidates.extend((
+        (
+            Path('/sys/fs/cgroup/memory.max'),
+            Path('/sys/fs/cgroup/memory.current'),
+        ),
+        (
+            Path('/sys/fs/cgroup/memory/memory.limit_in_bytes'),
+            Path('/sys/fs/cgroup/memory/memory.usage_in_bytes'),
+        ),
+    ))
+
+    limits = []
+    remaining_limits = []
+    for limit_path, usage_path in candidates:
+        try:
+            limit_text = limit_path.read_text(
+                encoding='ascii',
+            ).strip()
+            if limit_text == 'max':
+                continue
+            limit = int(limit_text)
+            usage = int(usage_path.read_text(
+                encoding='ascii',
+            ).strip())
+        except (OSError, TypeError, ValueError):
+            continue
+        # cgroup v1 常用一个接近 2**63 的数表示无限制。
+        if limit <= 0 or limit >= (1 << 60):
+            continue
+        limits.append(limit)
+        remaining_limits.append(
+            max(0, limit - max(0, usage))
+        )
+    return (
+        min((int(total_bytes), *limits)),
+        min((int(available_bytes), *remaining_limits)),
+    )
 
 
 def _snapshot_audit(training_args, count):
@@ -657,8 +896,28 @@ def run_preflight(args):
     config_path = (PROJECT_ROOT / args.config).resolve()
     if not config_path.is_file():
         raise FileNotFoundError(f'training config not found: {config_path}')
+    for field_name in (
+            'min_free_gb',
+            'min_memory_gb',
+            'min_available_memory_gb'):
+        value = float(getattr(args, field_name))
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(
+                f'--{field_name.replace("_", "-")} must be finite '
+                'and non-negative'
+            )
 
     checks = []
+    git_metadata = _git_metadata()
+    checks.append(_check(
+        'git_worktree_clean',
+        (
+            bool(git_metadata.get('commit'))
+            and bool(git_metadata.get('branch'))
+            and git_metadata.get('dirty') is False
+        ),
+        **git_metadata,
+    ))
     try:
         training_args = parse_training_args(('--config', str(config_path)))
         validate_training_args(training_args)
@@ -682,6 +941,14 @@ def run_preflight(args):
             num_envs=training_args.num_envs,
             device=training_args.device,
         ))
+        formal_contract = _formal_500k_config_audit(
+            training_args
+        )
+        checks.append(_check(
+            'formal_500k_config_contract',
+            formal_contract.pop('passed'),
+            **formal_contract,
+        ))
 
     checks.append(_check(
         'python_version',
@@ -700,6 +967,17 @@ def run_preflight(args):
         str(pymunk.chipmunk_version) == PINNED_CHIPMUNK_VERSION,
         actual=str(pymunk.chipmunk_version),
         expected=PINNED_CHIPMUNK_VERSION,
+    ))
+    checks.append(_check(
+        'torch_cuda_build',
+        (
+            str(torch.__version__) == PINNED_TORCH_VERSION
+            and str(torch.version.cuda) == PINNED_CUDA_RUNTIME
+        ),
+        torch_actual=str(torch.__version__),
+        torch_expected=PINNED_TORCH_VERSION,
+        cuda_runtime_actual=str(torch.version.cuda),
+        cuda_runtime_expected=PINNED_CUDA_RUNTIME,
     ))
 
     if training_args is not None:
@@ -787,20 +1065,80 @@ def run_preflight(args):
             recommended_min_gb=float(args.min_free_gb),
         ))
 
-        cpu_count = os.cpu_count() or 1
-        cf_workers = max(
-            0,
-            min(
-                math.floor(cpu_count * 0.25),
-                cpu_count - training_args.num_envs - 1,
+        total_memory, available_memory = _physical_memory_status()
+        total_memory_gb = (
+            total_memory / (1024 ** 3)
+            if total_memory is not None
+            else None
+        )
+        available_memory_gb = (
+            available_memory / (1024 ** 3)
+            if available_memory is not None
+            else None
+        )
+        checks.append(_check(
+            'host_physical_memory',
+            (
+                total_memory_gb is not None
+                and available_memory_gb is not None
+                and total_memory_gb >= float(args.min_memory_gb)
+                and available_memory_gb
+                >= float(args.min_available_memory_gb)
             ),
+            total_gb=total_memory_gb,
+            available_gb=available_memory_gb,
+            minimum_total_gb=float(args.min_memory_gb),
+            minimum_available_gb=float(
+                args.min_available_memory_gb
+            ),
+            recommended_total_gb=64.0,
+        ))
+
+        host_cpu_count = os.cpu_count() or 1
+        effective_cpus = effective_cpu_count()
+        recommended_total_workers = (
+            recommended_counterfactual_worker_count(
+                cpu_count=effective_cpus,
+                rollout_worker_count=training_args.num_envs,
+                cpu_core_ratio=(
+                    training_args.counterfactual_cpu_core_ratio
+                ),
+            )
+        )
+        configured_total_workers = (
+            recommended_total_workers
+            if training_args.counterfactual_workers is None
+            else int(training_args.counterfactual_workers)
+        )
+        shapley_workers = 1 if training_args.shapley_enabled else 0
+        ordinary_cf_workers = (
+            configured_total_workers - shapley_workers
+        )
+        worker_capacity = max(
+            0,
+            effective_cpus - training_args.num_envs - 1,
         )
         checks.append(_check(
             'counterfactual_cpu_reserve',
-            cf_workers >= 1,
-            cpu_count=cpu_count,
+            (
+                ordinary_cf_workers >= 1
+                and configured_total_workers <= worker_capacity
+            ),
+            host_cpu_count=host_cpu_count,
+            effective_cpu_count=effective_cpus,
             rollout_workers=training_args.num_envs,
-            available_counterfactual_workers=cf_workers,
+            configured_total_physical_workers=(
+                configured_total_workers
+            ),
+            reserved_shapley_workers=shapley_workers,
+            ordinary_counterfactual_workers=ordinary_cf_workers,
+            physical_worker_capacity=worker_capacity,
+            recommended_total_physical_workers=(
+                recommended_total_workers
+            ),
+            cpu_core_ratio=(
+                training_args.counterfactual_cpu_core_ratio
+            ),
         ))
 
     required_failures = tuple(
@@ -827,7 +1165,7 @@ def run_preflight(args):
             if training_args is not None
             else None
         ),
-        'git': _git_metadata(),
+        'git': git_metadata,
         'ready': not required_failures,
         'required_failures': required_failures,
         'warnings': warnings,

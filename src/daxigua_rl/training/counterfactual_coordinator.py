@@ -18,10 +18,12 @@ import time
 from collections import Counter
 from dataclasses import asdict, dataclass
 from operator import index
+from pathlib import Path
 
 from daxigua_rl.attribution.causal_replay import (
     CausalReplayBuffer,
     CausalSample,
+    stable_budget_key,
 )
 from daxigua_rl.attribution.counterfactual import (
     BudgetedCounterfactualScheduler,
@@ -29,6 +31,7 @@ from daxigua_rl.attribution.counterfactual import (
     CounterfactualResult,
     CounterfactualSchedulerStats,
     CounterfactualTokenDecision,
+    counterfactual_priority,
     create_counterfactual_task,
 )
 from daxigua_rl.attribution.counterfactual_proposal import (
@@ -42,6 +45,12 @@ from daxigua_rl.attribution.counterfactual_runner import (
 
 
 COUNTERFACTUAL_COORDINATOR_CHECKPOINT_VERSION = 1
+_TRANSIENT_CANDIDATE_REJECTIONS = {
+    'real_step_gate',
+    'soft_token_budget',
+    'hard_token_budget',
+    'queue_full_low_priority',
+}
 
 
 def _strict_int(name, value, *, minimum=None):
@@ -65,14 +74,137 @@ def _non_empty_text(name, value):
     return result
 
 
+def _linux_cpu_quota_count():
+    """返回 Linux cgroup CPU 配额折算出的保守整数核数。"""
+
+    candidates = []
+
+    def ancestor_dirs(root, relative_group):
+        current = root / relative_group
+        while True:
+            yield current
+            if current == root:
+                break
+            parent = current.parent
+            if parent == current or root not in parent.parents and parent != root:
+                break
+            current = parent
+
+    try:
+        cgroup_lines = Path('/proc/self/cgroup').read_text(
+            encoding='ascii',
+        ).splitlines()
+    except OSError:
+        cgroup_lines = ()
+    for line in cgroup_lines:
+        fields = line.split(':', 2)
+        if len(fields) != 3:
+            continue
+        _hierarchy, controllers, group_path = fields
+        relative_group = group_path.strip().lstrip('/')
+        if not controllers:
+            for group_dir in ancestor_dirs(
+                    Path('/sys/fs/cgroup'),
+                    relative_group):
+                candidates.append((
+                    group_dir / 'cpu.max',
+                    None,
+                ))
+        elif 'cpu' in controllers.split(','):
+            for controller_dir in ('cpu', 'cpu,cpuacct'):
+                root = Path('/sys/fs/cgroup') / controller_dir
+                for group_dir in ancestor_dirs(root, relative_group):
+                    candidates.append((
+                        group_dir / 'cpu.cfs_quota_us',
+                        group_dir / 'cpu.cfs_period_us',
+                    ))
+    candidates.extend((
+        (
+            Path('/sys/fs/cgroup/cpu.max'),
+            None,
+        ),
+        (
+            Path('/sys/fs/cgroup/cpu/cpu.cfs_quota_us'),
+            Path('/sys/fs/cgroup/cpu/cpu.cfs_period_us'),
+        ),
+        (
+            Path('/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us'),
+            Path('/sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us'),
+        ),
+    ))
+    limits = []
+    for quota_path, period_path in candidates:
+        try:
+            if period_path is None:
+                fields = quota_path.read_text(
+                    encoding='ascii',
+                ).strip().split()
+                if len(fields) != 2 or fields[0] == 'max':
+                    continue
+                quota, period = map(int, fields)
+            else:
+                quota = int(quota_path.read_text(
+                    encoding='ascii',
+                ).strip())
+                period = int(period_path.read_text(
+                    encoding='ascii',
+                ).strip())
+            if quota <= 0 or period <= 0:
+                continue
+            limits.append(max(1, math.floor(quota / period)))
+        except (OSError, TypeError, ValueError):
+            continue
+    return min(limits) if limits else None
+
+
+def effective_cpu_count(
+        *,
+        cpu_count=None,
+        affinity_count=None,
+        quota_count=None):
+    """返回进程真正可用的 CPU 核数，而不只相信宿主机逻辑核数。
+
+    Linux 云容器里 ``os.cpu_count()`` 常返回整台宿主机的核数。这里同时收紧到
+    ``sched_getaffinity`` 和 cgroup quota；显式参数仅用于可重复测试和上层已经
+    探测完成的场景。
+    """
+
+    detected_cpu_count = (
+        os.cpu_count() or 1
+        if cpu_count is None
+        else cpu_count
+    )
+    detected_cpu_count = _strict_int(
+        'cpu_count',
+        detected_cpu_count,
+        minimum=1,
+    )
+    if affinity_count is None and hasattr(os, 'sched_getaffinity'):
+        try:
+            affinity_count = len(os.sched_getaffinity(0))
+        except (OSError, TypeError, ValueError):
+            affinity_count = None
+    if quota_count is None and os.name == 'posix':
+        quota_count = _linux_cpu_quota_count()
+
+    limits = [detected_cpu_count]
+    for name, value in (
+            ('affinity_count', affinity_count),
+            ('quota_count', quota_count)):
+        if value is not None:
+            limits.append(_strict_int(name, value, minimum=1))
+    return min(limits)
+
+
 def recommended_counterfactual_worker_count(
         *,
         cpu_count=None,
-        rollout_worker_count):
-    """按 ``min(floor(cpu*25%), cpu-rollout-1)`` 推荐独立物理进程数。"""
+        rollout_worker_count,
+        cpu_core_ratio=0.25):
+    """按真实 CPU 配额、比例和 rollout 余量推荐独立物理进程数。"""
 
     if cpu_count is None:
-        cpu_count = os.cpu_count() or 1
+        cpu_count = effective_cpu_count()
     cpu_count = _strict_int(
         'cpu_count',
         cpu_count,
@@ -83,9 +215,17 @@ def recommended_counterfactual_worker_count(
         rollout_worker_count,
         minimum=0,
     )
-    quarter = math.floor(cpu_count * 0.25)
+    try:
+        cpu_core_ratio = float(cpu_core_ratio)
+    except (TypeError, ValueError) as exc:
+        raise TypeError('cpu_core_ratio must be a real number') from exc
+    if (
+            not math.isfinite(cpu_core_ratio)
+            or not 0.0 < cpu_core_ratio <= 1.0):
+        raise ValueError('cpu_core_ratio must be finite and in (0, 1]')
+    ratio_limit = math.floor(cpu_count * cpu_core_ratio)
     spare = cpu_count - rollout_worker_count - 1
-    return max(0, min(quarter, spare))
+    return max(0, min(ratio_limit, spare))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -139,6 +279,11 @@ class CounterfactualCoordinatorActivityStats:
     proposals_received: int
     proposals_admitted: int
     proposals_rejected: int
+    candidate_offers: int
+    candidate_pool_evictions: int
+    candidate_dispatch_attempts: int
+    candidate_dispatch_admitted: int
+    candidate_close_dropped: int
     results_completed: int
     results_partial: int
     results_failed: int
@@ -194,6 +339,8 @@ class CounterfactualCoordinatorStats:
     target_policy_fingerprint: str | None
     active_task_ids: tuple[str, ...]
     pending_task_count: int
+    candidate_pool_capacity: int
+    candidate_pool_count: int
     scheduler: CounterfactualSchedulerStats | None
     cumulative: CounterfactualCoordinatorActivityStats
     window: CounterfactualCoordinatorActivityStats
@@ -233,6 +380,8 @@ class CounterfactualCoordinatorStats:
             ),
             'active_task_ids': list(self.active_task_ids),
             'pending_task_count': self.pending_task_count,
+            'candidate_pool_capacity': self.candidate_pool_capacity,
+            'candidate_pool_count': self.candidate_pool_count,
             'scheduler': (
                 asdict(self.scheduler)
                 if self.scheduler is not None
@@ -282,6 +431,17 @@ class _PendingTask:
     submitted_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class _CandidateProposal:
+    proposal: CounterfactualProposal
+    budget_identity: str
+    priority: float
+
+    @property
+    def rank(self):
+        return self.priority, self.proposal.proposal_id
+
+
 class _ActivityAccumulator:
     """内部可变计数器；公开面始终转换成 frozen snapshot。"""
 
@@ -289,6 +449,11 @@ class _ActivityAccumulator:
         'proposals_received',
         'proposals_admitted',
         'proposals_rejected',
+        'candidate_offers',
+        'candidate_pool_evictions',
+        'candidate_dispatch_attempts',
+        'candidate_dispatch_admitted',
+        'candidate_close_dropped',
         'results_completed',
         'results_partial',
         'results_failed',
@@ -373,12 +538,19 @@ class CounterfactualCoordinator:
                 'causal_replay_buffer must be CausalReplayBuffer'
             )
         self.causal_replay_buffer = causal_replay_buffer
-        self.cpu_count = _strict_int(
-            'cpu_count',
-            (os.cpu_count() or 1)
+        self.config = scheduler_config or CounterfactualConfig()
+        if not isinstance(self.config, CounterfactualConfig):
+            raise TypeError(
+                'scheduler_config must be CounterfactualConfig'
+            )
+        self.cpu_count = (
+            effective_cpu_count()
             if cpu_count is None
-            else cpu_count,
-            minimum=1,
+            else _strict_int(
+                'cpu_count',
+                cpu_count,
+                minimum=1,
+            )
         )
         self.rollout_worker_count = _strict_int(
             'rollout_worker_count',
@@ -389,6 +561,7 @@ class CounterfactualCoordinator:
             recommended_counterfactual_worker_count(
                 cpu_count=self.cpu_count,
                 rollout_worker_count=self.rollout_worker_count,
+                cpu_core_ratio=self.config.cpu_core_ratio,
             )
         )
         if worker_count is None:
@@ -398,16 +571,13 @@ class CounterfactualCoordinator:
             worker_count,
             minimum=0,
         )
-        self.config = scheduler_config or CounterfactualConfig()
-        if not isinstance(self.config, CounterfactualConfig):
-            raise TypeError(
-                'scheduler_config must be CounterfactualConfig'
-            )
-
         self._lock = threading.RLock()
         self._closed = False
         self._target_policy = None
         self._pending = {}
+        self._candidate_pool = {}
+        self._candidate_budget_index = {}
+        self.candidate_pool_capacity = self.config.queue_capacity
         self._processed_task_ids = set()
         self._cumulative = _ActivityAccumulator()
         self._window = _ActivityAccumulator()
@@ -495,8 +665,16 @@ class CounterfactualCoordinator:
             self._window.target_refresh_seconds += elapsed
             return payload
 
-    def record_real_steps(self, step_count):
-        """记录真实投放数并顺手消费已完成结果，全程不等待 future。"""
+    def record_real_steps(
+            self,
+            step_count,
+            *,
+            dispatch_candidates=True):
+        """记录真实投放数，并按需派发候选池中当前最优 proposal。
+
+        批量 rollout 会先传 ``dispatch_candidates=False``，让本轮 Shapley
+        选择和普通候选全部完成后再统一仲裁；普通调用保持记录后立即派发。
+        """
 
         step_count = _strict_int(
             'step_count',
@@ -510,6 +688,9 @@ class CounterfactualCoordinator:
                 return self._disabled_real_steps
             real_steps = self._scheduler.record_real_steps(step_count)
             self._drain_scheduler_locked()
+            if bool(dispatch_candidates):
+                self._dispatch_candidate_pool_locked()
+                self._drain_scheduler_locked()
             return real_steps
 
     def reserve_external_tokens(
@@ -518,7 +699,7 @@ class CounterfactualCoordinator:
             tokens,
             *,
             priority=0.0):
-        """薄封装：让局部 Shapley 与 CF 共用同一个 8%/10% 账本。"""
+        """薄封装：让局部 Shapley 与 CF 共用配置化软预算/硬上限账本。"""
 
         reservation_id = _non_empty_text(
             'reservation_id',
@@ -605,8 +786,88 @@ class CounterfactualCoordinator:
             drop_reason=reason,
         )
 
+    @staticmethod
+    def _buffered_submission(proposal, reason='candidate_buffered'):
+        return CounterfactualCoordinatorSubmission(
+            proposal_id=proposal.proposal_id,
+            accepted=False,
+            task_id=None,
+            drop_reason=reason,
+        )
+
+    def _submission_state_rejection_locked(self, proposal):
+        if self._closed:
+            return self._coordinator_rejection(
+                proposal,
+                'coordinator_closed',
+            )
+        if not self.enabled:
+            return self._coordinator_rejection(
+                proposal,
+                'disabled_no_workers',
+            )
+        if self._target_policy is None:
+            return self._coordinator_rejection(
+                proposal,
+                'target_policy_unavailable',
+            )
+        return None
+
+    def _create_task_locked(self, proposal):
+        return create_counterfactual_task(
+            budget_key=proposal.budget_key,
+            transition_key=proposal.transition_key,
+            snapshot=proposal.snapshot,
+            factual_outcome=proposal.factual_outcome,
+            target_policy=self._target_policy,
+            actual_action_offset=proposal.actual_action_offset,
+            alternative_action_offsets=(
+                proposal.alternative_action_offsets
+            ),
+            trigger_reasons=proposal.trigger_reasons,
+            event_utility=proposal.utility,
+            placement_confidence=proposal.confidence,
+            created_real_step=self._scheduler.stats.real_steps,
+            attribution_version=proposal.attribution_version,
+            config=self.config,
+            label_confidence=proposal.confidence,
+            attribution_delay=proposal.delay,
+        )
+
+    def _record_accepted_task_locked(self, proposal, task):
+        self._increment('proposals_admitted')
+        self._pending[task.task_id] = _PendingTask(
+            task=task,
+            context=proposal.context,
+            proposal_id=proposal.proposal_id,
+            submitted_at=time.perf_counter(),
+        )
+
+    def _submit_direct_locked(self, proposal):
+        rejection = self._submission_state_rejection_locked(proposal)
+        if rejection is not None:
+            return rejection
+        task = self._create_task_locked(proposal)
+        if task is None:
+            return self._coordinator_rejection(
+                proposal,
+                'ineligible_task',
+            )
+        decision = self._scheduler.submit(task)
+        if decision.accepted:
+            self._record_accepted_task_locked(proposal, task)
+        else:
+            self._increment('proposals_rejected')
+        self._drain_scheduler_locked()
+        return CounterfactualCoordinatorSubmission(
+            proposal_id=proposal.proposal_id,
+            accepted=decision.accepted,
+            task_id=decision.task_id,
+            drop_reason=decision.drop_reason,
+        )
+
     def submit(self, proposal):
-        """非阻塞提交一个严格 proposal，并立即消费已经完成的旧任务。"""
+        """兼容旧调用：绕过候选池，立即执行一次 scheduler admission。"""
 
         if not isinstance(proposal, CounterfactualProposal):
             raise TypeError(
@@ -614,74 +875,234 @@ class CounterfactualCoordinator:
             )
         with self._lock:
             self._increment('proposals_received')
-            if self._closed:
-                return self._coordinator_rejection(
-                    proposal,
-                    'coordinator_closed',
-                )
-            if not self.enabled:
-                return self._coordinator_rejection(
-                    proposal,
-                    'disabled_no_workers',
-                )
-            if self._target_policy is None:
-                return self._coordinator_rejection(
-                    proposal,
-                    'target_policy_unavailable',
-                )
+            return self._submit_direct_locked(proposal)
 
-            task = create_counterfactual_task(
-                budget_key=proposal.budget_key,
-                transition_key=proposal.transition_key,
-                snapshot=proposal.snapshot,
-                factual_outcome=proposal.factual_outcome,
-                target_policy=self._target_policy,
-                actual_action_offset=(
-                    proposal.actual_action_offset
-                ),
-                alternative_action_offsets=(
-                    proposal.alternative_action_offsets
-                ),
-                trigger_reasons=proposal.trigger_reasons,
+    def _remove_candidate_locked(self, proposal_id):
+        candidate = self._candidate_pool.pop(proposal_id)
+        self._candidate_budget_index.pop(
+            candidate.budget_identity,
+            None,
+        )
+        return candidate
+
+    def _drop_buffered_candidate_locked(self, proposal_id, reason):
+        candidate = self._remove_candidate_locked(proposal_id)
+        self._increment('proposals_rejected')
+        self._increment('candidate_pool_evictions')
+        self._add_drop_reason(reason)
+        return self._buffered_submission(
+            candidate.proposal,
+            reason,
+        )
+
+    def _insert_candidate_locked(self, candidate):
+        proposal_id = candidate.proposal.proposal_id
+        self._candidate_pool[proposal_id] = candidate
+        self._candidate_budget_index[
+            candidate.budget_identity
+        ] = proposal_id
+
+    @staticmethod
+    def _candidate_from_proposal(proposal):
+        return _CandidateProposal(
+            proposal=proposal,
+            budget_identity=stable_budget_key(
+                proposal.budget_key
+            ),
+            priority=counterfactual_priority(
                 event_utility=proposal.utility,
+                trigger_reasons=proposal.trigger_reasons,
                 placement_confidence=proposal.confidence,
-                created_real_step=(
-                    self._scheduler.stats.real_steps
+            ),
+        )
+
+    def _offer_candidate_locked(self, proposal):
+        rejection = self._submission_state_rejection_locked(proposal)
+        if rejection is not None:
+            return rejection, ()
+        candidate = self._candidate_from_proposal(proposal)
+        proposal_id = proposal.proposal_id
+        if proposal_id in self._candidate_pool:
+            return (
+                self._coordinator_rejection(
+                    proposal,
+                    'candidate_already_buffered',
                 ),
-                attribution_version=(
-                    proposal.attribution_version
-                ),
-                config=self.config,
-                label_confidence=proposal.confidence,
-                attribution_delay=proposal.delay,
+                (),
             )
+
+        evicted = ()
+        existing_id = self._candidate_budget_index.get(
+            candidate.budget_identity
+        )
+        if existing_id is not None:
+            existing = self._candidate_pool[existing_id]
+            if candidate.rank <= existing.rank:
+                return (
+                    self._coordinator_rejection(
+                        proposal,
+                        'candidate_budget_lower_priority',
+                    ),
+                    (),
+                )
+            evicted = (
+                self._drop_buffered_candidate_locked(
+                    existing_id,
+                    'candidate_budget_priority_evicted',
+                ),
+            )
+
+        if (
+                existing_id is None
+                and len(self._candidate_pool)
+                >= self.candidate_pool_capacity):
+            worst = min(
+                self._candidate_pool.values(),
+                key=lambda item: item.rank,
+            )
+            if candidate.rank <= worst.rank:
+                return (
+                    self._coordinator_rejection(
+                        proposal,
+                        'candidate_pool_full_low_priority',
+                    ),
+                    (),
+                )
+            evicted = (
+                self._drop_buffered_candidate_locked(
+                    worst.proposal.proposal_id,
+                    'candidate_pool_priority_evicted',
+                ),
+            )
+
+        self._insert_candidate_locked(candidate)
+        return self._buffered_submission(proposal), evicted
+
+    def _dispatch_candidate_pool_locked(self):
+        """按稳定 priority/proposal_id 顺序填充当前可用 admission slots。"""
+
+        dispatched = {}
+        if (
+                self._closed
+                or
+                not self.enabled
+                or self._target_policy is None
+                or not self._candidate_pool):
+            return dispatched
+
+        while (
+                self._candidate_pool
+                and self._scheduler.stats.admission_slots_available > 0):
+            candidate = max(
+                self._candidate_pool.values(),
+                key=lambda item: item.rank,
+            )
+            proposal = candidate.proposal
+            self._remove_candidate_locked(proposal.proposal_id)
+            task = self._create_task_locked(proposal)
+            self._increment('candidate_dispatch_attempts')
             if task is None:
-                return self._coordinator_rejection(
+                submission = self._coordinator_rejection(
                     proposal,
                     'ineligible_task',
                 )
+                dispatched[proposal.proposal_id] = submission
+                continue
+
             decision = self._scheduler.submit(task)
             if decision.accepted:
-                self._increment('proposals_admitted')
-                self._pending[task.task_id] = _PendingTask(
-                    task=task,
-                    context=proposal.context,
-                    proposal_id=proposal.proposal_id,
-                    submitted_at=time.perf_counter(),
+                self._increment('candidate_dispatch_admitted')
+                self._record_accepted_task_locked(proposal, task)
+                dispatched[proposal.proposal_id] = (
+                    CounterfactualCoordinatorSubmission(
+                        proposal_id=proposal.proposal_id,
+                        accepted=True,
+                        task_id=decision.task_id,
+                    )
                 )
-            else:
-                self._increment('proposals_rejected')
+                continue
 
-            self._drain_scheduler_locked()
-            return CounterfactualCoordinatorSubmission(
-                proposal_id=proposal.proposal_id,
-                accepted=decision.accepted,
-                task_id=decision.task_id,
-                drop_reason=decision.drop_reason,
+            if decision.drop_reason in _TRANSIENT_CANDIDATE_REJECTIONS:
+                self._insert_candidate_locked(candidate)
+                dispatched[proposal.proposal_id] = (
+                    self._buffered_submission(proposal)
+                )
+                break
+            self._increment('proposals_rejected')
+            dispatched[proposal.proposal_id] = (
+                CounterfactualCoordinatorSubmission(
+                    proposal_id=proposal.proposal_id,
+                    accepted=False,
+                    task_id=decision.task_id,
+                    drop_reason=decision.drop_reason,
+                )
             )
+        return dispatched
+
+    def offer(self, proposal):
+        """把一个 proposal 放入有界仲裁池，再尝试派发当前最高优先项。"""
+
+        return self.offer_many((proposal,))[0]
+
+    def offer_many(self, proposals, *, real_steps=0):
+        """批量入池后统一仲裁，避免同一窗口受 proposal 到达顺序影响。"""
+
+        proposals = tuple(proposals)
+        if any(
+                not isinstance(proposal, CounterfactualProposal)
+                for proposal in proposals):
+            raise TypeError(
+                'proposals must contain CounterfactualProposal values'
+            )
+        real_steps = _strict_int(
+            'real_steps',
+            real_steps,
+            minimum=0,
+        )
+        with self._lock:
+            if real_steps and not self._closed:
+                if not self.enabled:
+                    self._disabled_real_steps += real_steps
+                else:
+                    self._scheduler.record_real_steps(real_steps)
+                    self._drain_scheduler_locked()
+
+            outcomes = []
+            buffered_positions = {}
+            for proposal in proposals:
+                self._increment('proposals_received')
+                self._increment('candidate_offers')
+                outcome, evicted = self._offer_candidate_locked(
+                    proposal
+                )
+                position = len(outcomes)
+                outcomes.append(outcome)
+                if outcome.drop_reason == 'candidate_buffered':
+                    buffered_positions[
+                        proposal.proposal_id
+                    ] = position
+                for evicted_outcome in evicted:
+                    evicted_position = buffered_positions.pop(
+                        evicted_outcome.proposal_id,
+                        None,
+                    )
+                    if evicted_position is not None:
+                        outcomes[evicted_position] = evicted_outcome
+
+            dispatched = self._dispatch_candidate_pool_locked()
+            for proposal_id, submission in dispatched.items():
+                position = buffered_positions.pop(
+                    proposal_id,
+                    None,
+                )
+                if position is not None:
+                    outcomes[position] = submission
+            if self.enabled:
+                self._drain_scheduler_locked()
+            return tuple(outcomes)
 
     def submit_many(self, proposals, *, real_steps=0):
-        """记录一批真实步并逐个非阻塞 admission。"""
+        """兼容旧调用：记录真实步后逐个直接 admission。"""
 
         proposals = tuple(proposals)
         if real_steps:
@@ -803,6 +1224,22 @@ class CounterfactualCoordinator:
         with self._lock:
             if self._closed:
                 return self.stats
+            candidate_count = len(self._candidate_pool)
+            if candidate_count:
+                self._candidate_pool.clear()
+                self._candidate_budget_index.clear()
+                self._increment(
+                    'candidate_close_dropped',
+                    candidate_count,
+                )
+                self._increment(
+                    'proposals_rejected',
+                    candidate_count,
+                )
+                self._add_drop_reason(
+                    'coordinator_closed_candidate',
+                    candidate_count,
+                )
             if self.enabled:
                 self._drain_scheduler_locked()
                 final_results = self._scheduler.close(wait=wait)
@@ -924,6 +1361,12 @@ class CounterfactualCoordinator:
                 ),
                 active_task_ids=active_task_ids,
                 pending_task_count=len(self._pending),
+                candidate_pool_capacity=(
+                    self.candidate_pool_capacity
+                ),
+                candidate_pool_count=len(
+                    self._candidate_pool
+                ),
                 scheduler=scheduler_stats,
                 cumulative=cumulative,
                 window=window,
@@ -978,6 +1421,25 @@ class CounterfactualCoordinator:
             'proposals_admitted': stats.proposals_admitted,
             'proposals_rejected': stats.proposals_rejected,
             'pending_task_count': stats.pending_task_count,
+            'candidate_pool_capacity': (
+                stats.candidate_pool_capacity
+            ),
+            'candidate_pool_count': stats.candidate_pool_count,
+            'candidate_offers': (
+                stats.cumulative.candidate_offers
+            ),
+            'candidate_pool_evictions': (
+                stats.cumulative.candidate_pool_evictions
+            ),
+            'candidate_dispatch_attempts': (
+                stats.cumulative.candidate_dispatch_attempts
+            ),
+            'candidate_dispatch_admitted': (
+                stats.cumulative.candidate_dispatch_admitted
+            ),
+            'candidate_close_dropped': (
+                stats.cumulative.candidate_close_dropped
+            ),
             'reproduction_passed': (
                 stats.cumulative.reproduction_passed
             ),
@@ -1014,5 +1476,6 @@ __all__ = [
     'CounterfactualCoordinatorPoll',
     'CounterfactualCoordinatorStats',
     'CounterfactualCoordinatorSubmission',
+    'effective_cpu_count',
     'recommended_counterfactual_worker_count',
 ]

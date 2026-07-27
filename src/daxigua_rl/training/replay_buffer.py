@@ -17,6 +17,7 @@ ReplayBuffer 的职责保持单一：
 
 from __future__ import annotations
 
+import math
 import random
 from collections import deque
 from pathlib import Path
@@ -319,27 +320,119 @@ class ReplayBuffer:
             'omitted_cold_count': max(0, len(self) - len(items)),
         }
 
-    def load_checkpoint_state_dict(self, state):
-        """恢复 exact 内存 replay 或 hybrid 的有界热层快照。"""
+    @staticmethod
+    def validate_checkpoint_state_dict(state, *, manifest):
+        """纯校验 replay 状态，不构造实例或创建 cold 目录。
+
+        返回 load 所需的规范值；训练恢复与只读 readiness 审计共用这一契约，
+        避免审计器维护一套宽松的旁路规则。
+        """
+
+        if not isinstance(manifest, dict):
+            raise ValueError('replay checkpoint manifest must be a mapping')
+        required_manifest_fields = {
+            'kind',
+            'schema_version',
+            'capacity',
+            'hot_capacity',
+            'disk_enabled',
+            'segment_size',
+            'cold_cache_size',
+            'cold_sample_ratio',
+            'cold_cache_refresh_interval',
+        }
+        missing_manifest = required_manifest_fields.difference(manifest)
+        if missing_manifest:
+            raise ValueError(
+                'replay checkpoint manifest is missing fields: '
+                f'{sorted(missing_manifest)!r}'
+            )
+        if manifest.get('kind') != 'dqn-replay-buffer':
+            raise ValueError('invalid replay checkpoint manifest kind')
+        if manifest.get('schema_version') != 1:
+            raise ValueError(
+                'unsupported replay checkpoint manifest schema version'
+            )
+
+        def positive_int(name):
+            value = manifest.get(name)
+            if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value <= 0):
+                raise ValueError(
+                    f'replay manifest {name} must be a positive integer'
+                )
+            return value
+
+        capacity = positive_int('capacity')
+        hot_capacity = positive_int('hot_capacity')
+        if hot_capacity > capacity:
+            raise ValueError('replay manifest hot_capacity exceeds capacity')
+        positive_int('segment_size')
+        cold_cache_size = manifest.get('cold_cache_size')
+        if (
+                isinstance(cold_cache_size, bool)
+                or not isinstance(cold_cache_size, int)
+                or cold_cache_size < 0):
+            raise ValueError(
+                'replay manifest cold_cache_size must be non-negative'
+            )
+        positive_int('cold_cache_refresh_interval')
+        cold_ratio = manifest.get('cold_sample_ratio')
+        if (
+                isinstance(cold_ratio, bool)
+                or not isinstance(cold_ratio, (int, float))
+                or not math.isfinite(float(cold_ratio))
+                or not 0.0 <= float(cold_ratio) <= 1.0):
+            raise ValueError(
+                'replay manifest cold_sample_ratio must be in [0, 1]'
+            )
+        disk_enabled = manifest.get('disk_enabled')
+        if not isinstance(disk_enabled, bool):
+            raise ValueError(
+                'replay manifest disk_enabled must be boolean'
+            )
 
         if not isinstance(state, dict):
             raise ValueError('replay checkpoint state must be a mapping')
+        required_state_fields = {
+            'schema_version',
+            'resume_policy',
+            'items',
+            'rng_state',
+            'sample_calls',
+            'next_segment_index',
+            'source_total_count',
+            'omitted_cold_count',
+        }
+        missing_state = required_state_fields.difference(state)
+        if missing_state:
+            raise ValueError(
+                'replay checkpoint state is missing fields: '
+                f'{sorted(missing_state)!r}'
+            )
         if state.get('schema_version') != 1:
             raise ValueError(
                 'unsupported replay checkpoint schema version: '
                 f'{state.get("schema_version")!r}'
             )
-        expected_policy = 'hot_only' if self._disk_enabled else 'exact'
+        expected_policy = 'hot_only' if disk_enabled else 'exact'
         if state.get('resume_policy') != expected_policy:
             raise ValueError(
                 'replay checkpoint resume policy mismatch: '
                 f'checkpoint={state.get("resume_policy")!r} '
-                f'current={expected_policy!r}'
+                f'expected={expected_policy!r}'
             )
-        items = tuple(state.get('items', ()))
-        if len(items) > self.capacity:
+        raw_items = state.get('items')
+        if not isinstance(raw_items, (list, tuple)):
+            raise TypeError(
+                'replay checkpoint items must be a list or tuple'
+            )
+        items = tuple(raw_items)
+        if len(items) > capacity:
             raise ValueError('replay checkpoint contains more than capacity')
-        if self._disk_enabled and len(items) > self.hot_capacity:
+        if disk_enabled and len(items) > hot_capacity:
             raise ValueError(
                 'hybrid replay checkpoint exceeds hot capacity'
             )
@@ -348,19 +441,66 @@ class ReplayBuffer:
                 'replay checkpoint items must be TensorTransition'
             )
 
+        def nonnegative_int(name):
+            value = state.get(name)
+            if (
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0):
+                raise ValueError(
+                    f'replay checkpoint {name} must be a '
+                    'non-negative integer'
+                )
+            return value
+
+        sample_calls = nonnegative_int('sample_calls')
+        next_segment_index = nonnegative_int('next_segment_index')
+        source_total_count = nonnegative_int('source_total_count')
+        omitted_cold_count = nonnegative_int('omitted_cold_count')
+        if source_total_count > capacity:
+            raise ValueError(
+                'replay checkpoint source_total_count exceeds capacity'
+            )
+        if source_total_count != len(items) + omitted_cold_count:
+            raise ValueError(
+                'replay checkpoint source/omitted item accounting mismatch'
+            )
+        if expected_policy == 'exact' and omitted_cold_count != 0:
+            raise ValueError(
+                'exact replay checkpoint cannot omit cold items'
+            )
+        try:
+            probe_rng = random.Random()
+            probe_rng.setstate(state['rng_state'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                'invalid replay RNG checkpoint state'
+            ) from exc
+        return {
+            'resume_policy': expected_policy,
+            'items': items,
+            'rng_state': state['rng_state'],
+            'sample_calls': sample_calls,
+            'next_segment_index': next_segment_index,
+            'source_total_count': source_total_count,
+            'omitted_cold_count': omitted_cold_count,
+        }
+
+    def load_checkpoint_state_dict(self, state):
+        """恢复 exact 内存 replay 或 hybrid 的有界热层快照。"""
+
+        normalized = self.validate_checkpoint_state_dict(
+            state,
+            manifest=self.checkpoint_manifest(),
+        )
+
         # 新构造的 resume buffer 尚未登记旧冷段，clear 不会删除磁盘上的历史
         # 文件。保留递增段号可确保后续写入不会覆盖那些诊断产物。
         self.clear()
-        self.extend(items)
-        self._sample_calls = int(state.get('sample_calls', 0))
-        self._next_segment_index = max(
-            0,
-            int(state.get('next_segment_index', 0)),
-        )
-        try:
-            self._rng.setstate(state['rng_state'])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError('invalid replay RNG checkpoint state') from exc
+        self.extend(normalized['items'])
+        self._sample_calls = normalized['sample_calls']
+        self._next_segment_index = normalized['next_segment_index']
+        self._rng.setstate(normalized['rng_state'])
 
     def _push_memory(self, transition):
         """纯内存模式下按环形 buffer 写入。"""

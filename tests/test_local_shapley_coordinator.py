@@ -8,6 +8,8 @@ import unittest
 from concurrent.futures import Future
 from dataclasses import replace
 
+import torch
+
 from daxigua_rl.attribution.causal_replay import CausalReplayBuffer
 from daxigua_rl.attribution.counterfactual import (
     CounterfactualTokenDecision,
@@ -19,6 +21,7 @@ from daxigua_rl.attribution.counterfactual_proposal import (
 from daxigua_rl.attribution.local_shapley_runner import (
     LocalShapleyResult,
     LocalShapleySubsetResult,
+    run_local_shapley_task,
 )
 from daxigua_rl.training.local_shapley_coordinator import (
     LocalShapleyCoordinator,
@@ -169,6 +172,17 @@ def _completed_runner(task):
     )
 
 
+def _thread_reporting_physical_runner(task):
+    result = run_local_shapley_task(task)
+    return replace(
+        result,
+        cache_hit_count=(
+            torch.get_num_threads() * 1_000
+            + torch.get_num_interop_threads()
+        ),
+    )
+
+
 def _failed_runner(task):
     subset = LocalShapleySubsetResult(
         member_keys=task.candidate_keys,
@@ -215,7 +229,8 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
             budget=None,
             replay=None,
             runner=_completed_runner,
-            executor=None):
+            executor=None,
+            seen_capacity=16_384):
         return LocalShapleyCoordinator(
             causal_replay_buffer=(
                 replay
@@ -226,6 +241,7 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
             config=config,
             runner=runner,
             executor=executor or _ImmediateExecutor(),
+            seen_capacity=seen_capacity,
         )
 
     def test_cumulative_selector_dedup_settle_and_sample_insertion(self):
@@ -322,6 +338,105 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
                 coordinator.stats.pending_task_count,
                 0,
             )
+        finally:
+            coordinator.close()
+
+    def test_recent_seen_lru_is_bounded_and_refreshes_duplicates(self):
+        coordinator = self._coordinator(
+            config=LocalShapleyConfig(event_ratio_max=0.0),
+            seen_capacity=2,
+        )
+        try:
+            first = coordinator.consider(
+                self.proposals[0],
+                self.payload,
+            )
+            second = coordinator.consider(
+                self.proposals[1],
+                self.payload,
+            )
+            duplicate = coordinator.consider(
+                self.proposals[0],
+                self.payload,
+            )
+            third = coordinator.consider(
+                self.proposals[2],
+                self.payload,
+            )
+
+            self.assertTrue(first.observed)
+            self.assertTrue(second.observed)
+            self.assertFalse(duplicate.observed)
+            self.assertTrue(third.observed)
+            stats = coordinator.stats
+            self.assertEqual(stats.recent_seen_capacity, 2)
+            self.assertEqual(stats.recent_seen_count, 2)
+            self.assertEqual(stats.recent_seen_eviction_count, 1)
+            self.assertEqual(
+                stats.cumulative.seen_cache_evictions,
+                1,
+            )
+
+            # duplicate 刷新了 proposal[0]；随后写 proposal[2] 淘汰更旧的
+            # proposal[1]，因此它可以作为远期新观察重新进入分母。
+            replayed_old = coordinator.consider(
+                self.proposals[1],
+                self.payload,
+            )
+            self.assertTrue(replayed_old.observed)
+            self.assertEqual(
+                coordinator.stats.observed_event_count,
+                4,
+            )
+            self.assertEqual(
+                coordinator.stats.recent_seen_count,
+                2,
+            )
+            self.assertEqual(
+                coordinator.stats.recent_seen_eviction_count,
+                2,
+            )
+        finally:
+            coordinator.close()
+
+    def test_selected_identity_remains_permanent_after_seen_lru_churn(self):
+        coordinator = self._coordinator(
+            config=LocalShapleyConfig(event_ratio_max=0.5),
+            seen_capacity=1,
+        )
+        try:
+            not_selected = coordinator.consider(
+                self.proposals[0],
+                self.payload,
+            )
+            selected = coordinator.consider(
+                self.proposals[1],
+                self.payload,
+            )
+            churn = coordinator.consider(
+                self.proposals[2],
+                self.payload,
+            )
+            duplicate = coordinator.consider(
+                self.proposals[1],
+                self.payload,
+            )
+
+            self.assertFalse(not_selected.selected)
+            self.assertTrue(selected.selected)
+            self.assertFalse(churn.selected)
+            self.assertFalse(duplicate.observed)
+            self.assertTrue(duplicate.selected)
+            self.assertTrue(duplicate.skip_counterfactual)
+            stats = coordinator.stats
+            self.assertEqual(stats.observed_event_count, 3)
+            self.assertEqual(stats.selected_event_count, 1)
+            self.assertEqual(
+                stats.permanent_selected_identity_count,
+                1,
+            )
+            self.assertEqual(stats.recent_seen_count, 1)
+            self.assertEqual(stats.recent_seen_eviction_count, 1)
         finally:
             coordinator.close()
 
@@ -436,10 +551,13 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
         config = LocalShapleyConfig(event_ratio_max=1.0)
         budget = _SharedBudget()
         replay = CausalReplayBuffer(capacity=16)
+        main_intra_threads = torch.get_num_threads()
+        main_interop_threads = torch.get_num_interop_threads()
         coordinator = LocalShapleyCoordinator(
             causal_replay_buffer=replay,
             shared_budget=budget,
             config=config,
+            runner=_thread_reporting_physical_runner,
         )
         try:
             submission = coordinator.consider(
@@ -459,8 +577,20 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
 
             self.assertEqual(result.result_count, 1)
             self.assertTrue(result.results[0].label_ready)
+            self.assertEqual(
+                result.results[0].cache_hit_count,
+                1_001,
+            )
             self.assertEqual(len(replay), 2)
             self.assertEqual(budget.settle_calls, 1)
+            self.assertEqual(
+                torch.get_num_threads(),
+                main_intra_threads,
+            )
+            self.assertEqual(
+                torch.get_num_interop_threads(),
+                main_interop_threads,
+            )
         finally:
             coordinator.close()
 

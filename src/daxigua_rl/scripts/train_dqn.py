@@ -51,6 +51,7 @@ from daxigua_rl.training import (
     DQNTrainer,
     DQNTrainerConfig,
     CounterfactualCoordinator,
+    effective_cpu_count,
     ParallelRolloutCollector,
     RolloutCollector,
     RolloutStats,
@@ -60,6 +61,7 @@ from daxigua_rl.training import (
 from daxigua_rl.training.checkpointing import (
     DEFAULT_RESUME_MUTABLE_FIELDS,
     RunManifest,
+    atomic_clone_file,
     atomic_torch_save,
     build_training_checkpoint,
     config_fingerprint,
@@ -197,6 +199,8 @@ METRIC_FIELDS = (
     'collect_counterfactual_proposal_confirmed_events',
     'collect_counterfactual_proposal_budget_count',
     'collect_counterfactual_proposals_generated',
+    'collect_counterfactual_proposals_transfer_selected',
+    'collect_counterfactual_proposals_transfer_throttled',
     'collect_counterfactual_proposal_skip_reasons',
     'collect_counterfactual_proposals_serialized',
     'collect_counterfactual_proposal_serialized_bytes',
@@ -206,6 +210,15 @@ METRIC_FIELDS = (
     'counterfactual_proposals_admitted',
     'counterfactual_proposals_rejected',
     'counterfactual_pending_tasks',
+    'counterfactual_admission_slots_used',
+    'counterfactual_admission_slots_available',
+    'counterfactual_candidate_pool_capacity',
+    'counterfactual_candidate_pool_count',
+    'counterfactual_candidate_offers',
+    'counterfactual_candidate_pool_evictions',
+    'counterfactual_candidate_dispatch_attempts',
+    'counterfactual_candidate_dispatch_admitted',
+    'counterfactual_candidate_close_dropped',
     'counterfactual_results_completed',
     'counterfactual_results_partial',
     'counterfactual_results_failed',
@@ -247,6 +260,8 @@ METRIC_FIELDS = (
     'save_seconds',
     'checkpoint_bytes',
     'checkpoint_pruned_count',
+    'checkpoint_step_materialization',
+    'checkpoint_extra_materialization',
     'plot_seconds',
     'replay_mode',
     'replay_hot_count',
@@ -390,6 +405,15 @@ def build_arg_parser():
     parser.add_argument('--counterfactual-cpu-core-ratio', type=float, default=0.25)
     parser.add_argument('--counterfactual-queue-capacity', type=int, default=256)
     parser.add_argument('--counterfactual-snapshot-ring-size', type=int, default=32)
+    parser.add_argument(
+        '--counterfactual-proposal-sample-rate',
+        type=float,
+        default=1.0,
+        help=(
+            '常规物理 proposal 的确定性跨进程抽样率；'
+            '高价值合成始终保留。'
+        ),
+    )
     parser.add_argument('--counterfactual-max-alternatives', type=int, default=3)
     parser.add_argument('--counterfactual-max-inflight-per-worker', type=int, default=2)
     parser.add_argument('--counterfactual-circuit-breaker-failures', type=int, default=5)
@@ -645,6 +669,13 @@ def validate_args(args):
             args.counterfactual_workers is not None
             and int(args.counterfactual_workers) < 0):
         raise ValueError('--counterfactual-workers must be >= 0')
+    if (
+            not math.isfinite(args.counterfactual_proposal_sample_rate)
+            or not 0.0 <= args.counterfactual_proposal_sample_rate <= 1.0):
+        raise ValueError(
+            '--counterfactual-proposal-sample-rate must be finite '
+            'and in [0, 1]'
+        )
     if args.shapley_enabled and not args.counterfactual_enabled:
         raise ValueError(
             '--shapley-enabled requires --counterfactual-enabled so both '
@@ -897,6 +928,11 @@ def build_collector(
                 'counterfactual_snapshot_ring_size',
                 32,
             )),
+            counterfactual_proposal_sample_rate=float(getattr(
+                args,
+                'counterfactual_proposal_sample_rate',
+                1.0,
+            )),
             episode_id_start=episode_id_start,
         )
 
@@ -919,6 +955,11 @@ def build_collector(
             args,
             'counterfactual_snapshot_ring_size',
             32,
+        )),
+        counterfactual_proposal_sample_rate=float(getattr(
+            args,
+            'counterfactual_proposal_sample_rate',
+            1.0,
         )),
         episode_id_start=episode_id_start,
     )
@@ -966,8 +1007,11 @@ def build_counterfactual_coordinator(args, causal_replay_buffer):
 
     if not args.counterfactual_enabled:
         return None, 0
+    effective_cpus = effective_cpu_count()
     recommended = recommended_counterfactual_worker_count(
+        cpu_count=effective_cpus,
         rollout_worker_count=args.num_envs,
+        cpu_core_ratio=args.counterfactual_cpu_core_ratio,
     )
     total_workers = (
         recommended
@@ -975,6 +1019,16 @@ def build_counterfactual_coordinator(args, causal_replay_buffer):
         else int(args.counterfactual_workers)
     )
     shapley_workers = 1 if args.shapley_enabled else 0
+    physical_worker_capacity = max(
+        0,
+        effective_cpus - int(args.num_envs) - 1,
+    )
+    if total_workers > physical_worker_capacity:
+        raise RuntimeError(
+            'physical attribution workers exceed effective CPU capacity: '
+            f'configured={total_workers}, capacity={physical_worker_capacity}, '
+            f'effective_cpus={effective_cpus}, rollout={args.num_envs}'
+        )
     if total_workers <= shapley_workers:
         raise RuntimeError(
             'physical attribution has insufficient CPU workers: '
@@ -984,6 +1038,7 @@ def build_counterfactual_coordinator(args, causal_replay_buffer):
     coordinator = CounterfactualCoordinator(
         causal_replay_buffer=causal_replay_buffer,
         rollout_worker_count=args.num_envs,
+        cpu_count=effective_cpus,
         worker_count=total_workers - shapley_workers,
         scheduler_config=build_counterfactual_config(args),
     )
@@ -1029,11 +1084,14 @@ def process_counterfactual_rollout(
 
     if coordinator is None:
         return ()
-    coordinator.record_real_steps(collect_stats.steps)
+    coordinator.record_real_steps(
+        collect_stats.steps,
+        dispatch_candidates=False,
+    )
     if shapley_coordinator is not None:
         shapley_coordinator.retry_pending()
     proposals = collector.drain_counterfactual_proposals()
-    submissions = []
+    ordinary_proposals = []
     scheduler_stats = coordinator.stats.scheduler
     created_real_step = (
         scheduler_stats.real_steps
@@ -1052,7 +1110,8 @@ def process_counterfactual_rollout(
                 decision.skip_counterfactual
             )
         if not routed_to_shapley:
-            submissions.append(coordinator.submit(proposal))
+            ordinary_proposals.append(proposal)
+    submissions = coordinator.offer_many(ordinary_proposals)
     coordinator.poll()
     if shapley_coordinator is not None:
         shapley_coordinator.poll()
@@ -1071,13 +1130,29 @@ SMOOTH_EPSILON_ANCHORS = (
 )
 
 
-def scheduled_epsilon(update_step, env_steps, args):
-    """根据当前配置计算 epsilon。"""
+def scheduled_epsilon(
+        update_step,
+        env_steps,
+        args,
+        *,
+        schedule_total_updates=None):
+    """根据当前配置计算 epsilon。
+
+    ``schedule_total_updates`` 在 checkpoint 首次创建时冻结。恢复时即使只延长
+    ``total_updates``，探索率也不会从已经达到的低值突然跳高。
+    """
 
     if args.epsilon_schedule == 'linear':
         return linear_epsilon(env_steps, args)
 
-    progress = _bounded_unit(float(update_step) / float(args.total_updates))
+    if schedule_total_updates is None:
+        schedule_total_updates = args.total_updates
+    schedule_total_updates = int(schedule_total_updates)
+    if schedule_total_updates <= 0:
+        raise ValueError('schedule_total_updates must be positive')
+    progress = _bounded_unit(
+        float(update_step) / float(schedule_total_updates)
+    )
     return smooth_epsilon(progress, args)
 
 
@@ -1339,6 +1414,8 @@ class CollectStatsWindow:
         self.counterfactual_proposal_confirmed_event_count = 0
         self.counterfactual_proposal_budget_count = 0
         self.counterfactual_proposals_generated = 0
+        self.counterfactual_proposals_transfer_selected = 0
+        self.counterfactual_proposals_transfer_throttled = 0
         self.counterfactual_proposal_skip_reason_counts = {}
         self.counterfactual_proposals_serialized = 0
         self.counterfactual_proposal_serialized_bytes = 0
@@ -1482,6 +1559,8 @@ class CollectStatsWindow:
                 'counterfactual_proposal_confirmed_event_count',
                 'counterfactual_proposal_budget_count',
                 'counterfactual_proposals_generated',
+                'counterfactual_proposals_transfer_selected',
+                'counterfactual_proposals_transfer_throttled',
                 'counterfactual_proposals_serialized',
                 'counterfactual_proposal_serialized_bytes'):
             setattr(
@@ -1702,6 +1781,12 @@ class CollectStatsWindow:
             ),
             counterfactual_proposals_generated=(
                 self.counterfactual_proposals_generated
+            ),
+            counterfactual_proposals_transfer_selected=(
+                self.counterfactual_proposals_transfer_selected
+            ),
+            counterfactual_proposals_transfer_throttled=(
+                self.counterfactual_proposals_transfer_throttled
             ),
             counterfactual_proposal_skip_reason_counts=tuple(sorted(
                 self.counterfactual_proposal_skip_reason_counts.items()
@@ -1965,6 +2050,14 @@ def write_failure_diagnostic(
     return path
 
 
+def clear_active_failure_diagnostic(run_dir):
+    """成功完成恢复训练后清除活动失败指针，保留带时间戳的历史诊断。"""
+
+    (Path(run_dir) / 'failure_latest.json').unlink(
+        missing_ok=True,
+    )
+
+
 def write_attribution_shutdown_summary(
         run_dir,
         collector,
@@ -2074,10 +2167,40 @@ def write_attribution_warmup_summary(
     seconds = float(
         getattr(stats, 'attribution_tracker_seconds', 0.0)
     )
+    state_analysis_calls = int(getattr(
+        stats,
+        'state_analysis_calls',
+        0,
+    ))
+    state_analysis_degraded_count = int(getattr(
+        stats,
+        'state_analysis_degraded_count',
+        0,
+    ))
     payload = {
+        'schema_version': 1,
         'created_at': datetime.now().isoformat(timespec='seconds'),
         'phase': str(phase),
         'steps': int(stats.steps),
+        'counterfactual_snapshot_failures': int(getattr(
+            stats,
+            'counterfactual_snapshot_failures',
+            0,
+        )),
+        'state_analysis_calls': state_analysis_calls,
+        'state_analysis_degraded_count': (
+            state_analysis_degraded_count
+        ),
+        'state_analysis_degraded_rate': (
+            state_analysis_degraded_count / state_analysis_calls
+            if state_analysis_calls > 0
+            else 0.0
+        ),
+        'p95_abs_potential_shaping_reward': float(getattr(
+            stats,
+            'p95_abs_potential_shaping_reward',
+            0.0,
+        )),
         'attribution_tracker_calls': calls,
         'attribution_tracker_seconds': seconds,
         'mean_attribution_tracker_seconds': (
@@ -2341,6 +2464,20 @@ def save_checkpoint(
         best_eval_update=0):
     """原子保存版本化 checkpoint；任何一次写入都不破坏旧文件。"""
 
+    epsilon_schedule_total_updates = int(
+        (
+            run_manifest.config.get(
+                'total_updates',
+                args.total_updates,
+            )
+            if run_manifest is not None
+            else args.total_updates
+        )
+    )
+    if epsilon_schedule_total_updates <= 0:
+        raise ValueError(
+            'epsilon schedule total updates must be positive'
+        )
     training_state = {
         'online_model': online_model.state_dict(),
         'target_model': target_model.state_dict(),
@@ -2348,6 +2485,9 @@ def save_checkpoint(
         'update_step': int(update_step),
         'env_steps': int(env_steps),
         'epsilon': float(epsilon),
+        'epsilon_schedule_total_updates': (
+            epsilon_schedule_total_updates
+        ),
         'latest_metrics': latest_metrics or {},
         'best_eval_score': (
             float(best_eval_score)
@@ -2403,25 +2543,35 @@ def save_checkpoint(
     atomic_torch_save(checkpoint, latest_path)
 
     step_path = None
+    step_materialization = None
     pruned_count = 0
     if step_checkpoint:
         step_path = checkpoint_dir / f'step_{update_step:08d}.pt'
-        atomic_torch_save(checkpoint, step_path)
+        _path, step_materialization = atomic_clone_file(
+            latest_path,
+            step_path,
+        )
         pruned_count = prune_step_checkpoints(
             checkpoint_dir,
             getattr(args, 'checkpoint_keep_last', 0),
         )
 
     extra_path = None
+    extra_materialization = None
     if extra_checkpoint_name:
         extra_path = checkpoint_dir / extra_checkpoint_name
-        atomic_torch_save(checkpoint, extra_path)
+        _path, extra_materialization = atomic_clone_file(
+            latest_path,
+            extra_path,
+        )
     return {
         'latest_path': latest_path,
         'step_path': step_path,
         'extra_path': extra_path,
         'checkpoint_bytes': latest_path.stat().st_size,
         'pruned_count': pruned_count,
+        'step_materialization': step_materialization,
+        'extra_materialization': extra_materialization,
     }
 
 
@@ -2829,10 +2979,22 @@ def _format_ms(value):
     return f'{float(value) * 1000.0:.1f}ms'
 
 
-def should_sync_parallel_workers(update_step, worker_sync_interval):
-    """判断当前 update 采集前是否需要同步并行 worker 模型。"""
+def should_sync_parallel_workers(
+        update_step,
+        worker_sync_interval,
+        *,
+        model_synced=True):
+    """判断当前 update 采集前是否需要同步并行 worker 模型。
 
-    return update_step == 1 or (update_step - 1) % int(worker_sync_interval) == 0
+    新建 collector（包括从任意 checkpoint 恢复后的 collector）必须先收到一次
+    online model，不能只依赖 update 是否恰好落在周期同步边界。
+    """
+
+    return (
+        not bool(model_synced)
+        or update_step == 1
+        or (update_step - 1) % int(worker_sync_interval) == 0
+    )
 
 
 def should_sync_parallel_workers_after_train(update_step, worker_sync_interval):
@@ -2851,7 +3013,9 @@ def maybe_print_progress(
         buffer_size,
         epsilon,
         elapsed,
-        latest_loss=None):
+        latest_loss=None,
+        start_update_step=0,
+        start_env_steps=0):
     """按固定时间间隔打印轻量进度心跳。"""
 
     if args.progress_interval <= 0.0:
@@ -2862,8 +3026,18 @@ def maybe_print_progress(
         return last_progress_at
 
     percent = 0.0 if total <= 0 else min(100.0, current / total * 100.0)
-    speed = 0.0 if elapsed <= 0.0 else env_steps / elapsed
-    update_speed = 0.0 if elapsed <= 0.0 else current / elapsed
+    completed_env_steps = max(0, env_steps - int(start_env_steps))
+    completed_updates = max(0, current - int(start_update_step))
+    speed = (
+        0.0
+        if elapsed <= 0.0
+        else completed_env_steps / elapsed
+    )
+    update_speed = (
+        0.0
+        if elapsed <= 0.0
+        else completed_updates / elapsed
+    )
     remaining_updates = max(0.0, total - current)
     eta_seconds = 0.0 if update_speed <= 0.0 else remaining_updates / update_speed
     parts = [
@@ -2902,6 +3076,14 @@ def build_metric_row(
     """把训练、采集、评估统计合成一行 CSV 指标。"""
 
     elapsed = max(1e-9, timing['elapsed'])
+    completed_updates = max(
+        0,
+        int(timing.get('completed_updates', update_step)),
+    )
+    completed_env_steps = max(
+        0,
+        int(timing.get('completed_env_steps', env_steps)),
+    )
     collect_mean_episode_reward = (
         collect_stats.mean_episode_reward if collect_stats.episodes > 0 else ''
     )
@@ -3357,6 +3539,16 @@ def build_metric_row(
             'counterfactual_proposals_generated',
             0,
         )),
+        'collect_counterfactual_proposals_transfer_selected': int(getattr(
+            collect_stats,
+            'counterfactual_proposals_transfer_selected',
+            0,
+        )),
+        'collect_counterfactual_proposals_transfer_throttled': int(getattr(
+            collect_stats,
+            'counterfactual_proposals_transfer_throttled',
+            0,
+        )),
         'collect_counterfactual_proposal_skip_reasons': json.dumps(
             dict(getattr(
                 collect_stats,
@@ -3405,6 +3597,51 @@ def build_metric_row(
         'counterfactual_pending_tasks': int(getattr(
             counterfactual_stats,
             'pending_task_count',
+            0,
+        )),
+        'counterfactual_admission_slots_used': int(getattr(
+            cf_scheduler,
+            'admission_slots_used',
+            0,
+        )),
+        'counterfactual_admission_slots_available': int(getattr(
+            cf_scheduler,
+            'admission_slots_available',
+            0,
+        )),
+        'counterfactual_candidate_pool_capacity': int(getattr(
+            counterfactual_stats,
+            'candidate_pool_capacity',
+            0,
+        )),
+        'counterfactual_candidate_pool_count': int(getattr(
+            counterfactual_stats,
+            'candidate_pool_count',
+            0,
+        )),
+        'counterfactual_candidate_offers': int(getattr(
+            cf_cumulative,
+            'candidate_offers',
+            0,
+        )),
+        'counterfactual_candidate_pool_evictions': int(getattr(
+            cf_cumulative,
+            'candidate_pool_evictions',
+            0,
+        )),
+        'counterfactual_candidate_dispatch_attempts': int(getattr(
+            cf_cumulative,
+            'candidate_dispatch_attempts',
+            0,
+        )),
+        'counterfactual_candidate_dispatch_admitted': int(getattr(
+            cf_cumulative,
+            'candidate_dispatch_admitted',
+            0,
+        )),
+        'counterfactual_candidate_close_dropped': int(getattr(
+            cf_cumulative,
+            'candidate_close_dropped',
             0,
         )),
         'counterfactual_results_completed': int(getattr(
@@ -3559,6 +3796,14 @@ def build_metric_row(
             'checkpoint_pruned_count',
             '',
         ),
+        'checkpoint_step_materialization': timing.get(
+            'checkpoint_step_materialization',
+            '',
+        ),
+        'checkpoint_extra_materialization': timing.get(
+            'checkpoint_extra_materialization',
+            '',
+        ),
         'plot_seconds': timing.get('plot_seconds', ''),
         'replay_mode': replay_stats.get('mode', ''),
         'replay_hot_count': replay_stats.get('hot_count', ''),
@@ -3623,8 +3868,8 @@ def build_metric_row(
         'eval_episodes': eval_stats.get('eval_episodes', '') if eval_stats else '',
         'best_eval_score': best_eval_score if best_eval_update else '',
         'best_eval_update': best_eval_update if best_eval_update else '',
-        'updates_per_second': update_step / elapsed,
-        'env_steps_per_second': env_steps / elapsed,
+        'updates_per_second': completed_updates / elapsed,
+        'env_steps_per_second': completed_env_steps / elapsed,
     }
 
     for reward_field, metric_field in REWARD_BREAKDOWN_METRIC_FIELDS:
@@ -3663,6 +3908,7 @@ def load_resume_training_state(
         strict_components=True,
     )
     state = payload['training_state']
+    manifest = RunManifest.from_dict(payload['run_manifest'])
     required = {
         'online_model',
         'target_model',
@@ -3703,13 +3949,24 @@ def load_resume_training_state(
             if isinstance(value, torch.Tensor):
                 optimizer_state[name] = value.to(device)
     trainer.restore_update_step(trainer_update_step)
+    epsilon_schedule_total_updates = int(state.get(
+        'epsilon_schedule_total_updates',
+        manifest.config.get('total_updates', args.total_updates),
+    ))
+    if epsilon_schedule_total_updates <= 0:
+        raise ValueError(
+            'checkpoint epsilon_schedule_total_updates must be positive'
+        )
 
     return {
         'payload': payload,
-        'manifest': RunManifest.from_dict(payload['run_manifest']),
+        'manifest': manifest,
         'update_step': update_step,
         'env_steps': env_steps,
         'epsilon': float(state['epsilon']),
+        'epsilon_schedule_total_updates': (
+            epsilon_schedule_total_updates
+        ),
         'latest_metrics': dict(state.get('latest_metrics') or {}),
         'best_eval_score': float(
             state.get('best_eval_score', float('-inf'))
@@ -3790,6 +4047,11 @@ def train(args):
         )
     resume_update_step = (
         resume_state['update_step'] if resume_state is not None else 0
+    )
+    epsilon_schedule_total_updates = (
+        resume_state['epsilon_schedule_total_updates']
+        if resume_state is not None
+        else int(args.total_updates)
     )
     env_steps = (
         resume_state['env_steps'] if resume_state is not None else 0
@@ -3912,6 +4174,14 @@ def train(args):
             'saved_update_step': resume_update_step,
             'saved_env_steps': env_steps,
             'next_update_step': resume_update_step + 1,
+            'epsilon_schedule_total_updates': (
+                epsilon_schedule_total_updates
+            ),
+            'requested_total_updates': int(args.total_updates),
+            'epsilon_schedule_extended_without_reexpansion': (
+                int(args.total_updates)
+                > epsilon_schedule_total_updates
+            ),
             'td_replay_policy': resume_replay_state.get(
                 'resume_policy',
                 'warm_refill',
@@ -4006,6 +4276,8 @@ def train(args):
         flush=True,
     )
 
+    process_start_update_step = resume_update_step
+    process_start_env_steps = env_steps
     start_time = time.perf_counter()
     last_progress_at = start_time
     warmup_done = 0
@@ -4070,6 +4342,8 @@ def train(args):
                 buffer_size=len(replay_buffer),
                 epsilon=1.0,
                 elapsed=time.perf_counter() - start_time,
+                start_update_step=0,
+                start_env_steps=process_start_env_steps,
             )
         if warmup_done > 0 or resume_state is None:
             write_attribution_warmup_summary(
@@ -4149,14 +4423,24 @@ def train(args):
                 resume_update_step + 1,
                 args.total_updates + 1):
             active_update_step = update_step
-            epsilon = scheduled_epsilon(update_step, env_steps, args)
+            epsilon = scheduled_epsilon(
+                update_step,
+                env_steps,
+                args,
+                schedule_total_updates=(
+                    epsilon_schedule_total_updates
+                ),
+            )
 
             # 收集训练数据
             failure_stage = 'collect'
             collect_start_env_steps = env_steps
             if isinstance(collector, ParallelRolloutCollector) and args.async_rollout:
                 if pending_collect is None:
-                    if should_sync_parallel_workers(update_step, args.worker_sync_interval):
+                    if should_sync_parallel_workers(
+                            update_step,
+                            args.worker_sync_interval,
+                            model_synced=collector.model_synced):
                         collector.sync_model(online_model)
                     pending_collect = collector.start_collect_steps(
                         args.collect_per_update,
@@ -4167,7 +4451,10 @@ def train(args):
             else:
                 if (
                         isinstance(collector, ParallelRolloutCollector)
-                        and should_sync_parallel_workers(update_step, args.worker_sync_interval)):
+                        and should_sync_parallel_workers(
+                            update_step,
+                            args.worker_sync_interval,
+                            model_synced=collector.model_synced)):
                     collector.sync_model(online_model)
                 collect_stats = collector.collect_steps(args.collect_per_update, epsilon=epsilon)
             env_steps += collect_stats.steps
@@ -4195,7 +4482,14 @@ def train(args):
                     isinstance(collector, ParallelRolloutCollector)
                     and args.async_rollout
                     and update_step < args.total_updates):
-                next_epsilon = scheduled_epsilon(update_step + 1, env_steps, args)
+                next_epsilon = scheduled_epsilon(
+                    update_step + 1,
+                    env_steps,
+                    args,
+                    schedule_total_updates=(
+                        epsilon_schedule_total_updates
+                    ),
+                )
                 if not should_sync_parallel_workers_after_train(update_step, args.worker_sync_interval):
                     pending_next_collect = collector.start_collect_steps(
                         args.collect_per_update,
@@ -4238,6 +4532,8 @@ def train(args):
                 epsilon=epsilon,
                 elapsed=time.perf_counter() - start_time,
                 latest_loss=train_stats.loss,
+                start_update_step=process_start_update_step,
+                start_env_steps=process_start_env_steps,
             )
 
             # 记录指标、打印日志、评估、保存 checkpoint 和绘图
@@ -4274,6 +4570,12 @@ def train(args):
                     best_eval_update=best_eval_update,
                     timing={
                         'elapsed': time.perf_counter() - start_time,
+                        'completed_updates': (
+                            update_step - process_start_update_step
+                        ),
+                        'completed_env_steps': (
+                            env_steps - process_start_env_steps
+                        ),
                         'eval_seconds': eval_seconds,
                     },
                     replay_stats=replay_buffer.storage_stats,
@@ -4294,7 +4596,9 @@ def train(args):
                 save_seconds = 0.0
                 checkpoint_bytes = ''
                 checkpoint_pruned_count = ''
-                if should_save:
+                checkpoint_step_materialization = ''
+                checkpoint_extra_materialization = ''
+                if should_save or best_updated:
                     failure_stage = 'checkpoint'
                     save_start = time.perf_counter()
                     checkpoint_result = save_checkpoint(
@@ -4307,7 +4611,12 @@ def train(args):
                         env_steps=env_steps,
                         epsilon=epsilon,
                         latest_metrics=latest_row,
-                        step_checkpoint=True,
+                        step_checkpoint=should_save,
+                        extra_checkpoint_name=(
+                            'best.pt'
+                            if best_updated
+                            else None
+                        ),
                         run_manifest=run_manifest,
                         trainer=trainer,
                         replay_buffer=replay_buffer,
@@ -4326,36 +4635,22 @@ def train(args):
                     checkpoint_pruned_count = checkpoint_result[
                         'pruned_count'
                     ]
-
-                if best_updated:
-                    save_start = time.perf_counter()
-                    save_checkpoint(
-                        run_dir=run_dir,
-                        online_model=online_model,
-                        target_model=target_model,
-                        optimizer=optimizer,
-                        args=args,
-                        update_step=update_step,
-                        env_steps=env_steps,
-                        epsilon=epsilon,
-                        latest_metrics=latest_row,
-                        extra_checkpoint_name='best.pt',
-                        run_manifest=run_manifest,
-                        trainer=trainer,
-                        replay_buffer=replay_buffer,
-                        causal_replay_buffer=causal_replay_buffer,
-                        counterfactual_coordinator=(
-                            counterfactual_coordinator
-                        ),
-                        shapley_coordinator=shapley_coordinator,
-                        best_eval_score=best_eval_score,
-                        best_eval_update=best_eval_update,
+                    checkpoint_step_materialization = (
+                        checkpoint_result['step_materialization'] or ''
                     )
-                    save_seconds += time.perf_counter() - save_start
+                    checkpoint_extra_materialization = (
+                        checkpoint_result['extra_materialization'] or ''
+                    )
                 latest_row['save_seconds'] = save_seconds if save_seconds else ''
                 latest_row['checkpoint_bytes'] = checkpoint_bytes
                 latest_row['checkpoint_pruned_count'] = (
                     checkpoint_pruned_count
+                )
+                latest_row['checkpoint_step_materialization'] = (
+                    checkpoint_step_materialization
+                )
+                latest_row['checkpoint_extra_materialization'] = (
+                    checkpoint_extra_materialization
                 )
 
                 if should_plot:
@@ -4381,7 +4676,14 @@ def train(args):
         if counterfactual_coordinator is not None:
             counterfactual_coordinator.close(wait=True)
 
-        final_epsilon = scheduled_epsilon(args.total_updates, env_steps, args)
+        final_epsilon = scheduled_epsilon(
+            args.total_updates,
+            env_steps,
+            args,
+            schedule_total_updates=(
+                epsilon_schedule_total_updates
+            ),
+        )
         save_checkpoint(
             run_dir=run_dir,
             online_model=online_model,
@@ -4462,16 +4764,59 @@ def train(args):
                 )
         raise
     finally:
-        close_training_resources(
-            run_dir=run_dir,
-            replay_buffer=replay_buffer,
-            collector=collector,
-            metrics=metrics,
-            episode_metrics=episode_metrics,
-            counterfactual_coordinator=counterfactual_coordinator,
-            shapley_coordinator=shapley_coordinator,
-            suppress_errors=sys.exc_info()[0] is not None,
-        )
+        active_exception = sys.exc_info()[0] is not None
+        try:
+            close_training_resources(
+                run_dir=run_dir,
+                replay_buffer=replay_buffer,
+                collector=collector,
+                metrics=metrics,
+                episode_metrics=episode_metrics,
+                counterfactual_coordinator=(
+                    counterfactual_coordinator
+                ),
+                shapley_coordinator=shapley_coordinator,
+                suppress_errors=active_exception,
+            )
+            if not active_exception:
+                clear_active_failure_diagnostic(run_dir)
+        except BaseException as cleanup_exc:
+            if active_exception:
+                print(
+                    'warning=cleanup raised while another exception was '
+                    f'active: {type(cleanup_exc).__name__}: '
+                    f'{cleanup_exc}',
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                try:
+                    write_failure_diagnostic(
+                        run_dir,
+                        cleanup_exc,
+                        stage='cleanup',
+                        update_step=active_update_step,
+                        trainer_update_step=trainer.update_step,
+                        env_steps=env_steps,
+                        latest_metrics=latest_row,
+                        replay_buffer=replay_buffer,
+                        causal_replay_buffer=(
+                            causal_replay_buffer
+                        ),
+                        counterfactual_coordinator=(
+                            counterfactual_coordinator
+                        ),
+                        shapley_coordinator=shapley_coordinator,
+                    )
+                except BaseException as diagnostic_exc:
+                    print(
+                        'warning=cleanup failure diagnostic write failed: '
+                        f'{type(diagnostic_exc).__name__}: '
+                        f'{diagnostic_exc}',
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                raise
 
     print(f'training finished | run_dir={run_dir} | env_steps={env_steps}', flush=True)
     return run_dir

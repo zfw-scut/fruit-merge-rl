@@ -5,7 +5,11 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
-from daxigua_rl.scripts.train_dqn import linear_epsilon, scheduled_epsilon
+from daxigua_rl.scripts.train_dqn import (
+    linear_epsilon,
+    scheduled_epsilon,
+    should_sync_parallel_workers,
+)
 
 
 class EpsilonScheduleTest(unittest.TestCase):
@@ -54,6 +58,54 @@ class EpsilonScheduleTest(unittest.TestCase):
         self.assertAlmostEqual(linear_epsilon(25_000, args), 0.525)
         self.assertAlmostEqual(linear_epsilon(50_000, args), 0.05)
         self.assertAlmostEqual(scheduled_epsilon(30, env_steps=25_000, args=args), 0.525)
+
+    def test_fresh_resumed_parallel_collector_syncs_off_cycle(self):
+        """非周期边界恢复时，新 worker 也必须先收到一次模型。"""
+
+        self.assertTrue(
+            should_sync_parallel_workers(
+                61,
+                100,
+                model_synced=False,
+            )
+        )
+        self.assertFalse(
+            should_sync_parallel_workers(
+                61,
+                100,
+                model_synced=True,
+            )
+        )
+        self.assertTrue(
+            should_sync_parallel_workers(
+                101,
+                100,
+                model_synced=True,
+            )
+        )
+
+    def test_extended_resume_does_not_reexpand_smooth_exploration(self):
+        args = self._args()
+        args.total_updates = 25_000
+
+        self.assertAlmostEqual(
+            scheduled_epsilon(
+                10_000,
+                env_steps=80_000,
+                args=args,
+                schedule_total_updates=10_000,
+            ),
+            0.05,
+        )
+        self.assertAlmostEqual(
+            scheduled_epsilon(
+                10_001,
+                env_steps=80_008,
+                args=args,
+                schedule_total_updates=10_000,
+            ),
+            0.05,
+        )
 
 
 if __name__ == '__main__':

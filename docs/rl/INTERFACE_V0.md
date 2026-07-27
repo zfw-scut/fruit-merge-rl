@@ -1,5 +1,9 @@
 # RL 接口 v0
 
+文件名中的 `v0` 保留最初“先闭合游戏到训练”的接口沿革；本文内容已经同步到第一次
+完整因果归因训练前的当前实现。历史设计依据仍以
+`CAUSAL_ATTRIBUTION_V1.md` 为准。
+
 ## 目标
 
 本接口用于先跑通强化学习训练闭环：
@@ -9,9 +13,10 @@ reset -> observe -> choose action -> step -> reward / next_state / done
 ```
 
 当前提供无渲染游戏接口、带 StateAnalyzer/Reward V2 的 RL 环境壳层、GNN 图构建
-基础设施、GNN-Q 前向模型、`TensorTransition` 经验记录、基础 `ReplayBuffer`、
-worker-local `AttributionTracker`、单/多进程 collector、标准 `DQNTrainer` 和
-第一版 DQN 训练入口。
+基础设施、GNN-Q 前向模型、`EngineSnapshot`、3-step `TensorTransition`、
+冷热 `ReplayBuffer`、独立 `CausalReplayBuffer`、worker-local
+`AttributionTracker`、单/多进程 collector、预算反事实、局部 Shapley、
+Double DQN 联合更新器、版本化 checkpoint/hot-resume 和正式训练前门禁。
 
 ## 边界
 
@@ -53,6 +58,31 @@ get_state()
 `stable_frames` 帧稳定条件后为真。达到 `max_frames` 但没有完成这段连续窗口时，
 返回 `truncated=True`，不能把最后一帧的瞬时静止当作已经稳定。
 
+### `EngineSnapshot`
+
+`HeadlessGame` 当前提供：
+
+- `capture_snapshot(canonicalize=True) -> EngineSnapshot`
+- `restore_snapshot(snapshot) -> GameState`
+- `HeadlessGame.from_snapshot(snapshot) -> HeadlessGame`
+- `execute_action(drop_x, ...) -> EngineActionOutcome`
+- `HeadlessGame.replay_action(snapshot, drop_x, ...) -> EngineActionOutcome`
+- `HeadlessGame.replay_and_compare_original_action(snapshot, expected_outcome, ...)`
+
+快照只能在 reset 后或完全稳定、非终局、Space 未锁定且没有 pending 回调的动作边界
+捕获。它不只是公开 `GameState`：除水果、边界、队列、分数、ID、RNG 和物理配置外，
+还保存 Pymunk `Space` 的序列化内部状态，包括 cached arbiters、接触点、shape ID
+counter、timestamp 和 timestep。恢复前会验证 schema、checksum、配置指纹、
+`pymunk` / Chipmunk 精确版本及不支持的约束/睡眠/线程状态。
+
+默认 `canonicalize=True` 会先用快照规范化真实分支的内部表示，再返回第二份快照。
+这是为了让继续运行的 factual 分支与重建的反事实分支从相同 broadphase/求解器状态
+出发；规范化前后公开 `GameState` 必须完全相同。
+
+原动作比较要求水果 ID、等级、合成顺序、得分、队列和终止/截断结果一致，只对已知的
+亚像素坐标差采用小容差。未通过 factual reproduction 的分支只能记录失败原因，不能
+生成反事实或 Shapley 标签。
+
 ## RL 环境接口
 
 ### `DaxiguaEnv`
@@ -60,10 +90,16 @@ get_state()
 主要方法：
 
 - `reset(seed=None, fruit_queue=None) -> (GameState, info)`
+- `DaxiguaEnv.from_snapshot(snapshot, config=None, state_analyzer=None) -> DaxiguaEnv`
 - `action_candidates() -> list[ActionCandidate]`
 - `step(action_index, *, transition_key=None) -> (GameState, reward, terminated, truncated, info)`
 
 这里的 `step(action_index)` 表示一次完整投放，不是一帧游戏画面。
+
+`from_snapshot()` 创建一个可直接执行下一动作的 live 环境。快照不保存 Reward V2 或
+StateAnalyzer 配置，因此调用方仍提供环境侧配置；其中 `physics_fps` 和
+`space_iterations` 必须与快照一致。快照也不携带 rollout worker/episode 身份，
+正式重演仍由调用方提供对应 `TransitionKey`。
 
 正式 rollout 会在动作执行前传入
 `TransitionKey(worker_id, episode_id, step_index)`。直接调用环境时可以省略，
@@ -285,7 +321,10 @@ analysis = analyzer.analyze(
 但当前分析器不会自行采集逐帧碰撞日志。`DaxiguaEnv` 已把相邻分析接入 Reward V2，
 collector 负责提供稳定轨迹键并汇总分析性能；分析对象仍不写入
 `TensorTransition` / 主 `ReplayBuffer`。`AttributionTracker` 已实现并由
-collector 接入；物理引擎的逐帧接触证据采集和独立因果 replay 尚未实现。
+collector 接入；confirmed 事件会和 worker 暂存的原 transition 图上下文关联，
+经 `RuleCausalSampleBuilder` 写入独立 `CausalReplayBuffer`。需要动态仲裁的少量
+事件则由同一 worker 的快照环生成有界反事实 proposal。物理引擎仍不保存逐帧完整
+碰撞日志，接触依赖型事件只在已有显式机制证据时产生。
 
 ## 图构建接口
 
@@ -339,18 +378,20 @@ Q 值在训练前没有策略意义。
 
 当前 `daxigua_rl.training` 包提供：
 
-- `Transition`: 框架无关 DQN 经验记录，保留给调试和对照。
 - `TensorTransition`: 张量化 DQN 经验记录，正式训练主链路使用它。
-- `ReplayBuffer`: 固定容量内存回放池。
-- `RolloutCollector`: 单进程 rollout 采集器。
+- `ReplayBuffer`: 固定容量内存或热内存/冷磁盘 TD 回放池。
+- `NStepTransitionAccumulator`: worker-local n-step return 聚合器。
+- `RolloutCollector` / `ParallelRolloutCollector`: 单/多进程 rollout 采集器。
 - `TransitionKey`: 一次训练 run 内的稳定轨迹身份。
-- `DQNTrainer`: 标准 DQN 单步更新器。
+- `DQNTrainer`: Double DQN + n-step + 因果联合更新器。
 
 字段含义：
 
 - `graph`: 当前状态图，也就是状态 `s`。
 - `action_offset`: 被选择动作在 `q_values` 中的下标，也就是训练 loss 读取 `q_values[action_offset]` 的位置。
-- `reward`: 执行动作后的即时奖励。
+- `reward`: 从当前动作开始累计的 1～3 步折扣 reward。
+- `bootstrap_steps`: 该 reward 实际覆盖的连续环境步数。常规为 3，
+  episode 尾部可为 1 或 2。
 - `next_graph`: 下一状态图，也就是状态 `s'`；只有真实 terminal transition 可以为
   `None`，truncated transition 必须保存可信 final observation。
 - `terminated`: 游戏规则导致的结束。
@@ -367,13 +408,15 @@ Q 值在训练前没有策略意义。
 
 ```text
 q_value = q_values[transition.action_offset]
-target = reward + gamma * max_next_q   # 正常或 truncated transition
+next_action = argmax Q_online(next_graph)
+target = reward + gamma**bootstrap_steps * Q_target(next_graph, next_action)
+                                        # 正常或 truncated transition
 target = reward                        # 仅 terminated transition
 ```
 
 `done = terminated or truncated` 只表示采集 episode 边界；bootstrap mask 只由
 `terminated` 决定。主 `TensorTransition` 和冷热 `ReplayBuffer` 不追加归因历史字段，
-后续因果样本继续走独立 `CausalReplayBuffer`。
+因果样本走独立 `CausalReplayBuffer`。
 
 ### `ReplayBuffer`
 
@@ -386,14 +429,35 @@ target = reward                        # 仅 terminated transition
 - `is_ready(batch_size) -> bool`: 判断是否足够采样一个 batch。
 - `clear()`: 清空。
 - `len(buffer)`: 当前已保存经验数量。
+- `checkpoint_manifest()` / `validate_checkpoint_manifest(manifest)`：
+  保存并校验存储语义。
+- `checkpoint_state_dict()` / `load_checkpoint_state_dict(state)`：
+  保存和恢复有界训练状态。
 
 当前约定：
 
 - 默认容量是 `100_000`，也就是十万条经验。
 - 容量满后覆盖最旧经验。
-- buffer 只负责保存和采样对象，不关心对象内部是 `Transition` 还是 `TensorTransition`。
-- 当前正式训练主链路由 `RolloutCollector` 写入 CPU `TensorTransition`。
-- 第一版使用均匀随机采样，不做优先经验回放。
+- buffer 只接受并保存 CPU `TensorTransition`；其它经验类型会在 `push()` 时拒绝。
+- 正式训练主链路由 collector 的 n-step 累加器写入。
+- 纯内存模式使用均匀随机采样并在 checkpoint 中精确保存整个环。
+- hybrid 模式按配置混合热/冷采样；checkpoint 只保存最近
+  `hot_capacity` 条、采样 RNG 和来源计数，`resume_policy="hot_only"` 且
+  `omitted_cold_count` 明确记录未恢复的冷经验。这是有意的 hot-resume，
+  避免每次 checkpoint 复制完整冷 replay。
+
+### `NStepTransitionAccumulator`
+
+正式训练每个 rollout worker 独立维护：
+
+```python
+NStepTransitionAccumulator(n_step=3, gamma=0.99)
+```
+
+收到第 3 个连续 transition 时，它输出从最早状态开始的折扣累计 reward，并令
+`bootstrap_steps=3`。遇到 terminated 或 truncated 时会把剩余前缀全部输出，尾部
+分别记录真实的 1 或 2 步 horizon。truncated 仍保留最终 `next_graph` 和 bootstrap；
+terminated 尾部不 bootstrap。不同 worker、episode 或 reset 之间不得串接窗口。
 
 ### `RolloutCollector`
 
@@ -403,11 +467,14 @@ target = reward                        # 仅 terminated transition
 from daxigua_rl.training import RolloutCollector
 ```
 
-第一版接口：
+主要接口：
 
-- `RolloutCollector(env, graph_builder, replay_buffer, model=None, policy=None, seed=None, worker_id=0, attribution_tracker=None)`: 创建单环境采集器；`None` 使用默认 tracker，显式 `False` 只用于不满足真实物理身份不变量的测试环境。
+- `RolloutCollector(..., causal_replay_buffer=None, n_step=1, gamma=0.99, policy_version=None, counterfactual_enabled=False, counterfactual_ring_size=32, ...)`：
+  创建单环境采集器；正式训练显式传 `n_step=3`、因果 replay 和反事实开关。
 - `reset(seed=None, fruit_queue=None)`: 显式重置环境并开始新 episode。
 - `collect_steps(step_count, epsilon=1.0) -> RolloutStats`: 收集指定数量的 transition 并写入 replay buffer。
+- `drain_counterfactual_proposals() -> tuple[CounterfactualProposal, ...]`：
+  非阻塞排空轻量 proposal outbox。
 
 当前采集流程：
 
@@ -420,8 +487,11 @@ from daxigua_rl.training import RolloutCollector
 -> DaxiguaEnv.step(action_offset, transition_key=...)
 -> StateAnalyzer 前后边界 + Reward V2
 -> AttributionTracker.observe_transition(...)
+-> confirmed 事件 -> RuleCausalSampleBuilder -> CausalReplayBuffer
+-> 可选 EngineSnapshot / factual outcome -> CounterfactualProposalBuilder
 -> 构建 next_graph
--> TensorTransition(...)
+-> NStepTransitionAccumulator
+-> 1～3 步 TensorTransition(...)
 -> ReplayBuffer.push(...)
 ```
 
@@ -431,6 +501,10 @@ from daxigua_rl.training import RolloutCollector
 - `epsilon<1.0` 时必须提供 Q 网络模型，用于 greedy 分支。
 - 采集时模型会临时切到 `eval()`，结束后恢复原本训练模式。
 - episode 结束后 collector 会自动 `reset()` 并继续采集，直到达到指定 transition 数。
+- n-step 累加器按 worker/episode 隔离；episode 边界会 flush 尾部，不能把下一局 reward
+  聚合到上一局。
+- 反事实关闭时不会调用 `capture_snapshot()`。启用后每 worker 只保存最近配置数量的
+  稳定边界；完整快照不和主 TD transition 一起发送。
 - `RolloutCollector` 依赖 PyTorch，因此不会被 `daxigua_rl` 顶层自动导入。
 
 collector 会在动作执行前生成：
@@ -468,10 +542,72 @@ TransitionKey(worker_id, episode_id, step_index)
 - `attribution_lineage_merge_count` / `attribution_chain_merge_count` /
   `attribution_max_chain_depth`: 谱系合成和同一物理过程连锁统计。
 - `attribution_event_status_counts` / `attribution_delays`: 按类型/状态计数和归因延迟。
+- 规则因果 builder 的输入/输出/跳过原因、因果样本数和因果 replay 大小。
+- 快照调用/耗时/失败、历史环大小/淘汰、proposal 事件数/生成数/跳过原因/
+  序列化字节和 outbox 大小。
 
 完整事件与谱系不会写入 `TensorTransition`。collector 关闭时会先让每个 worker
 finalize pending；真实解封/进入谱系与 truncated/reset/shutdown 中断通过
 `resolution_reason` 区分。
+
+### `CausalReplayBuffer`
+
+因果监督不修改主 `TensorTransition`，而是使用独立的纯内存有界池：
+
+```text
+CausalSample
+├── graph + actual/comparison action offset
+├── direction + target margin/return difference
+├── confidence + cause type + delay
+├── transition/event/budget identity
+├── attribution/policy/config provenance
+└── supervision_kind
+```
+
+`RuleCausalSampleBuilder` 只消费 confirmed 事件，并从
+`CausalTransitionContext` 找回原始状态图和规范 15 动作。正铺垫选择结构更差的合法
+比较动作，负封路选择保留更多容量的安全动作；没有可信比较动作时只记录跳过原因。
+同一个 merge budget 不复制 Reward V2 任务价值。
+
+`CausalReplayBuffer(capacity=20_000)` 按正铺垫、负封路和经验反事实类别分层采样，
+对相同监督身份去重，并可用 `checkpoint_state_dict()` /
+`load_checkpoint_state_dict()` 精确保存样本、类别、游标、计数和 RNG。
+
+### 预算反事实
+
+采集侧的 `CounterfactualProposalBuilder` 维护 worker-local 的 32 边界环，并把延迟
+confirmed 事件回连到原 `EngineSnapshot`、factual outcome、图上下文和最多配置数量的
+替代动作。高价值合成、两段以上连锁、规则正负冲突及中等 placement confidence 是
+主要候选；确定性规则事件不需要普遍重演。
+
+主进程 `CounterfactualCoordinator`：
+
+1. 只在 target network 同步时调用 `refresh_target_policy(...)` 冻结模型与
+   Reward/图/物理配置；
+2. 用 `record_real_steps()` 登记真实采样成本；
+3. `submit()` / `submit_many()` 经 `BudgetedCounterfactualScheduler` 非阻塞接纳；
+4. 独立 CPU worker 恢复快照、先重演 factual branch，再运行有限 alternatives；
+5. `poll()` 只把 `completed` 且 reproduction 通过的结果转成因果样本。
+
+默认 soft cost ratio 为配置值，所有普通反事实与 Shapley 通过同一 external-token
+接口共享 `counterfactual_hard_limit=0.10`。真实步门槛、队列容量、每 worker
+in-flight、CPU 比例和连续失败熔断都在调度侧执行；拒绝任务只增加 drop reason，
+不阻塞 rollout，也不产生伪标签。
+
+### 局部 Shapley
+
+`LocalShapleyCoordinator` 只选择高价值、至少两个且最多配置数量候选的
+`shapley_ready` proposal，累计比例上限默认为 `0.0005`。它使用一个独立进程：
+
+- 按 factual 轨迹逐步验证 grand coalition；
+- 对 2～4 个局部历史动作执行 subset replay 与缓存；
+- 使用少量配对正反排列估计边际贡献；
+- 检查 Shapley 和与 grand-empty 差值之间的效率残差；
+- 通过后生成 `cause_type=LOCAL_SHAPLEY`、
+  `supervision_kind=shapley` 的因果样本。
+
+Shapley 先从共享硬预算预留 token；被选中后跳过同一 proposal 的普通反事实，避免重复
+计算。比例、预算、候选、重演或效率门禁失败都不会生成标签。
 
 ### `DQNTrainer`
 
@@ -481,26 +617,34 @@ finalize pending；真实解封/进入谱系与 truncated/reset/shutdown 中断�
 from daxigua_rl.training import DQNTrainer, DQNTrainerConfig
 ```
 
-第一版接口：
+接口：
 
-- `DQNTrainer(online_model, target_model, replay_buffer, optimizer, config=None, loss_fn=None)`
+- `DQNTrainer(online_model, target_model, replay_buffer, optimizer, config=None, loss_fn=None, causal_replay_buffer=None)`
 - `train_step() -> DQNTrainStats`
 - `is_ready() -> bool`
 - `sync_target_model()`
+- `restore_update_step(update_step)`：resume 时恢复 target 同步周期相位。
 
 默认配置：
 
 ```python
 DQNTrainerConfig(
     gamma=0.99,
+    n_step=3,
     batch_size=32,
     target_update_interval=1000,
     grad_clip_norm=10.0,
     sync_target_on_init=True,
+    causal_batch_size=32,
+    causal_update_interval=2,
+    lambda_rule=0.15,
+    lambda_counterfactual=0.10,
+    counterfactual_return_scale=merge_utility(7),
+    counterfactual_target_clip=5.0,
 )
 ```
 
-当前标准 DQN target：
+当前 Double DQN + n-step target：
 
 ```text
 current_batch = collate_graph_tensors(batch.graph)
@@ -509,27 +653,37 @@ current_q = current_q_flat[action_slice.start + action_offset]
 
 if transition.can_bootstrap:
     next_batch = collate_graph_tensors(bootstrap_next_graphs)
-    next_q_flat = target_model(next_batch)
-    target = reward + gamma * max(next_q_flat[each_next_action_slice])
+    selected_next_action = argmax(online_model(next_batch))
+    bootstrap_q = target_model(next_batch)[selected_next_action]
+    target = (
+        transition.reward
+        + gamma**transition.bootstrap_steps * bootstrap_q
+    )
 else:
-    target = reward
+    target = transition.reward
 ```
 
 当前约定：
 
-- 默认 loss 使用 `SmoothL1Loss`，也就是 Huber 风格损失。
+- TD 默认使用 `SmoothL1Loss`。
 - 初始化时会把 `online_model` 参数同步到 `target_model`。
 - `target_model` 参数会被冻结，只用于无梯度推理。
 - 每隔 `target_update_interval` 次 `train_step()` 同步一次 target network。
-- 第一版是标准 DQN，不做 Double DQN。
 - 当前使用 GraphBatch，把 batch 内多张图拼成不连通大图执行批量 forward。
-- ReplayBuffer 正式训练路径保存 CPU `TensorTransition`，训练时再把 `GraphBatch` 搬到模型设备，因此可直接支持 GPU batch 训练。
+- 每 `causal_update_interval` 次 TD update 最多读取 `causal_batch_size` 个因果样本；
+  样本不足不会阻塞 TD 更新。
+- 规则样本使用带 confidence 的 hinge ranking loss；counterfactual / Shapley 使用
+  归一化、裁剪 target delta 的 Huber loss。总 loss 为
+  `td + lambda_rule*rule + lambda_counterfactual*empirical`。
+- ReplayBuffer 保存 CPU `TensorTransition`，训练时再把 GraphBatch 搬到模型设备。
 - 默认使用梯度裁剪 `grad_clip_norm=10.0`。
+- Q、target、三路 loss 与梯度范数必须全部有限；检查失败发生在
+  `optimizer.step()` 前，避免把 NaN/Inf 写入模型和 optimizer 状态。
 
 `DQNTrainStats` 提供：
 
 - `update_step`: 已完成更新次数。
-- `loss`: 本次 TD loss。
+- `loss` / `td_loss`: 总 loss 与 TD 子损失。
 - `mean_q`: 当前 Q 平均值。
 - `mean_target`: target 平均值。
 - `mean_reward`: reward 平均值。
@@ -537,34 +691,66 @@ else:
 - `bootstrap_count`: batch 中使用 next_graph bootstrap 的 transition 数量。
 - `grad_norm`: 裁剪前梯度范数。
 - `target_synced`: 本次是否同步 target network。
+- `causal_update_applied`、因果/规则/反事实/Shapley batch 大小。
+- `rule_rank_loss` / `weighted_rule_rank_loss`。
+- `counterfactual_loss` / `weighted_counterfactual_loss`。
+- 规则 pair 正确率/margin 满足率、经验差值符号正确率/平均绝对误差。
+- 因果 replay 采样、collate 和 forward 的额外耗时。
 
 ## 训练入口
 
-第一版正式训练脚本：
+当前正式训练脚本：
 
 ```text
 src/daxigua_rl/scripts/train_dqn.py
 ```
 
-运行方式：
+第一次长训前先运行不启动训练的 preflight：
 
 ```bash
-PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigua_rl.scripts.train_dqn
+PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
+  tools/preflight_training.py --config configs/train_dqn_causal_500k.toml
 ```
 
-注意：普通 `conda run` 会捕获子进程输出，可能导致进度信息等到训练结束才一次性显示。需要使用 `--no-capture-output` 才能实时看到每 3 秒的进度心跳。
+门禁验证解析后的正式配置、Python/Pymunk/Chipmunk、CUDA 模型前后向、完整因果
+optimizer step、局部 Shapley 物理链路、多次 `EngineSnapshot` 重演、输出盘和
+反事实 CPU 余量。任一 required check 失败时返回非零并写 JSON；它不创建训练 run。
+
+三套配置共享 `configs/train_dqn_fast30_parallel.toml` 的完整算法/物理基线：
+
+| 配置 | 用途 |
+| --- | --- |
+| `train_dqn_causal_smoke_5k.toml` | 5000 update 集成烟测 |
+| `train_dqn_causal_calibration_10k.toml` | 10000 update 标定；样本不足时从 update 0 另起独立 25000 校准 |
+| `train_dqn_causal_500k.toml` | 第一次 500000 update 正式训练 |
+
+配置文件存在不代表相应运行已经通过；结果必须以实际 run 产物为准。
+
+训练示例：
+
+```bash
+PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
+  -m daxigua_rl.scripts.train_dqn \
+  --config configs/train_dqn_causal_smoke_5k.toml
+```
+
+普通 `conda run` 会捕获子进程输出；使用 `--no-capture-output` 才能实时看到心跳。
 
 默认训练流程：
 
 ```text
 warmup 随机收集经验
 -> 每轮 collect_per_update 条新经验
--> DQNTrainer.train_step()
+-> worker 输出 3-step TD transition、规则因果样本和反事实 proposal
+-> Shapley 极稀疏选择；其余 proposal 进入预算反事实调度
+-> poll 物理结果并写 CausalReplayBuffer
+-> DQNTrainer 联合 TD / rule / counterfactual / Shapley 更新
+-> target sync 时刷新 rollout 模型和冻结反事实 target payload
 -> epsilon 按 schedule 衰减
 -> 每 3 秒打印轻量进度
 -> 终端日志
 -> metrics.csv
--> checkpoint
+-> 原子版本化 checkpoint
 -> greedy 评估
 -> matplotlib 训练曲线图
 ```
@@ -578,9 +764,14 @@ runs/dqn_YYYYMMDD_HHMMSS/
 ├── episode_metrics.csv
 ├── attribution_warmup.json
 ├── attribution_shutdown.json
+├── counterfactual_shutdown.json
+├── failure_latest.json                 # 仅异常时
+├── resume_<时间戳>.json                # 仅恢复时
+├── resume_config_<时间戳>.json         # 仅恢复时
 ├── checkpoints/
 │   ├── latest.pt
 │   ├── best.pt
+│   ├── failure_last_normal.pt          # 非有限训练故障时
 │   └── step_XXXXXXXX.pt
 └── plots/
     └── training_curves.png
@@ -589,19 +780,68 @@ runs/dqn_YYYYMMDD_HHMMSS/
 `metrics.csv` 是核心可视化数据源，记录：
 
 - update step、环境步数、epsilon、buffer 大小。
-- loss、mean Q、mean target、mean reward、TD error、grad norm。
+- total/TD/rule/counterfactual loss、各类因果 batch、pair/sign 正确率、mean Q、
+  mean target、TD error 和 grad norm。
 - 采集阶段 episode 统计，以及 Reward V2 的 task、potential shaping、C/R/K 和
   merge event 数量。
 - shaping 绝对值 p95，以及 StateAnalyzer 调用次数、耗时、缓存命中率和降级率。
 - AttributionTracker 调用耗时、事件生命周期、pending、谱系/连锁、延迟和
   event/status JSON。
+- 规则因果样本 builder、`CausalReplayBuffer` 分层/监督类型/存储状态。
+- 快照/proposal 数、重演完成/失败/不可复现、模拟步、soft/hard token 比例、队列、
+  熔断和 drop reason。
+- 局部 Shapley 的考虑/选择/完成/失败、subset、效率门禁、共享 token 和样本数。
 - greedy 评估均分、最高分、最低分、历史最高分、平均 reward、平均 episode 长度。
 - 采样和训练速度。
 
 `attribution_warmup.json` 单独汇总随机 warmup 的归因事件和期末 pending，避免将
 warmup 混进第一行训练曲线；`attribution_shutdown.json` 记录各 worker 在退出时因
 `worker_shutdown` 或此前 `manual_reset` 收口的 pending。即使 replay flush 失败，
-训练清理仍会尝试 finalize tracker、写 sidecar 并关闭日志。
+训练清理仍会尝试 finalize tracker、先关闭 Shapley、再关闭普通反事实、写
+`counterfactual_shutdown.json` 和归因 sidecar，并关闭日志。
+
+### 版本化 checkpoint 与 hot-resume
+
+checkpoint 使用同目录临时文件、`fsync` 和 `os.replace` 原子写入，schema 中保存：
+
+- online/target 模型、optimizer 和 trainer update step；
+- env step、epsilon、最佳评估、最新指标等训练计数；
+- Python random、PyTorch CPU 和全部 CUDA RNG；
+- `RunManifest`、规范配置指纹、运行时/依赖/Git 元数据；
+- TD replay 和 `CausalReplayBuffer` 的 manifest/state；
+- 反事实与 Shapley 的有界协调状态摘要。
+
+恢复示例：
+
+```bash
+PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
+  -m daxigua_rl.scripts.train_dqn \
+  --config configs/train_dqn_causal_500k.toml \
+  --resume runs/<run>/checkpoints/latest.pt
+```
+
+`--resume` 默认从 checkpoint 所属 run 继续，不能与
+`--overwrite-run-dir` 组合。加载前按配置指纹拒绝模型、Reward、物理、replay、
+因果预算等训练语义漂移；允许变化的字段只限总更新数、输出路径、日志/保存/评估/绘图
+频率和 resume 控制字段。
+
+纯内存 TD replay 和 `CausalReplayBuffer` 精确恢复。正式 hybrid TD replay 只恢复
+checkpoint 中保存的热层，因此称为 hot-resume；`resume_<时间戳>.json` 明确记录
+source count、omitted cold count、episode ID 续接和 RNG 恢复契约。若热层不足 batch，
+入口会执行有记录的 `resume_warmup`。`metrics.csv` / `episode_metrics.csv` 先裁切到
+checkpoint update，再追加，避免重复行或保留 checkpoint 之后的不一致日志。
+
+`smooth` epsilon 的分母由首次 checkpoint 中的
+`epsilon_schedule_total_updates` 冻结。恢复时即使增加 `total_updates`，探索率也不会
+重新放大；`resume_<时间戳>.json` 会记录请求总步数以及
+`epsilon_schedule_extended_without_reexpansion`，便于区分普通恢复、连续延长和
+从 update 0 新建的独立校准 run。
+
+任何训练异常都会写 `failure_<时间戳>.json` 和 `failure_latest.json`，记录阶段、
+update、异常和最近统计。若在 optimizer 前触发非有限值 fail-fast，还会原子保存
+`failure_last_normal.pt`，其更新计数保持在最后一次成功参数更新。
+成功恢复并完成最终 checkpoint/曲线后只会删除活动指针 `failure_latest.json`，
+带时间戳的历史诊断继续保留。
 
 `episode_metrics.csv` 按 episode 结束事件逐行记录训练过程中每局完整游戏的分数：
 
@@ -658,7 +898,7 @@ checkpoints/best.pt
 
 ## 模型观看入口
 
-第一版真实游戏窗口观看脚本：
+当前真实游戏窗口观看脚本：
 
 ```text
 src/daxigua_rl/scripts/watch_dqn.py
@@ -668,7 +908,7 @@ src/daxigua_rl/scripts/watch_dqn.py
 
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigua_rl.scripts.watch_dqn \
-  --checkpoint runs/dqn_baseline_h128_l3_10k_eps10k/checkpoints/latest.pt
+  --checkpoint runs/<run>/checkpoints/latest.pt
 ```
 
 常用参数：
@@ -700,6 +940,11 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigu
 
 ## 后续扩展
 
-- 后续训练脚本仍应继续放在 `daxigua_rl.scripts`，组合 `RolloutCollector`、`ReplayBuffer` 和 `DQNTrainer`。
-- 多进程采样、replay buffer、模型训练也应在 `daxigua_rl` 内部实现。
-- 如果未来需要性能优化，优先 profile `HeadlessGame`，再决定是否替换底层实现。
+- 当前首轮大规模训练接口已经闭合，下一步是按 5k 烟测、10k（必要时独立 25k）标定、
+  preflight、500k 正式训练的顺序产生运行证据，而不是继续扩张框架范围。
+- 若标定要求修改阈值或 loss 权重，必须写入 TOML、更新归因版本并保留旧配置，
+  不得在正式长训中静默改变语义。
+- 后续训练脚本仍放在 `daxigua_rl.scripts`；游戏本体不得反向依赖训练、因果 replay
+  或 checkpoint 设施。
+- 如果未来需要进一步性能优化，先分开 profile headless 物理、StateAnalyzer、
+  snapshot capture、反事实模拟和 GPU update，再决定具体降级项。

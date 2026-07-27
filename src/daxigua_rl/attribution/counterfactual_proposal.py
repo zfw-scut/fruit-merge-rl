@@ -41,6 +41,9 @@ from .schema import (
 
 COUNTERFACTUAL_PROPOSAL_SCHEMA_VERSION = 1
 DEFAULT_RANDOM_AUDIT_MODULUS = 2048
+COUNTERFACTUAL_TRANSFER_ALWAYS_REASONS = frozenset({
+    'high_value_merge',
+})
 _MECHANICALLY_UNIQUE_EVENT_TYPES = {
     'DIRECT_TRIGGER',
     'MERGE_LINEAGE',
@@ -799,6 +802,41 @@ class CounterfactualProposal:
         return len(self.coalition_candidate_keys) >= 2
 
 
+def should_transfer_counterfactual_proposal(
+        proposal,
+        *,
+        sample_rate=1.0):
+    """稳定筛选需要跨进程传输的物理反事实候选。
+
+    完整规则归因和 worker-local 历史不受此门控影响。极少见的高价值合成
+    始终进入物理验证；包括连锁与正负规则冲突在内的常规候选按
+    ``proposal_id`` 的 SHA-256 做确定性抽样，确保相同轨迹、相同配置在不同
+    进程调度下得到同一选择。
+    """
+
+    if not isinstance(proposal, CounterfactualProposal):
+        raise TypeError('proposal must be CounterfactualProposal')
+    rate = _finite_float(
+        'sample_rate',
+        sample_rate,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if (
+            COUNTERFACTUAL_TRANSFER_ALWAYS_REASONS
+            .intersection(proposal.trigger_reasons)):
+        return True
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    digest = hashlib.sha256(
+        proposal.proposal_id.encode('utf-8')
+    ).digest()
+    bucket = int.from_bytes(digest[:8], 'big')
+    return bucket < int(rate * (1 << 64))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class CounterfactualProposalBuildStats:
     input_event_count: int
@@ -1342,6 +1380,7 @@ class CounterfactualProposalBuilder:
 
 __all__ = [
     'COUNTERFACTUAL_PROPOSAL_SCHEMA_VERSION',
+    'COUNTERFACTUAL_TRANSFER_ALWAYS_REASONS',
     'DEFAULT_RANDOM_AUDIT_MODULUS',
     'CounterfactualHistoryEntry',
     'CounterfactualHistoryRing',
@@ -1349,5 +1388,6 @@ __all__ = [
     'CounterfactualProposalBuildResult',
     'CounterfactualProposalBuildStats',
     'CounterfactualProposalBuilder',
+    'should_transfer_counterfactual_proposal',
     'stable_counterfactual_proposal_id',
 ]

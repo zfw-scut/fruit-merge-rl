@@ -1649,6 +1649,8 @@ class CounterfactualSchedulerStats:
     external_reservations_accepted: int
     external_reservations_settled: int
     external_reservations_refunded: int
+    admission_slots_used: int
+    admission_slots_available: int
 
 
 def _validate_top_level_runner(runner):
@@ -1680,13 +1682,31 @@ def _counterfactual_runner_entry(runner, task):
     return result
 
 
+def initialize_physics_runner_process():
+    """把独立物理 runner 的 PyTorch CPU 线程限制为每进程一个。
+
+    该函数只作为 spawn ``ProcessPoolExecutor`` 的 initializer 运行，不能在训练
+    主进程或 rollout worker 初始化路径调用。PyTorch 的 inter-op 线程数只能在
+    首次并行工作开始前设置；若依赖导入已提前触发线程池，保留当前值并让 runner
+    继续执行，而不是使整个物理进程启动失败。
+    """
+
+    import torch
+
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+
+
 class BudgetedCounterfactualScheduler:
     """全局 token 预算下的非阻塞 spawn 反事实调度器。
 
     admission 同时受三层限制：
 
     1. 每 ``min_real_steps`` 个真实投放最多获得一个任务槽位；
-    2. 普通任务累计 token 不超过 8% 软预算；
+    2. 普通任务累计 token 不超过配置化软预算（首轮正式训练为 6%）；
     3. 达到稳定优先级阈值的任务可以借到 10% 硬上限，但绝不越过硬上限。
 
     任务一经接受会预留 ``estimated_tokens``。完成后按实际
@@ -1721,6 +1741,7 @@ class BudgetedCounterfactualScheduler:
             executor = ProcessPoolExecutor(
                 max_workers=self.worker_count,
                 mp_context=context,
+                initializer=initialize_physics_runner_process,
             )
         elif not hasattr(executor, 'submit'):
             raise TypeError('executor must provide submit()')
@@ -1818,6 +1839,14 @@ class BudgetedCounterfactualScheduler:
                 external_reservations_refunded=(
                     self._external_reservations_refunded
                 ),
+                admission_slots_used=self._admission_slots_used,
+                admission_slots_available=max(
+                    0,
+                    (
+                        self._real_steps
+                        // self.config.min_real_steps
+                    ) - self._admission_slots_used,
+                ),
             )
 
     @property
@@ -1855,7 +1884,7 @@ class BudgetedCounterfactualScheduler:
         """为局部 Shapley 等外部物理工作预留共享预算。
 
         外部工作不占 ``min_real_steps`` proposal 槽位，但与反事实任务共用
-        ``tokens_reserved/tokens_consumed`` 以及 8% 软、10% 硬上限。高优先级是否可
+        ``tokens_reserved/tokens_consumed``、配置化软预算和共享硬上限。高优先级是否可
         借用硬预算沿用调度器同一阈值。
         """
 
@@ -2703,6 +2732,7 @@ __all__ = [
     'create_counterfactual_task',
     'engine_action_outcome_fingerprint',
     'estimate_local_shapley',
+    'initialize_physics_runner_process',
     'local_shapley_candidates',
     'local_shapley_eligible',
     'paired_shapley_permutations',

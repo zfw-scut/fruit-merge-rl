@@ -316,6 +316,50 @@ class CollectorCausalNStepTest(unittest.TestCase):
         self.assertEqual(boundary.counterfactual_snapshot_calls, 1)
         self.assertEqual(boundary.counterfactual_history_size, 0)
 
+    def test_single_collector_throttles_only_proposal_transfer(self):
+        env = DaxiguaEnv(config=DaxiguaEnvConfig(
+            action_count=15,
+            max_physics_frames=300,
+            stable_frames=6,
+        ))
+        collector = RolloutCollector(
+            env=env,
+            graph_builder=GraphBuilder(),
+            replay_buffer=ReplayBuffer(capacity=16, seed=125),
+            policy=_AlwaysLeftPolicy(seed=126),
+            causal_replay_buffer=CausalReplayBuffer(
+                capacity=16,
+                seed=127,
+            ),
+            counterfactual_enabled=True,
+            counterfactual_ring_size=32,
+            counterfactual_proposal_sample_rate=0.0,
+        )
+        collector.reset(seed=126, fruit_queue=(1, 1, 1, 1))
+
+        collector.collect_steps(1, epsilon=1.0)
+        stats = collector.collect_steps(1, epsilon=1.0)
+
+        self.assertGreater(stats.counterfactual_proposals_generated, 0)
+        self.assertEqual(
+            stats.counterfactual_proposals_transfer_selected,
+            0,
+        )
+        self.assertEqual(
+            stats.counterfactual_proposals_transfer_throttled,
+            stats.counterfactual_proposals_generated,
+        )
+        self.assertEqual(
+            dict(stats.counterfactual_proposal_skip_reason_counts).get(
+                'transfer_throttle',
+                0,
+            ),
+            stats.counterfactual_proposals_generated,
+        )
+        self.assertEqual(collector.drain_counterfactual_proposals(), ())
+        # 规则因果样本仍完整进入独立 replay，抽样只影响物理 proposal。
+        self.assertGreater(len(collector.causal_replay_buffer), 0)
+
     def test_counterfactual_ring_expiry_reports_skip_without_fake_proposal(self):
         env = DaxiguaEnv(config=DaxiguaEnvConfig(
             action_count=15,
@@ -416,12 +460,13 @@ class CollectorCausalNStepTest(unittest.TestCase):
             isinstance(proposal, CounterfactualProposal)
             for proposal in proposals
         ))
-        self.assertGreater(len(proposals), 0)
-        self.assertGreater(
+        proposal_bytes = (
             first.counterfactual_proposal_serialized_bytes
-            + second.counterfactual_proposal_serialized_bytes,
-            0,
+            + second.counterfactual_proposal_serialized_bytes
         )
+        # 真实随机轨迹可能在这 6 步内没有命中稀疏触发白名单；命中时必须
+        # 完整序列化，未命中时则不能伪造 payload 字节。
+        self.assertEqual(proposal_bytes > 0, bool(proposals))
         # 某个 worker 的第三次投放可能刚好形成真实终局，从而额外发射
         # 2/1-step 尾巴；无论是否终局，累计 raw step 都必须精确分解为
         # 已发射 replay 与每个 worker 尚待补齐的尾巴。

@@ -1,6 +1,6 @@
 # 完整状态归因 V1 设计规格
 
-状态：首轮大规模训练实现基线
+状态：首轮大规模训练已实现并进入放行验证
 
 版本：V1
 
@@ -52,12 +52,16 @@ DaxiguaEnv
 - `RolloutStats` 和训练 CSV 已记录 Reward V2、StateAnalyzer 与 AttributionTracker
   的核心性能和事件生命周期指标。
 
-现有缺口包括：
+当前实现边界如下：
 
-- `TensorTransition` 只保存即时标量 reward，没有历史归因字段。
-- 当前是标准单步 DQN，不是 Double DQN，也没有 n-step return。
-- 当前公开 `GameState` 不是可恢复的完整物理快照。
-- 当前还没有 `CausalReplayBuffer`、因果排序 loss 或反事实重演。
+- 主 `TensorTransition` 保持不可变，不塞入会延迟到达的历史归因；历史监督进入独立
+  `CausalReplayBuffer`。
+- TD 主链路已经使用 Double DQN 和 worker-local 3-step return。
+- `EngineSnapshot` 可以精确保存并恢复 Pymunk 空间、队列、RNG 与 episode 状态；
+  正式预检执行连续物理复现。
+- 规则排序、物理反事实差值和极稀疏局部 Shapley 已接入同一个 Q 网络 optimizer。
+- 反事实只跨进程传输确定性抽样后的候选，主进程再通过跨窗口优先级池和共享 token
+  账本仲裁；完整状态分析、事件追踪和规则归因仍逐投放执行。
 
 ## 3. V1 总体结构
 
@@ -428,7 +432,8 @@ touches_left_wall / touches_right_wall / touches_floor
 worker-local 只读快照；真实 terminal 另有只供归因使用的动作后分析。环境已经缓存
 相邻分析并接入 Reward V2，collector 负责提供稳定 `TransitionKey`、调用
 `AttributionTracker` 和聚合性能统计。完整分析与事件仍不进入主 replay；独立
-`CausalReplayBuffer` 尚未实现。
+`CausalReplayBuffer` 使用身份/动作对索引和分层随机桶，容量满时保持有界淘汰，
+checkpoint 会精确恢复样本、索引状态和独立 RNG。
 
 ### 5.5 四张基础图
 
@@ -988,11 +993,11 @@ V1 不增加独立 causal head，直接约束现有 Q 动作排序，以减少�
 
 ### 13.2 替代动作
 
-每个任务最多比较三个替代动作：
+正式首轮配置中，每个任务最多比较两个替代动作，按以下顺序稳定去重：
 
 1. 左右镜像动作；
 2. 最近的结构安全动作；
-3. 当前冻结策略的 runner-up 动作。
+3. 当前冻结策略的 runner-up 动作（只有前两项去重后仍有空位时使用）。
 
 不枚举全部 15 个动作。
 
@@ -1016,21 +1021,30 @@ counterfactual_horizon_max = 12
 默认：
 
 ```text
-counterfactual_cost_ratio = 0.08
+counterfactual_cost_ratio = 0.06
 counterfactual_cost_hard_limit = 0.10
 counterfactual_min_real_steps = 256
 counterfactual_cpu_core_ratio = 0.25
 counterfactual_queue_capacity = 256
 snapshot_ring_size = 32
+counterfactual_proposal_sample_rate = 0.0625
+counterfactual_max_alternatives = 2
+counterfactual_workers = 4
 ```
 
 解释：
 
-- 反事实等价物理步不超过真实采样物理步的 8%；
+- 普通反事实等价物理步以 6% 为软预算，普通反事实与局部 Shapley 合计不得超过 10%；
 - 任何情况下不得超过 10%；
 - 每 256 个真实投放最多创建一个任务；
-- 异步反事实最多使用 25% CPU 核心；
-- 队列满时丢弃低优先级任务，不能阻塞 rollout；
+- 16 个有效 CPU 核的冻结配置使用 4 个物理归因进程，其中 1 个供 Shapley；启动器
+  同时按 affinity/cgroup 配额和 25% 比例验算，所有物理子进程各限制为 1 个 Torch
+  CPU 线程；
+- 常规 proposal 只按稳定 SHA-256 身份抽取 1/16 跨进程传输，7 级以上高价值合成
+  无条件保留；
+- 主进程候选池跨 256 步窗口保留更高优先级事件，整批完成 Shapley 路由后再按
+  `priority + proposal_id` 确定性派发，避免“第一个到达者”占用稀缺槽位；
+- 候选池或执行队列满时淘汰低优先级任务，不能阻塞 rollout；
 - 每个 worker 保存最近 32 个稳定边界的快照环。
 
 ### 13.5 局部 Shapley
@@ -1039,11 +1053,13 @@ snapshot_ring_size = 32
 
 ```text
 shapley_event_ratio_max = 0.0005
-shapley_candidate_limit = 4
+shapley_candidate_limit = 3
 shapley_paired_permutations = 4
 ```
 
-即最多选择约 0.05% 的事件，候选历史动作不超过 4 个，使用少量正反排列估计共享贡献。
+即最多选择约 0.05% 的事件，候选历史动作不超过 3 个，使用少量正反排列估计共享贡献。
+未选中的普通观察身份保存在有界 LRU；真正被 selector 选中的身份永久去重，避免长训中
+无界保存所有 proposal，又不会让已消耗 Shapley 配额的事件在 LRU 淘汰后重复进入。
 
 ## 14. 完整物理快照
 
@@ -1251,7 +1267,7 @@ Double DQN
 延迟确认和撤销
 CausalReplayBuffer
 规则 Q 排序
-8% 上限的稀疏反事实
+配置化软预算的稀疏反事实（首轮正式训练为 6%，共享硬上限为 10%）
 极稀疏局部 Shapley
 完整归因与性能日志
 ```

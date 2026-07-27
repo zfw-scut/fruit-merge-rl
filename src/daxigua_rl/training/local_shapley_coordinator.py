@@ -2,8 +2,8 @@
 
 协调器只选择最高价值且存在协同歧义的 proposal。被选中的 proposal 不再进入普通
 反事实分支；物理 token 通过注入的 ``shared_budget`` 与普通反事实共用同一
-8%/10% 账本。预算暂时不足时最多保留四个高优先级任务，rollout 主线程从不等待
-物理 worker。
+配置化软预算/硬上限账本（首轮正式训练为 6%/10%）。预算暂时不足时最多保留
+四个高优先级任务，rollout 主线程从不等待物理 worker。
 """
 
 from __future__ import annotations
@@ -12,9 +12,10 @@ import multiprocessing
 import pickle
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
+from operator import index
 
 from daxigua_rl.attribution.causal_replay import (
     CausalReplayBuffer,
@@ -25,6 +26,7 @@ from daxigua_rl.attribution.counterfactual import (
     CumulativeShapleySelector,
     FrozenTargetPolicyPayload,
     LocalShapleyConfig,
+    initialize_physics_runner_process,
 )
 from daxigua_rl.attribution.counterfactual_proposal import (
     CounterfactualProposal,
@@ -42,6 +44,18 @@ _TEMPORARY_BUDGET_REJECTIONS = {
     'external_soft_token_budget',
     'external_hard_token_budget',
 }
+
+
+def _strict_int(name, value, *, minimum=None):
+    if isinstance(value, bool):
+        raise TypeError(f'{name} must be an integer')
+    try:
+        result = index(value)
+    except TypeError as exc:
+        raise TypeError(f'{name} must be an integer') from exc
+    if minimum is not None and result < minimum:
+        raise ValueError(f'{name} must be >= {minimum}')
+    return result
 
 
 def _validate_runner(runner):
@@ -77,6 +91,74 @@ def _validate_shared_budget(shared_budget):
             f'shared_budget is missing methods: {missing!r}'
         )
     return shared_budget
+
+
+class _RecentProposalIdentityCache:
+    """同时索引 proposal/event/budget 的有界最近观察 LRU。"""
+
+    def __init__(self, capacity):
+        self.capacity = _strict_int(
+            'seen_capacity',
+            capacity,
+            minimum=1,
+        )
+        self._records = OrderedDict()
+        self._event_to_proposal = {}
+        self._budget_to_proposal = {}
+        self.eviction_count = 0
+
+    def __len__(self):
+        return len(self._records)
+
+    def contains_any(
+            self,
+            proposal_id,
+            event_identity,
+            budget_identity):
+        """检查任一近期身份；命中的记录会一起更新 LRU 新鲜度。"""
+
+        matched_proposal_ids = []
+        if proposal_id in self._records:
+            matched_proposal_ids.append(proposal_id)
+        event_match = self._event_to_proposal.get(event_identity)
+        if event_match is not None:
+            matched_proposal_ids.append(event_match)
+        budget_match = self._budget_to_proposal.get(budget_identity)
+        if budget_match is not None:
+            matched_proposal_ids.append(budget_match)
+        for matched_id in dict.fromkeys(matched_proposal_ids):
+            self._records.move_to_end(matched_id)
+        return bool(matched_proposal_ids)
+
+    def add(self, proposal_id, event_identity, budget_identity):
+        if self.contains_any(
+                proposal_id,
+                event_identity,
+                budget_identity):
+            raise RuntimeError(
+                'recent Shapley identity cache received a duplicate'
+            )
+        self._records[proposal_id] = (
+            event_identity,
+            budget_identity,
+        )
+        self._event_to_proposal[event_identity] = proposal_id
+        self._budget_to_proposal[budget_identity] = proposal_id
+        if len(self._records) <= self.capacity:
+            return 0
+
+        (
+            evicted_proposal_id,
+            (
+                evicted_event_identity,
+                evicted_budget_identity,
+            ),
+        ) = self._records.popitem(last=False)
+        del self._event_to_proposal[evicted_event_identity]
+        del self._budget_to_proposal[evicted_budget_identity]
+        self.eviction_count += 1
+        del evicted_proposal_id
+        return 1
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -115,6 +197,7 @@ class LocalShapleyPoll:
 class LocalShapleyActivityStats:
     proposals_received: int
     proposals_duplicate: int
+    seen_cache_evictions: int
     proposals_eligible: int
     proposals_selected: int
     selector_quota_rejected: int
@@ -148,6 +231,10 @@ class LocalShapleyCoordinatorStats:
     observed_event_count: int
     selected_event_count: int
     selected_ratio: float
+    recent_seen_capacity: int
+    recent_seen_count: int
+    recent_seen_eviction_count: int
+    permanent_selected_identity_count: int
     cumulative: LocalShapleyActivityStats
     window: LocalShapleyActivityStats
 
@@ -164,6 +251,7 @@ class _Accumulator:
     _FIELDS = (
         'proposals_received',
         'proposals_duplicate',
+        'seen_cache_evictions',
         'proposals_eligible',
         'proposals_selected',
         'selector_quota_rejected',
@@ -236,6 +324,7 @@ class LocalShapleyCoordinator:
             executor=None,
             runner=run_local_shapley_task,
             pending_capacity=4,
+            seen_capacity=16_384,
             enabled=True):
         if not isinstance(
                 causal_replay_buffer,
@@ -251,6 +340,11 @@ class LocalShapleyCoordinator:
         self.pending_capacity = int(pending_capacity)
         if self.pending_capacity < 1 or self.pending_capacity > 4:
             raise ValueError('pending_capacity must be between 1 and 4')
+        self.seen_capacity = _strict_int(
+            'seen_capacity',
+            seen_capacity,
+            minimum=1,
+        )
         self.enabled = bool(enabled)
         self.runner = _validate_runner(runner)
         self.selector = CumulativeShapleySelector(self.config)
@@ -261,6 +355,7 @@ class LocalShapleyCoordinator:
             executor = ProcessPoolExecutor(
                 max_workers=1,
                 mp_context=context,
+                initializer=initialize_physics_runner_process,
             )
         if self.enabled and not callable(
                 getattr(executor, 'submit', None)):
@@ -271,12 +366,14 @@ class LocalShapleyCoordinator:
         self._closed = False
         self._active = None
         self._pending = {}
-        self._seen_proposal_ids = set()
-        self._seen_event_keys = set()
-        self._seen_budget_keys = set()
-        self._selected_by_proposal = {}
-        self._selected_by_event = {}
-        self._selected_by_budget = {}
+        self._recent_seen = _RecentProposalIdentityCache(
+            self.seen_capacity
+        )
+        # selected 只占正式 0.05% 配额，永久保存三类身份，确保近期 LRU
+        # 淘汰后也绝不重复消耗 Shapley 预算。
+        self._selected_proposal_ids = set()
+        self._selected_event_keys = set()
+        self._selected_budget_keys = set()
         self._finished_task_ids = set()
         self._cumulative = _Accumulator()
         self._window = _Accumulator()
@@ -337,28 +434,19 @@ class LocalShapleyCoordinator:
             self._increment('proposals_received')
             event_identity = self._event_identity(proposal)
             budget_identity = stable_budget_key(proposal.budget_key)
-            duplicate = (
-                proposal.proposal_id in self._seen_proposal_ids
-                or event_identity in self._seen_event_keys
-                or budget_identity in self._seen_budget_keys
+            selected_duplicate = (
+                proposal.proposal_id in self._selected_proposal_ids
+                or event_identity in self._selected_event_keys
+                or budget_identity in self._selected_budget_keys
             )
-            if duplicate:
+            recent_duplicate = self._recent_seen.contains_any(
+                proposal.proposal_id,
+                event_identity,
+                budget_identity,
+            )
+            if selected_duplicate or recent_duplicate:
                 self._increment('proposals_duplicate')
                 self._drop('duplicate_event_or_budget')
-                selected = bool(
-                    self._selected_by_proposal.get(
-                        proposal.proposal_id,
-                        False,
-                    )
-                    or self._selected_by_event.get(
-                        event_identity,
-                        False,
-                    )
-                    or self._selected_by_budget.get(
-                        budget_identity,
-                        False,
-                    )
-                )
                 return LocalShapleySubmission(
                     proposal_id=proposal.proposal_id,
                     observed=False,
@@ -366,15 +454,12 @@ class LocalShapleyCoordinator:
                         proposal,
                         self.config,
                     ),
-                    selected=selected,
+                    selected=selected_duplicate,
                     accepted=False,
                     pending=False,
                     drop_reason='duplicate_event_or_budget',
                 )
 
-            self._seen_proposal_ids.add(proposal.proposal_id)
-            self._seen_event_keys.add(event_identity)
-            self._seen_budget_keys.add(budget_identity)
             eligible = self._eligible(proposal, self.config)
             if eligible:
                 self._increment('proposals_eligible')
@@ -394,9 +479,18 @@ class LocalShapleyCoordinator:
             else:
                 reason = None
 
-            self._selected_by_proposal[proposal.proposal_id] = selected
-            self._selected_by_event[event_identity] = selected
-            self._selected_by_budget[budget_identity] = selected
+            if selected:
+                self._selected_proposal_ids.add(proposal.proposal_id)
+                self._selected_event_keys.add(event_identity)
+                self._selected_budget_keys.add(budget_identity)
+            else:
+                evicted = self._recent_seen.add(
+                    proposal.proposal_id,
+                    event_identity,
+                    budget_identity,
+                )
+                if evicted:
+                    self._increment('seen_cache_evictions', evicted)
             if not selected:
                 self._drop(reason)
                 return LocalShapleySubmission(
@@ -725,6 +819,14 @@ class LocalShapleyCoordinator:
                 self.selector.selected_event_count
             ),
             selected_ratio=float(self.selector.selected_ratio),
+            recent_seen_capacity=self.seen_capacity,
+            recent_seen_count=len(self._recent_seen),
+            recent_seen_eviction_count=(
+                self._recent_seen.eviction_count
+            ),
+            permanent_selected_identity_count=len(
+                self._selected_proposal_ids
+            ),
             cumulative=self._cumulative.snapshot(),
             window=self._window.snapshot(),
         )
@@ -750,6 +852,14 @@ class LocalShapleyCoordinator:
             'observed_events': stats.observed_event_count,
             'selected_events': stats.selected_event_count,
             'selected_ratio': stats.selected_ratio,
+            'recent_seen_capacity': stats.recent_seen_capacity,
+            'recent_seen_count': stats.recent_seen_count,
+            'recent_seen_evictions': (
+                stats.recent_seen_eviction_count
+            ),
+            'permanent_selected_identities': (
+                stats.permanent_selected_identity_count
+            ),
             'active': int(stats.active_task_id is not None),
             'pending': stats.pending_task_count,
             'completed': stats.cumulative.results_completed,

@@ -20,6 +20,7 @@ import math
 import os
 import platform
 import random
+import shutil
 import tempfile
 from argparse import Namespace
 from dataclasses import asdict, dataclass, is_dataclass
@@ -465,6 +466,50 @@ def _validated_rng_state(state):
     )
 
 
+def validate_rng_state(state):
+    """只读校验 RNG checkpoint 结构和 Python/CPU 状态可恢复性。"""
+
+    python_state, cpu_state, cuda_states = _validated_rng_state(state)
+    try:
+        probe_python = random.Random()
+        probe_python.setstate(python_state)
+    except (TypeError, ValueError) as exc:
+        raise CheckpointError('invalid Python RNG state') from exc
+    if (
+            cpu_state.device.type != 'cpu'
+            or cpu_state.dtype != torch.uint8
+            or cpu_state.ndim != 1
+            or cpu_state.numel() <= 0):
+        raise CheckpointError(
+            'torch_cpu RNG state must be a non-empty CPU uint8 vector'
+        )
+    try:
+        probe_torch = torch.Generator(device='cpu')
+        probe_torch.set_state(cpu_state)
+    except (TypeError, RuntimeError) as exc:
+        raise CheckpointError('invalid torch CPU RNG state') from exc
+    for index, cuda_state in enumerate(cuda_states):
+        if (
+                cuda_state.device.type != 'cpu'
+                or cuda_state.dtype != torch.uint8
+                or cuda_state.ndim != 1
+                or cuda_state.numel() <= 0):
+            raise CheckpointError(
+                f'torch_cuda[{index}] RNG state must be a non-empty '
+                'CPU uint8 vector'
+            )
+    return {
+        'schema_version': RNG_STATE_SCHEMA_VERSION,
+        'python_state_valid': True,
+        'torch_cpu_state_bytes': int(cpu_state.numel()),
+        'cuda_device_count': len(cuda_states),
+        'torch_cuda_state_bytes': [
+            int(item.numel())
+            for item in cuda_states
+        ],
+    }
+
+
 def restore_rng_state(state, *, strict_cuda=True):
     """恢复 RNG 状态。
 
@@ -663,6 +708,58 @@ def atomic_torch_save(value, path):
             pass
         raise
     return destination
+
+
+def atomic_clone_file(source, destination):
+    """原子物化同卷文件，优先硬链接，失败时退化为一次字节复制。
+
+    大型训练 checkpoint 会同时保留 ``latest``、周期 ``step`` 和可选 ``best``。
+    它们在同一个保存点内容完全相同，因此先把 payload 只序列化到 ``latest``，
+    再用本函数创建其它稳定名字，可避免重复的 pickle/torch 序列化。硬链接仍保留
+    正确的版本语义：下一次原子替换 ``latest`` 时，旧 step/best 继续指向旧 inode。
+    """
+
+    source = Path(source)
+    destination = Path(destination)
+    if source.resolve() == destination.resolve():
+        return destination, 'same_file'
+    if not source.is_file():
+        raise FileNotFoundError(source)
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{destination.name}.',
+        suffix='.tmp',
+        dir=destination.parent,
+    )
+    os.close(descriptor)
+    temporary_path = Path(temporary_name)
+    try:
+        # os.link 要求目标不存在；mkstemp 只用于安全预留随机名字。
+        temporary_path.unlink()
+        try:
+            os.link(source, temporary_path)
+            method = 'hardlink'
+        except OSError:
+            with (
+                    source.open('rb') as source_file,
+                    temporary_path.open('xb') as destination_file):
+                shutil.copyfileobj(
+                    source_file,
+                    destination_file,
+                    length=8 * 1024 * 1024,
+                )
+                destination_file.flush()
+                os.fsync(destination_file.fileno())
+            method = 'copy'
+        os.replace(temporary_path, destination)
+    except BaseException:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    return destination, method
 
 
 def save_training_checkpoint(

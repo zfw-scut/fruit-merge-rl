@@ -83,6 +83,7 @@ def _worker_init(
         policy_version,
         counterfactual_enabled,
         counterfactual_ring_size,
+        counterfactual_proposal_sample_rate,
         episode_id_start):
     """初始化 worker 进程内长期复用的环境、模型和 collector。"""
 
@@ -121,6 +122,9 @@ def _worker_init(
         policy_version=policy_version,
         counterfactual_enabled=counterfactual_enabled,
         counterfactual_ring_size=counterfactual_ring_size,
+        counterfactual_proposal_sample_rate=(
+            counterfactual_proposal_sample_rate
+        ),
         episode_id_start=episode_id_start,
     )
 
@@ -146,7 +150,7 @@ def _worker_collect(step_count, epsilon):
 
     step_count = int(step_count)
     if step_count <= 0:
-        return _save_to_bytes(((), (), ())), RolloutStats(
+        return (_save_to_bytes(((), ())), b''), RolloutStats(
             steps=0,
             episodes=0,
             total_reward=0.0,
@@ -177,20 +181,16 @@ def _worker_collect(step_count, epsilon):
         else ()
     )
     proposals = _WORKER_COLLECTOR.drain_counterfactual_proposals()
-    # proposal 很稀疏；仅在实际生成时额外测一次其独立序列化体积，避免把同批
-    # transition/causal bytes 全部误记到反事实监控项。真正传输仍只有下面一个
-    # 共享 payload，图引用继续享受 torch.save memo 去重。
-    proposal_serialized_bytes = (
-        len(_save_to_bytes(proposals))
+    # proposal 独立序列化后直接作为传输 payload 返回：其长度就是实际跨进程
+    # 字节数，同时避免为了测量体积把完整快照对象再序列化第二遍。
+    proposal_payload = (
+        _save_to_bytes(proposals)
         if proposals
-        else 0
+        else b''
     )
-    # transition、causal sample 和 proposal 共用一次 torch.save，保留同一
-    # GraphTensor 的 pickle memo 引用，避免动作图和物理来源重复存储。
-    payload = _save_to_bytes((
+    transition_payload = _save_to_bytes((
         local_buffer.to_tuple(),
         causal_samples,
-        proposals,
     ))
     stats = replace(
         stats,
@@ -198,11 +198,11 @@ def _worker_collect(step_count, epsilon):
         causal_buffer_size=len(causal_samples),
         counterfactual_proposals_serialized=len(proposals),
         counterfactual_proposal_serialized_bytes=(
-            proposal_serialized_bytes
+            len(proposal_payload)
         ),
         counterfactual_proposal_outbox_size=len(proposals),
     )
-    return payload, stats
+    return (transition_payload, proposal_payload), stats
 
 
 def _worker_finalize_attribution():
@@ -255,6 +255,7 @@ class ParallelRolloutCollector:
             policy_version=None,
             counterfactual_enabled=False,
             counterfactual_ring_size=32,
+            counterfactual_proposal_sample_rate=1.0,
             episode_id_start=0):
         """创建多进程 collector。
 
@@ -270,6 +271,8 @@ class ParallelRolloutCollector:
         - `policy_version`: 首次模型同步前使用的采样策略版本。
         - `counterfactual_enabled`: 是否让 worker 捕获快照并输出稀疏 proposal。
         - `counterfactual_ring_size`: 每个 worker 的稳定边界历史环容量。
+        - `counterfactual_proposal_sample_rate`: 常规 proposal 的稳定传输抽样率；
+          高价值合成候选始终保留。
         - `episode_id_start`: 每个 worker 恢复后首局使用的 episode id。
         """
 
@@ -298,6 +301,17 @@ class ParallelRolloutCollector:
                 raise ValueError('policy_version must not be empty')
         if not isinstance(counterfactual_enabled, bool):
             raise TypeError('counterfactual_enabled must be bool')
+        if isinstance(counterfactual_proposal_sample_rate, bool):
+            raise TypeError(
+                'counterfactual_proposal_sample_rate must be a real number'
+            )
+        counterfactual_proposal_sample_rate = float(
+            counterfactual_proposal_sample_rate
+        )
+        if not 0.0 <= counterfactual_proposal_sample_rate <= 1.0:
+            raise ValueError(
+                'counterfactual_proposal_sample_rate must be in [0, 1]'
+            )
         counterfactual_ring_size = int(counterfactual_ring_size)
         if counterfactual_ring_size <= 0:
             raise ValueError(
@@ -321,6 +335,9 @@ class ParallelRolloutCollector:
         self.policy_version = policy_version
         self.counterfactual_enabled = counterfactual_enabled
         self.counterfactual_ring_size = counterfactual_ring_size
+        self.counterfactual_proposal_sample_rate = (
+            counterfactual_proposal_sample_rate
+        )
         self.episode_id_start = episode_id_start
         self._counterfactual_proposal_outbox = []
         self._closed = False
@@ -348,11 +365,18 @@ class ParallelRolloutCollector:
                     self.policy_version,
                     self.counterfactual_enabled,
                     self.counterfactual_ring_size,
+                    self.counterfactual_proposal_sample_rate,
                     self.episode_id_start,
                 ),
             )
             for worker_index in range(self.worker_count)
         )
+
+    @property
+    def model_synced(self):
+        """主进程模型是否至少成功同步到全部 rollout worker 一次。"""
+
+        return self._model_synced
 
     def close(self):
         """关闭 worker 进程池。"""
@@ -471,11 +495,17 @@ class ParallelRolloutCollector:
         worker_stats = []
         all_causal_samples = []
         all_proposals = []
-        for worker_index, (payload_bytes, stats) in zip(
+        for worker_index, (payloads, stats) in zip(
                 handle.worker_indices,
                 results):
-            transitions, causal_samples, proposals = _load_from_bytes(
-                payload_bytes
+            transition_payload, proposal_payload = payloads
+            transitions, causal_samples = _load_from_bytes(
+                transition_payload
+            )
+            proposals = (
+                _load_from_bytes(proposal_payload)
+                if proposal_payload
+                else ()
             )
             if (
                     len(transitions)
@@ -642,6 +672,8 @@ def _merge_rollout_stats(
     counterfactual_proposal_confirmed_event_count = 0
     counterfactual_proposal_budget_count = 0
     counterfactual_proposals_generated = 0
+    counterfactual_proposals_transfer_selected = 0
+    counterfactual_proposals_transfer_throttled = 0
     counterfactual_proposals_serialized = 0
     counterfactual_proposal_serialized_bytes = 0
     counterfactual_proposal_outbox_size = 0
@@ -790,6 +822,12 @@ def _merge_rollout_stats(
         counterfactual_proposals_generated += (
             stats.counterfactual_proposals_generated
         )
+        counterfactual_proposals_transfer_selected += (
+            stats.counterfactual_proposals_transfer_selected
+        )
+        counterfactual_proposals_transfer_throttled += (
+            stats.counterfactual_proposals_transfer_throttled
+        )
         counterfactual_proposals_serialized += (
             stats.counterfactual_proposals_serialized
         )
@@ -886,6 +924,12 @@ def _merge_rollout_stats(
         ),
         counterfactual_proposals_generated=(
             counterfactual_proposals_generated
+        ),
+        counterfactual_proposals_transfer_selected=(
+            counterfactual_proposals_transfer_selected
+        ),
+        counterfactual_proposals_transfer_throttled=(
+            counterfactual_proposals_transfer_throttled
         ),
         counterfactual_proposals_serialized=(
             counterfactual_proposals_serialized

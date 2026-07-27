@@ -323,6 +323,71 @@ class CheckpointingTest(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), b'old-checkpoint')
             self.assertEqual(list(root.glob('*.tmp')), [])
 
+    def test_atomic_clone_hardlink_keeps_old_version_after_source_replace(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / 'latest.pt'
+            step = root / 'step_0001.pt'
+            checkpointing.atomic_torch_save({'version': 1}, source)
+
+            cloned, method = checkpointing.atomic_clone_file(source, step)
+
+            self.assertEqual(cloned, step)
+            self.assertIn(method, {'hardlink', 'copy'})
+            self.assertEqual(
+                torch.load(
+                    step,
+                    map_location='cpu',
+                    weights_only=False,
+                )['version'],
+                1,
+            )
+            if method == 'hardlink':
+                self.assertEqual(os.stat(source).st_ino, os.stat(step).st_ino)
+
+            checkpointing.atomic_torch_save({'version': 2}, source)
+            self.assertEqual(
+                torch.load(
+                    source,
+                    map_location='cpu',
+                    weights_only=False,
+                )['version'],
+                2,
+            )
+            self.assertEqual(
+                torch.load(
+                    step,
+                    map_location='cpu',
+                    weights_only=False,
+                )['version'],
+                1,
+            )
+            self.assertEqual(list(root.glob('*.tmp')), [])
+
+    def test_atomic_clone_falls_back_to_copy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / 'latest.pt'
+            destination = root / 'best.pt'
+            source.write_bytes(b'checkpoint-bytes')
+
+            with mock.patch.object(
+                    checkpointing.os,
+                    'link',
+                    side_effect=OSError('unsupported')):
+                cloned, method = checkpointing.atomic_clone_file(
+                    source,
+                    destination,
+                )
+
+            self.assertEqual(cloned, destination)
+            self.assertEqual(method, 'copy')
+            self.assertEqual(
+                destination.read_bytes(),
+                b'checkpoint-bytes',
+            )
+            self.assertEqual(list(root.glob('*.tmp')), [])
+
     def test_optional_component_without_state_or_manifest_is_skipped(self):
         snapshots = checkpointing.capture_optional_components(
             {'cold_replay': object()},

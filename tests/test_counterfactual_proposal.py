@@ -10,6 +10,7 @@ from daxigua.core.engine import HeadlessGame
 from daxigua_rl.attribution.counterfactual_proposal import (
     CounterfactualProposal,
     CounterfactualProposalBuilder,
+    should_transfer_counterfactual_proposal,
     stable_counterfactual_proposal_id,
 )
 from daxigua_rl.attribution.schema import MergeLineageRecord, MergeValueKey
@@ -161,6 +162,73 @@ class CounterfactualProposalContractTest(unittest.TestCase):
             second.stats.reason_count('duplicate_budget'),
             1,
         )
+
+    def test_transfer_sampling_is_stable_and_keeps_critical_proposals(self):
+        ordinary_key = TransitionKey(0, 2, 0)
+        _game, context, snapshot, outcome = _game_entry(ordinary_key)
+        ordinary_builder = CounterfactualProposalBuilder()
+        ordinary_builder.remember(
+            context=context,
+            snapshot=snapshot,
+            factual_outcome=outcome,
+        )
+        ordinary = ordinary_builder.build((_event(
+            key=ordinary_key,
+            placement_confidence=0.65,
+        ),))[0]
+
+        self.assertFalse(should_transfer_counterfactual_proposal(
+            ordinary,
+            sample_rate=0.0,
+        ))
+        self.assertTrue(should_transfer_counterfactual_proposal(
+            ordinary,
+            sample_rate=1.0,
+        ))
+        decisions = tuple(
+            should_transfer_counterfactual_proposal(
+                ordinary,
+                sample_rate=0.0625,
+            )
+            for _ in range(4)
+        )
+        self.assertEqual(len(set(decisions)), 1)
+
+        critical_key = TransitionKey(0, 3, 0)
+        _game, context, snapshot, outcome = _game_entry(critical_key)
+        budget_key = MergeValueKey(critical_key, 0)
+        critical_builder = CounterfactualProposalBuilder()
+        critical_builder.remember(
+            context=context,
+            snapshot=snapshot,
+            factual_outcome=outcome,
+        )
+        critical = critical_builder.build(
+            (_event(
+                key=critical_key,
+                budget_key=budget_key,
+                utility=merge_utility(7),
+            ),),
+            merge_records=(MergeLineageRecord(
+                value_key=budget_key,
+                source_fruit_ids=(1, 2),
+                new_fruit_id=3,
+                new_level=7,
+                utility=merge_utility(7),
+                root_material_weights=((1, 0.5), (2, 0.5)),
+                chain_depth=1,
+            ),),
+        )[0]
+        self.assertTrue(should_transfer_counterfactual_proposal(
+            critical,
+            sample_rate=0.0,
+        ))
+
+        with self.assertRaises(ValueError):
+            should_transfer_counterfactual_proposal(
+                ordinary,
+                sample_rate=1.01,
+            )
 
     def test_ring_expiry_skips_instead_of_fabricating_proposal(self):
         first_key = TransitionKey(0, 4, 0)

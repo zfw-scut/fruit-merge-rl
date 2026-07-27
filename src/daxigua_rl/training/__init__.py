@@ -19,6 +19,7 @@ __all__ = [
     'DQNTrainer',
     'DQNTrainerConfig',
     'DQNTrainStats',
+    'effective_cpu_count',
     'EpsilonGreedyPolicy',
     'NStepTransitionAccumulator',
     'ParallelCollectHandle',
@@ -42,6 +43,7 @@ def __getattr__(name):
             'CounterfactualCoordinatorPoll',
             'CounterfactualCoordinatorStats',
             'CounterfactualCoordinatorSubmission',
+            'effective_cpu_count',
             'recommended_counterfactual_worker_count'}:
         from .counterfactual_coordinator import (
             CounterfactualCoordinator,
@@ -49,6 +51,7 @@ def __getattr__(name):
             CounterfactualCoordinatorPoll,
             CounterfactualCoordinatorStats,
             CounterfactualCoordinatorSubmission,
+            effective_cpu_count,
             recommended_counterfactual_worker_count,
         )
 
@@ -66,6 +69,7 @@ def __getattr__(name):
             'CounterfactualCoordinatorSubmission': (
                 CounterfactualCoordinatorSubmission
             ),
+            'effective_cpu_count': effective_cpu_count,
             'recommended_counterfactual_worker_count': (
                 recommended_counterfactual_worker_count
             ),

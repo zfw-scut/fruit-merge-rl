@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import math
 import random
@@ -529,7 +530,7 @@ class CausalReplayBuffer:
         )
         self._seed = seed
         self._rng = random.Random(seed)
-        self._items = []
+        self._reset_storage()
         self._stratum_cursor = self._rng.randrange(len(CAUSAL_STRATA))
         self._cause_cursors = defaultdict(int)
         self._counterfactual_override_count = 0
@@ -537,6 +538,38 @@ class CausalReplayBuffer:
         self._eviction_count = 0
         self._rule_empirical_agreement_count = 0
         self._rule_empirical_disagreement_count = 0
+
+    def _reset_storage(self):
+        """初始化主顺序表及所有派生索引。
+
+        ``_items`` 的 key 是只增不减的内部 entry id，因此 OrderedDict 顺序就是
+        replay 的从旧到新顺序。其余结构全部是可从 ``_items`` 重建的索引：
+
+        - pair / identity 索引使常规去重与经验优先级查询不再扫描全池；
+        - bucket 的 dense id 数组支持 O(1) 随机下标和 swap-remove；
+        - bucket 的 OrderedDict 保留最旧 entry，供精确淘汰；
+        - 每个 stratum 的 lazy heap 按 ``(-count, oldest_id)`` 找最拥挤且最旧
+          的 cause bucket。
+        """
+
+        self._items = OrderedDict()
+        self._next_entry_id = 0
+        self._identity_index = defaultdict(set)
+        self._pair_index = defaultdict(set)
+        self._pair_empirical_priority_counts = defaultdict(Counter)
+        self._pair_rule_preference_counts = defaultdict(Counter)
+        self._bucket_entry_ids = defaultdict(list)
+        self._bucket_positions = defaultdict(dict)
+        self._bucket_order = defaultdict(OrderedDict)
+        self._stratum_counts = Counter()
+        self._cause_counts = Counter()
+        self._cause_type_counts = Counter()
+        self._supervision_kind_counts = Counter()
+        self._causes_by_stratum = defaultdict(set)
+        self._eviction_heaps = {
+            stratum: []
+            for stratum in CAUSAL_STRATA
+        }
 
     def __len__(self):
         return len(self._items)
@@ -579,6 +612,163 @@ class CausalReplayBuffer:
             'shapley': 2,
         }[sample.supervision_kind]
 
+    @staticmethod
+    def _bucket_key(sample):
+        return sample.stratum, sample.cause_type
+
+    def _push_eviction_heap_entry(self, bucket):
+        stratum, cause_type = bucket
+        order = self._bucket_order.get(bucket)
+        if order:
+            heapq.heappush(
+                self._eviction_heaps[stratum],
+                (-len(order), next(iter(order)), cause_type),
+            )
+        self._compact_eviction_heap_if_needed(stratum)
+
+    def _compact_eviction_heap_if_needed(self, stratum):
+        """限制 lazy heap 的陈旧节点数量，保持长期训练内存有界。"""
+
+        active_causes = len(self._causes_by_stratum.get(stratum, ()))
+        heap = self._eviction_heaps[stratum]
+        if len(heap) <= max(64, 4 * active_causes):
+            return
+        rebuilt = []
+        for cause_type in self._causes_by_stratum[stratum]:
+            bucket = stratum, cause_type
+            order = self._bucket_order[bucket]
+            rebuilt.append(
+                (-len(order), next(iter(order)), cause_type)
+            )
+        heapq.heapify(rebuilt)
+        self._eviction_heaps[stratum] = rebuilt
+
+    def _peek_eviction_heap(self, stratum):
+        heap = self._eviction_heaps[stratum]
+        while heap:
+            negative_count, oldest_id, cause_type = heap[0]
+            bucket = stratum, cause_type
+            order = self._bucket_order.get(bucket)
+            if (
+                    order
+                    and -negative_count == len(order)
+                    and oldest_id == next(iter(order))):
+                return negative_count, oldest_id, cause_type
+            heapq.heappop(heap)
+        raise RuntimeError(
+            f'causal replay eviction index is empty for {stratum!r}'
+        )
+
+    def _index_entry(self, entry_id, sample):
+        identity = self._identity_key(sample)
+        pair_key = sample.pair_key
+        bucket = self._bucket_key(sample)
+
+        self._identity_index[identity].add(entry_id)
+        self._pair_index[pair_key].add(entry_id)
+        if sample.supervision_kind == 'rule':
+            self._pair_rule_preference_counts[pair_key][
+                sample.preferred_action_offset
+            ] += 1
+        else:
+            priority = self._supervision_priority(sample)
+            self._pair_empirical_priority_counts[pair_key][priority] += 1
+
+        dense_ids = self._bucket_entry_ids[bucket]
+        self._bucket_positions[bucket][entry_id] = len(dense_ids)
+        dense_ids.append(entry_id)
+        self._bucket_order[bucket][entry_id] = None
+        self._stratum_counts[sample.stratum] += 1
+        self._cause_counts[bucket] += 1
+        self._cause_type_counts[sample.cause_type] += 1
+        self._supervision_kind_counts[sample.supervision_kind] += 1
+        self._causes_by_stratum[sample.stratum].add(sample.cause_type)
+        self._push_eviction_heap_entry(bucket)
+
+    @staticmethod
+    def _discard_index_entry(index, key, entry_id):
+        entry_ids = index[key]
+        entry_ids.remove(entry_id)
+        if not entry_ids:
+            del index[key]
+
+    @staticmethod
+    def _decrement_counter_index(index, key, counter_key):
+        counts = index[key]
+        counts[counter_key] -= 1
+        if counts[counter_key] == 0:
+            del counts[counter_key]
+        if not counts:
+            del index[key]
+
+    def _remove_entry(self, entry_id):
+        sample = self._items.pop(entry_id)
+        identity = self._identity_key(sample)
+        pair_key = sample.pair_key
+        bucket = self._bucket_key(sample)
+
+        self._discard_index_entry(
+            self._identity_index,
+            identity,
+            entry_id,
+        )
+        self._discard_index_entry(
+            self._pair_index,
+            pair_key,
+            entry_id,
+        )
+        if sample.supervision_kind == 'rule':
+            self._decrement_counter_index(
+                self._pair_rule_preference_counts,
+                pair_key,
+                sample.preferred_action_offset,
+            )
+        else:
+            self._decrement_counter_index(
+                self._pair_empirical_priority_counts,
+                pair_key,
+                self._supervision_priority(sample),
+            )
+
+        dense_ids = self._bucket_entry_ids[bucket]
+        positions = self._bucket_positions[bucket]
+        position = positions.pop(entry_id)
+        last_id = dense_ids.pop()
+        if position < len(dense_ids):
+            dense_ids[position] = last_id
+            positions[last_id] = position
+        del self._bucket_order[bucket][entry_id]
+
+        self._stratum_counts[sample.stratum] -= 1
+        if self._stratum_counts[sample.stratum] == 0:
+            del self._stratum_counts[sample.stratum]
+        self._cause_counts[bucket] -= 1
+        self._cause_type_counts[sample.cause_type] -= 1
+        if self._cause_type_counts[sample.cause_type] == 0:
+            del self._cause_type_counts[sample.cause_type]
+        self._supervision_kind_counts[sample.supervision_kind] -= 1
+        if self._supervision_kind_counts[sample.supervision_kind] == 0:
+            del self._supervision_kind_counts[sample.supervision_kind]
+
+        if self._cause_counts[bucket] == 0:
+            del self._cause_counts[bucket]
+            del self._bucket_entry_ids[bucket]
+            del self._bucket_positions[bucket]
+            del self._bucket_order[bucket]
+            causes = self._causes_by_stratum[sample.stratum]
+            causes.remove(sample.cause_type)
+            if not causes:
+                del self._causes_by_stratum[sample.stratum]
+        self._push_eviction_heap_entry(bucket)
+        return sample
+
+    def _append_entry(self, sample):
+        entry_id = self._next_entry_id
+        self._next_entry_id += 1
+        self._items[entry_id] = sample
+        self._index_entry(entry_id, sample)
+        return entry_id
+
     def push(self, sample):
         """写入样本；返回样本是否成为当前 replay 的有效内容。
 
@@ -591,27 +781,25 @@ class CausalReplayBuffer:
                 f'sample must be CausalSample, got {type(sample)!r}'
             )
 
-        pair_matches = tuple(
-            offset
-            for offset, existing in enumerate(self._items)
-            if existing.pair_key == sample.pair_key
-        )
+        pair_key = sample.pair_key
+        pair_matches = self._pair_index.get(pair_key, ())
         if sample.supervision_kind != 'rule':
-            for offset in pair_matches:
-                existing = self._items[offset]
-                if existing.supervision_kind != 'rule':
-                    continue
-                if (
-                        existing.preferred_action_offset
-                        == sample.preferred_action_offset):
-                    self._rule_empirical_agreement_count += 1
-                else:
-                    self._rule_empirical_disagreement_count += 1
+            rule_preferences = self._pair_rule_preference_counts.get(
+                pair_key,
+                {},
+            )
+            agreement_count = rule_preferences.get(
+                sample.preferred_action_offset,
+                0,
+            )
+            rule_count = sum(rule_preferences.values())
+            self._rule_empirical_agreement_count += agreement_count
+            self._rule_empirical_disagreement_count += (
+                rule_count - agreement_count
+            )
         incoming_priority = self._supervision_priority(sample)
-        existing_empirical_priorities = tuple(
-            self._supervision_priority(self._items[offset])
-            for offset in pair_matches
-            if self._items[offset].supervision_kind != 'rule'
+        existing_empirical_priorities = (
+            self._pair_empirical_priority_counts.get(pair_key, {})
         )
 
         if (
@@ -625,33 +813,27 @@ class CausalReplayBuffer:
             self._ignored_weaker_rule_count += 1
             return False
 
-        remove_offsets = set()
-        identity = self._identity_key(sample)
-        for offset, existing in enumerate(self._items):
-            if self._identity_key(existing) == identity:
-                remove_offsets.add(offset)
+        remove_entry_ids = set(
+            self._identity_index.get(self._identity_key(sample), ())
+        )
         if sample.supervision_kind != 'rule':
-            for offset in pair_matches:
-                existing = self._items[offset]
+            for entry_id in pair_matches:
+                existing = self._items[entry_id]
                 if (
                         self._supervision_priority(existing)
                         <= incoming_priority):
-                    remove_offsets.add(offset)
+                    remove_entry_ids.add(entry_id)
 
         removed_rule = any(
-            self._items[offset].supervision_kind == 'rule'
-            for offset in remove_offsets
+            self._items[entry_id].supervision_kind == 'rule'
+            for entry_id in remove_entry_ids
         )
         if removed_rule:
             self._counterfactual_override_count += 1
-        if remove_offsets:
-            self._items = [
-                existing
-                for offset, existing in enumerate(self._items)
-                if offset not in remove_offsets
-            ]
+        for entry_id in sorted(remove_entry_ids):
+            self._remove_entry(entry_id)
 
-        self._items.append(sample)
+        self._append_entry(sample)
         while len(self._items) > self.capacity:
             self._evict_one()
         return True
@@ -667,31 +849,20 @@ class CausalReplayBuffer:
     def _evict_one(self):
         """从最拥挤 stratum/cause 中淘汰最旧值，保护稀有类别。"""
 
-        stratum_counts = Counter(item.stratum for item in self._items)
-        maximum_stratum_count = max(stratum_counts.values())
-        crowded_strata = {
-            name
-            for name, count in stratum_counts.items()
-            if count == maximum_stratum_count
-        }
-
-        cause_counts = Counter(
-            (item.stratum, item.cause_type)
-            for item in self._items
-            if item.stratum in crowded_strata
+        if not self._items:
+            raise RuntimeError('cannot evict from an empty causal replay')
+        maximum_stratum_count = max(self._stratum_counts.values())
+        crowded_strata = (
+            stratum
+            for stratum in CAUSAL_STRATA
+            if self._stratum_counts.get(stratum, 0)
+            == maximum_stratum_count
         )
-        maximum_cause_count = max(cause_counts.values())
-        crowded_causes = {
-            key
-            for key, count in cause_counts.items()
-            if count == maximum_cause_count
-        }
-        eviction_offset = next(
-            offset
-            for offset, item in enumerate(self._items)
-            if (item.stratum, item.cause_type) in crowded_causes
+        _, eviction_id, _ = min(
+            self._peek_eviction_heap(stratum)
+            for stratum in crowded_strata
         )
-        self._items.pop(eviction_offset)
+        self._remove_entry(eviction_id)
         self._eviction_count += 1
 
     def sample(self, batch_size):
@@ -708,40 +879,59 @@ class CausalReplayBuffer:
                 f'replay with {len(self)} items'
             )
 
-        available = set(range(len(self._items)))
         result = []
         stratum_order = (
             CAUSAL_STRATA[self._stratum_cursor:]
             + CAUSAL_STRATA[:self._stratum_cursor]
         )
+        available_causes = {
+            stratum: sorted(
+                self._causes_by_stratum.get(stratum, ())
+            )
+            for stratum in CAUSAL_STRATA
+        }
+        bucket_draw_states = {}
 
         while len(result) < batch_size:
             made_progress = False
             for stratum in stratum_order:
                 if len(result) >= batch_size:
                     break
-                causes = sorted({
-                    self._items[offset].cause_type
-                    for offset in available
-                    if self._items[offset].stratum == stratum
-                })
+                causes = available_causes[stratum]
                 if not causes:
                     continue
 
                 cursor = self._cause_cursors[stratum] % len(causes)
                 cause = causes[cursor]
                 self._cause_cursors[stratum] = cursor + 1
-                candidates = [
-                    offset
-                    for offset in available
-                    if (
-                        self._items[offset].stratum == stratum
-                        and self._items[offset].cause_type == cause
+                bucket = stratum, cause
+                dense_ids = self._bucket_entry_ids[bucket]
+                draw_state = bucket_draw_states.get(bucket)
+                if draw_state is None:
+                    draw_state = {
+                        'remaining': len(dense_ids),
+                        'swaps': {},
+                    }
+                    bucket_draw_states[bucket] = draw_state
+
+                remaining = draw_state['remaining']
+                chosen_position = self._rng.randrange(remaining)
+                last_position = remaining - 1
+                swaps = draw_state['swaps']
+                chosen_id = swaps.get(
+                    chosen_position,
+                    dense_ids[chosen_position],
+                )
+                if chosen_position != last_position:
+                    swaps[chosen_position] = swaps.get(
+                        last_position,
+                        dense_ids[last_position],
                     )
-                ]
-                chosen = self._rng.choice(candidates)
-                available.remove(chosen)
-                result.append(self._items[chosen])
+                swaps.pop(last_position, None)
+                draw_state['remaining'] = last_position
+                result.append(self._items[chosen_id])
+                if last_position == 0:
+                    del causes[cursor]
                 made_progress = True
             if not made_progress:
                 break
@@ -754,7 +944,7 @@ class CausalReplayBuffer:
         return tuple(result)
 
     def clear(self):
-        self._items.clear()
+        self._reset_storage()
         self._cause_cursors.clear()
         self._stratum_cursor = self._rng.randrange(len(CAUSAL_STRATA))
         self._counterfactual_override_count = 0
@@ -766,7 +956,7 @@ class CausalReplayBuffer:
     def to_tuple(self):
         """按当前从旧到新的存储顺序返回只读快照。"""
 
-        return tuple(self._items)
+        return tuple(self._items.values())
 
     def checkpoint_manifest(self):
         """返回恢复因果回放前必须一致的契约。"""
@@ -799,10 +989,30 @@ class CausalReplayBuffer:
 
         return {
             'schema_version': 1,
-            'items': tuple(self._items),
+            'items': tuple(self._items.values()),
             'rng_state': self._rng.getstate(),
             'stratum_cursor': self._stratum_cursor,
             'cause_cursors': dict(self._cause_cursors),
+            # dense bucket 采用 swap-remove；只保存 items 无法恢复其随机下标
+            # 映射。索引状态不改变外部 schema，却是 checkpoint 后采样逐项一致
+            # 所必需的内部状态。旧 checkpoint 没有该字段时按旧到新顺序重建。
+            'index_state': {
+                'schema_version': 1,
+                'entry_ids': tuple(self._items),
+                'next_entry_id': self._next_entry_id,
+                'bucket_entry_ids': tuple(
+                    (
+                        stratum,
+                        cause_type,
+                        tuple(self._bucket_entry_ids[
+                            (stratum, cause_type)
+                        ]),
+                    )
+                    for stratum, cause_type in sorted(
+                        self._bucket_entry_ids
+                    )
+                ),
+            },
             'counterfactual_override_count': (
                 self._counterfactual_override_count
             ),
@@ -817,6 +1027,160 @@ class CausalReplayBuffer:
                 self._rule_empirical_disagreement_count
             ),
         }
+
+    @staticmethod
+    def _normalize_checkpoint_index_state(items, index_state):
+        """校验内部 entry/bucket 映射；None 表示兼容旧 checkpoint。"""
+
+        if index_state is None:
+            entry_ids = tuple(range(len(items)))
+            return entry_ids, len(entry_ids), None
+        if not isinstance(index_state, dict):
+            raise ValueError(
+                'causal replay index_state must be a mapping'
+            )
+        if index_state.get('schema_version') != 1:
+            raise ValueError(
+                'unsupported causal replay index schema version: '
+                f'{index_state.get("schema_version")!r}'
+            )
+
+        raw_entry_ids = index_state.get('entry_ids')
+        if not isinstance(raw_entry_ids, (tuple, list)):
+            raise ValueError(
+                'causal replay index entry_ids must be a sequence'
+            )
+        entry_ids = tuple(
+            _strict_integer(
+                f'index_state.entry_ids[{offset}]',
+                entry_id,
+                minimum=0,
+            )
+            for offset, entry_id in enumerate(raw_entry_ids)
+        )
+        if len(entry_ids) != len(items):
+            raise ValueError(
+                'causal replay index entry_ids must align with items'
+            )
+        if any(
+                current <= previous
+                for previous, current in zip(
+                    entry_ids,
+                    entry_ids[1:],
+                )):
+            raise ValueError(
+                'causal replay index entry_ids must be strictly increasing'
+            )
+        next_entry_id = _strict_integer(
+            'index_state.next_entry_id',
+            index_state.get('next_entry_id'),
+            minimum=0,
+        )
+        if entry_ids and next_entry_id <= entry_ids[-1]:
+            raise ValueError(
+                'causal replay next_entry_id must exceed all entry ids'
+            )
+
+        raw_buckets = index_state.get('bucket_entry_ids')
+        if not isinstance(raw_buckets, (tuple, list)):
+            raise ValueError(
+                'causal replay bucket_entry_ids must be a sequence'
+            )
+        samples_by_id = dict(zip(entry_ids, items))
+        expected_ids = set(entry_ids)
+        seen_ids = set()
+        bucket_layout = {}
+        for offset, record in enumerate(raw_buckets):
+            if (
+                    not isinstance(record, (tuple, list))
+                    or len(record) != 3):
+                raise ValueError(
+                    'causal replay bucket record must contain '
+                    '(stratum, cause_type, entry_ids)'
+                )
+            stratum, cause_type, raw_bucket_ids = record
+            if stratum not in CAUSAL_STRATA:
+                raise ValueError(
+                    f'unknown causal replay bucket stratum: {stratum!r}'
+                )
+            cause_type = _non_empty_string(
+                f'index_state.bucket_entry_ids[{offset}].cause_type',
+                cause_type,
+            )
+            bucket = stratum, cause_type
+            if bucket in bucket_layout:
+                raise ValueError(
+                    f'duplicate causal replay bucket: {bucket!r}'
+                )
+            if not isinstance(raw_bucket_ids, (tuple, list)):
+                raise ValueError(
+                    'causal replay bucket ids must be a sequence'
+                )
+            bucket_ids = tuple(
+                _strict_integer(
+                    'causal replay bucket entry id',
+                    entry_id,
+                    minimum=0,
+                )
+                for entry_id in raw_bucket_ids
+            )
+            if not bucket_ids:
+                raise ValueError(
+                    'causal replay checkpoint cannot contain empty buckets'
+                )
+            if len(set(bucket_ids)) != len(bucket_ids):
+                raise ValueError(
+                    'causal replay bucket entry ids must be unique'
+                )
+            for entry_id in bucket_ids:
+                if entry_id not in expected_ids:
+                    raise ValueError(
+                        'causal replay bucket references an unknown entry'
+                    )
+                if entry_id in seen_ids:
+                    raise ValueError(
+                        'causal replay entry appears in multiple buckets'
+                    )
+                sample = samples_by_id[entry_id]
+                if (sample.stratum, sample.cause_type) != bucket:
+                    raise ValueError(
+                        'causal replay bucket does not match its sample'
+                    )
+                seen_ids.add(entry_id)
+            bucket_layout[bucket] = bucket_ids
+        if seen_ids != expected_ids:
+            raise ValueError(
+                'causal replay bucket index does not cover every item'
+            )
+        return entry_ids, next_entry_id, bucket_layout
+
+    def _restore_storage(
+            self,
+            items,
+            *,
+            entry_ids,
+            next_entry_id,
+            bucket_layout):
+        """从已校验内容重建派生索引，并恢复 dense bucket 的精确顺序。"""
+
+        self._reset_storage()
+        for entry_id, sample in zip(entry_ids, items):
+            self._items[entry_id] = sample
+            self._index_entry(entry_id, sample)
+        self._next_entry_id = next_entry_id
+        if bucket_layout is None:
+            return
+
+        dense_buckets = defaultdict(list)
+        positions = defaultdict(dict)
+        for bucket, bucket_ids in bucket_layout.items():
+            dense_buckets[bucket] = list(bucket_ids)
+            positions[bucket] = {
+                entry_id: offset
+                for offset, entry_id in enumerate(bucket_ids)
+            }
+        self._bucket_entry_ids = dense_buckets
+        self._bucket_positions = positions
 
     def load_checkpoint_state_dict(self, state):
         """原子校验后恢复因果 replay 的全部可变状态。"""
@@ -839,6 +1203,14 @@ class CausalReplayBuffer:
             raise TypeError(
                 'causal replay checkpoint items must be CausalSample'
             )
+        (
+            entry_ids,
+            next_entry_id,
+            bucket_layout,
+        ) = self._normalize_checkpoint_index_state(
+            items,
+            state.get('index_state'),
+        )
         stratum_cursor = _strict_integer(
             'stratum_cursor',
             state.get('stratum_cursor'),
@@ -880,23 +1252,34 @@ class CausalReplayBuffer:
                 'invalid causal replay RNG checkpoint state'
             ) from exc
 
-        self._items = list(items)
-        self._rng.setstate(rng_state)
-        self._stratum_cursor = stratum_cursor
-        self._cause_cursors = defaultdict(int, normalized_cursors)
-        self._counterfactual_override_count = counters[
+        # 派生索引也先在临时对象中完整构建；任一错误都不会破坏当前 replay。
+        restored = CausalReplayBuffer(
+            capacity=self.capacity,
+            seed=self._seed,
+        )
+        restored._restore_storage(
+            items,
+            entry_ids=entry_ids,
+            next_entry_id=next_entry_id,
+            bucket_layout=bucket_layout,
+        )
+        restored._rng.setstate(rng_state)
+        restored._stratum_cursor = stratum_cursor
+        restored._cause_cursors = defaultdict(int, normalized_cursors)
+        restored._counterfactual_override_count = counters[
             'counterfactual_override_count'
         ]
-        self._ignored_weaker_rule_count = counters[
+        restored._ignored_weaker_rule_count = counters[
             'ignored_weaker_rule_count'
         ]
-        self._eviction_count = counters['eviction_count']
-        self._rule_empirical_agreement_count = counters[
+        restored._eviction_count = counters['eviction_count']
+        restored._rule_empirical_agreement_count = counters[
             'rule_empirical_agreement_count'
         ]
-        self._rule_empirical_disagreement_count = counters[
+        restored._rule_empirical_disagreement_count = counters[
             'rule_empirical_disagreement_count'
         ]
+        self.__dict__.update(restored.__dict__)
 
     @property
     def storage_stats(self):
@@ -908,21 +1291,14 @@ class CausalReplayBuffer:
             'total_count': len(self),
             'remaining_capacity': self.remaining_capacity,
             'stratum_counts': {
-                stratum: sum(
-                    item.stratum == stratum
-                    for item in self._items
-                )
+                stratum: self._stratum_counts.get(stratum, 0)
                 for stratum in CAUSAL_STRATA
             },
-            'cause_type_counts': dict(sorted(Counter(
-                item.cause_type
-                for item in self._items
-            ).items())),
+            'cause_type_counts': dict(sorted(
+                self._cause_type_counts.items()
+            )),
             'supervision_kind_counts': {
-                kind: sum(
-                    item.supervision_kind == kind
-                    for item in self._items
-                )
+                kind: self._supervision_kind_counts.get(kind, 0)
                 for kind in CAUSAL_SUPERVISION_KINDS
             },
             'counterfactual_override_count': (
@@ -938,7 +1314,7 @@ class CausalReplayBuffer:
             ),
             **_graph_storage_stats(
                 item.graph
-                for item in self._items
+                for item in self._items.values()
             ),
         }
 

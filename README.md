@@ -1,12 +1,17 @@
-# 合成大西瓜 pygame 版
+# 合成大西瓜与完整因果归因训练
 
-这是一个基于 `pygame` 和 `pymunk` 的《合成大西瓜》桌面小游戏。
+这是一个基于 `pygame`、`pymunk` 和 PyTorch 的《合成大西瓜》项目。仓库同时包含：
 
-当前项目只保留游戏本体。旧实验代码和旧环境封装已经移除，后续如果需要自动游玩能力，会重新设计相关模块。
+- 可直接游玩的 pygame 游戏本体；
+- 无渲染物理环境、GNN-Q 模型和并行 rollout；
+- 面向首轮大规模训练的 Reward V2、Double DQN + 3-step return；
+- 完整状态分析、历史贡献归因、独立 `CausalReplayBuffer`、预算反事实和极稀疏局部 Shapley。
+
+游戏本体位于 `daxigua`，训练代码位于 `daxigua_rl`；前者不得反向依赖后者。旧实验代码已经移除，当前 RL 主链路是重新设计后的实现。
 
 当前手动游戏窗口为固定尺寸 `400x800`，顶部独立信息层会显示分数和待投放水果队列，方便提前规划投放顺序。
 
-## 运行
+## 运行手动游戏
 
 先安装依赖：
 
@@ -32,14 +37,53 @@ python Main.py
 
 顶部 `QUEUE` 区域从左到右显示当前水果和后续 3 颗水果；每次投放后队列会向前推进，并在末尾补充新水果。该区域和当前悬浮水果处于不同高度层，避免移动水果时遮挡队列。
 
+## 训练准备
+
+先安装游戏依赖，再从与目标 CUDA 驱动匹配的 PyTorch wheel 源安装训练依赖：
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-training.txt
+```
+
+大规模训练前应先运行门禁。它会验证正式配置、CUDA 前后向、固定 Pymunk/Chipmunk 版本、`EngineSnapshot` 原动作重演、完整因果 optimizer step、局部 Shapley 物理链路、磁盘与 CPU 余量，但不会启动训练：
+
+```bash
+python tools/preflight_training.py --config configs/train_dqn_causal_500k.toml
+```
+
+当前提供三套同源配置：
+
+- `configs/train_dqn_causal_smoke_5k.toml`：5000 次更新烟测；
+- `configs/train_dqn_causal_calibration_10k.toml`：10000 次更新标定；样本不足时从
+  update 0 另起独立 25000 次更新校准是可比性首选；也可连续延长，但会保持
+  checkpoint 冻结的 epsilon horizon，并必须单独标记；
+- `configs/train_dqn_causal_500k.toml`：第一次 500000 次更新正式训练。
+
+完整安装、阶段门禁、监控、停止阈值和恢复流程见
+`docs/rl/FIRST_500K_RUNBOOK.md`；当前阶段证据只以
+`docs/training_runs/FIRST_500K_READINESS.md` 为准。
+
+训练入口：
+
+```bash
+PYTHONPATH=src python -u -m daxigua_rl.scripts.train_dqn \
+  --config configs/train_dqn_causal_smoke_5k.toml
+```
+
+从版本化 checkpoint 恢复时使用 `--resume`。正式 hybrid replay 采用明确记录的 hot-resume：恢复模型、target、optimizer、更新计数、RNG、因果 replay 和主 replay 热层，不宣称恢复已经省略的冷层。
+
 ## 项目说明
 
 - `Main.py`: 兼容旧启动方式的薄入口。
 - `src/daxigua/`: 游戏本体包。
 - `src/daxigua/app.py`: 游戏应用入口和当前表现层实现。
 - `src/daxigua/core/`: 游戏核心逻辑，负责物理世界、边界、碰撞合成、计分和水果定义。
-- `src/daxigua/core/engine.py`: 无渲染游戏引擎，供后续训练环境调用。
-- `src/daxigua_rl/`: 自动游玩/RL 相关代码，当前包含隔离的 `DaxiguaEnv` 环境壳层，不会被游戏本体反向依赖。
+- `src/daxigua/core/engine.py`: 无渲染游戏引擎和可校验、可恢复的 `EngineSnapshot`。
+- `src/daxigua_rl/`: 环境、图模型、Reward V2、因果归因、反事实和训练主链路。
+- `requirements-training.txt`: 训练侧 PyTorch 和绘图依赖版本。
+- `tools/preflight_training.py`: 第一次大规模训练前门禁。
+- `configs/`: 烟测、标定和正式训练配置。
 - `assets/fruits/`: 水果图片资源。
 - `assets/fruits.zip`: 原始水果图片压缩包归档。
 - `docs/`: 项目文档和 Codex 修改记录。

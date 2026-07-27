@@ -6,6 +6,9 @@ import pickle
 import time
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
+
+import torch
 
 from daxigua.core.engine import HeadlessGame
 from daxigua.core.state import DropResult, EngineActionOutcome, PhysicsResult
@@ -25,6 +28,7 @@ from daxigua_rl.attribution.counterfactual import (
     counterfactual_trigger_reasons,
     create_counterfactual_task,
     estimate_local_shapley,
+    initialize_physics_runner_process,
     local_shapley_candidates,
     local_shapley_eligible,
     paired_shapley_permutations,
@@ -157,7 +161,21 @@ def _failing_runner(_task):
 
 def _slow_completed_runner(task):
     time.sleep(0.05)
-    return _completed_runner(task)
+    result = _completed_runner(task)
+    thread_marker = (
+        torch.get_num_threads() * 1_000
+        + torch.get_num_interop_threads()
+    )
+    return replace(
+        result,
+        branches=(
+            replace(
+                result.branches[0],
+                objective_return=float(thread_marker),
+            ),
+            *result.branches[1:],
+        ),
+    )
 
 
 def _snapshot():
@@ -447,6 +465,19 @@ class CounterfactualContractTest(unittest.TestCase):
 
 
 class BudgetedSchedulerTest(unittest.TestCase):
+    def test_physics_initializer_tolerates_interop_runtime_error(self):
+        with (
+                patch.object(torch, 'set_num_threads') as set_intra,
+                patch.object(
+                    torch,
+                    'set_num_interop_threads',
+                    side_effect=RuntimeError('already initialized'),
+                ) as set_interop):
+            initialize_physics_runner_process()
+
+        set_intra.assert_called_once_with(1)
+        set_interop.assert_called_once_with(1)
+
     def test_external_tokens_share_hard_budget_and_finalize_once(self):
         config = CounterfactualConfig(
             min_real_steps=1,
@@ -860,6 +891,8 @@ class BudgetedSchedulerTest(unittest.TestCase):
             cost_hard_limit=1.0,
             horizon=8,
         )
+        main_intra_threads = torch.get_num_threads()
+        main_interop_threads = torch.get_num_interop_threads()
         scheduler = BudgetedCounterfactualScheduler(
             worker_count=1,
             runner=_slow_completed_runner,
@@ -882,6 +915,18 @@ class BudgetedSchedulerTest(unittest.TestCase):
                     time.sleep(0.02)
             self.assertEqual(len(results), 1)
             self.assertTrue(results[0].label_ready)
+            self.assertEqual(
+                results[0].branches[0].objective_return,
+                1_001.0,
+            )
+            self.assertEqual(
+                torch.get_num_threads(),
+                main_intra_threads,
+            )
+            self.assertEqual(
+                torch.get_num_interop_threads(),
+                main_interop_threads,
+            )
         finally:
             scheduler.close()
 

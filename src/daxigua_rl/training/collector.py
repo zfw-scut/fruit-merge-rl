@@ -29,6 +29,7 @@ from daxigua_rl.attribution.causal_replay import (
 )
 from daxigua_rl.attribution.counterfactual_proposal import (
     CounterfactualProposalBuilder,
+    should_transfer_counterfactual_proposal,
 )
 from daxigua_rl.reward import REWARD_BREAKDOWN_FIELDS
 from daxigua_rl.graph.tensor import graph_to_tensor
@@ -149,6 +150,8 @@ class RolloutStats:
     counterfactual_proposal_confirmed_event_count: int = 0
     counterfactual_proposal_budget_count: int = 0
     counterfactual_proposals_generated: int = 0
+    counterfactual_proposals_transfer_selected: int = 0
+    counterfactual_proposals_transfer_throttled: int = 0
     counterfactual_proposal_skip_reason_counts: tuple = field(
         default_factory=tuple
     )
@@ -415,6 +418,7 @@ class RolloutCollector:
             policy_version=None,
             counterfactual_enabled=False,
             counterfactual_ring_size=32,
+            counterfactual_proposal_sample_rate=1.0,
             episode_id_start=0):
         """创建 rollout collector。
 
@@ -435,6 +439,8 @@ class RolloutCollector:
         - `counterfactual_enabled`: 是否捕获动作前物理快照并生成稀疏 proposal。
           默认关闭，不执行任何快照调用。
         - `counterfactual_ring_size`: 每个 worker 保存的最近稳定边界数量。
+        - `counterfactual_proposal_sample_rate`: 常规物理候选的稳定跨进程抽样率；
+          高价值合成不受该抽样限制。
         - `episode_id_start`: 首局使用的 episode id；resume 时用于避开旧因果键。
         """
 
@@ -514,6 +520,20 @@ class RolloutCollector:
                 'attribution tracking'
             )
         self.counterfactual_enabled = counterfactual_enabled
+        if isinstance(counterfactual_proposal_sample_rate, bool):
+            raise TypeError(
+                'counterfactual_proposal_sample_rate must be a real number'
+            )
+        counterfactual_proposal_sample_rate = float(
+            counterfactual_proposal_sample_rate
+        )
+        if not 0.0 <= counterfactual_proposal_sample_rate <= 1.0:
+            raise ValueError(
+                'counterfactual_proposal_sample_rate must be in [0, 1]'
+            )
+        self.counterfactual_proposal_sample_rate = (
+            counterfactual_proposal_sample_rate
+        )
         self.counterfactual_proposal_builder = (
             CounterfactualProposalBuilder(
                 ring_size=counterfactual_ring_size,
@@ -818,6 +838,8 @@ class RolloutCollector:
         counterfactual_proposal_confirmed_event_count = 0
         counterfactual_proposal_budget_count = 0
         counterfactual_proposals_generated = 0
+        counterfactual_proposals_transfer_selected = 0
+        counterfactual_proposals_transfer_throttled = 0
         counterfactual_proposal_skip_reason_counts = {}
 
         for event in self._carried_attribution_resolutions:
@@ -1158,8 +1180,38 @@ class RolloutCollector:
                                 .get(reason, 0)
                                 + int(count)
                             )
+                        selected_proposals = tuple(
+                            proposal
+                            for proposal in proposal_build.proposals
+                            if should_transfer_counterfactual_proposal(
+                                proposal,
+                                sample_rate=(
+                                    self
+                                    .counterfactual_proposal_sample_rate
+                                ),
+                            )
+                        )
+                        selected_count = len(selected_proposals)
+                        throttled_count = (
+                            len(proposal_build.proposals)
+                            - selected_count
+                        )
+                        counterfactual_proposals_transfer_selected += (
+                            selected_count
+                        )
+                        counterfactual_proposals_transfer_throttled += (
+                            throttled_count
+                        )
+                        if throttled_count:
+                            counterfactual_proposal_skip_reason_counts[
+                                'transfer_throttle'
+                            ] = (
+                                counterfactual_proposal_skip_reason_counts
+                                .get('transfer_throttle', 0)
+                                + throttled_count
+                            )
                         self._counterfactual_proposal_outbox.extend(
-                            proposal_build.proposals
+                            selected_proposals
                         )
                     finally:
                         counterfactual_proposal_build_seconds += (
@@ -1330,6 +1382,12 @@ class RolloutCollector:
             ),
             counterfactual_proposals_generated=(
                 counterfactual_proposals_generated
+            ),
+            counterfactual_proposals_transfer_selected=(
+                counterfactual_proposals_transfer_selected
+            ),
+            counterfactual_proposals_transfer_throttled=(
+                counterfactual_proposals_transfer_throttled
             ),
             counterfactual_proposal_skip_reason_counts=tuple(
                 sorted(

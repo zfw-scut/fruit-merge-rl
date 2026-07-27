@@ -1,4 +1,4 @@
-# 第一次完整因果训练的 10k 校准；若稀疏 Shapley 样本不足，可恢复至 25k。
+# 第一次完整因果训练的 10k 校准；若稀疏 Shapley 样本不足，另起独立 25k run。
 extends = "train_dqn_fast30_parallel.toml"
 
 [runtime]

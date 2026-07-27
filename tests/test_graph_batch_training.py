@@ -203,6 +203,33 @@ class GraphBatchTrainingTest(unittest.TestCase):
             self.assertTrue(all(isinstance(item, TensorTransition) for item in sampled))
 
             checkpoint_state = replay_buffer.checkpoint_state_dict()
+            checkpoint_manifest = replay_buffer.checkpoint_manifest()
+            normalized = ReplayBuffer.validate_checkpoint_state_dict(
+                checkpoint_state,
+                manifest=checkpoint_manifest,
+            )
+            self.assertEqual(normalized['resume_policy'], 'hot_only')
+            self.assertEqual(len(normalized['items']), 5)
+            with self.assertRaisesRegex(
+                    ValueError,
+                    'accounting mismatch'):
+                ReplayBuffer.validate_checkpoint_state_dict(
+                    {
+                        **checkpoint_state,
+                        'source_total_count': 15,
+                    },
+                    manifest=checkpoint_manifest,
+                )
+            with self.assertRaisesRegex(
+                    ValueError,
+                    'manifest kind'):
+                ReplayBuffer.validate_checkpoint_state_dict(
+                    checkpoint_state,
+                    manifest={
+                        **checkpoint_manifest,
+                        'kind': 'wrong-replay',
+                    },
+                )
             restored = ReplayBuffer(
                 capacity=16,
                 seed=999,
@@ -214,7 +241,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
                 cold_cache_refresh_interval=1,
             )
             restored.validate_checkpoint_manifest(
-                replay_buffer.checkpoint_manifest()
+                checkpoint_manifest
             )
             restored.load_checkpoint_state_dict(checkpoint_state)
             self.assertEqual(
@@ -264,7 +291,9 @@ class GraphBatchTrainingTest(unittest.TestCase):
             seed=10,
         )
         try:
+            self.assertFalse(collector.model_synced)
             collector.sync_model(model)
+            self.assertTrue(collector.model_synced)
             first_handle = collector.start_collect_steps(4, epsilon=1.0)
             first_stats = collector.finish_collect_steps(first_handle)
             second_handle = collector.start_collect_steps(4, epsilon=1.0)
