@@ -34,6 +34,35 @@
   来历不明的文件。
 - `runs/` 不提交 Git。需要迁移时单独复制 checkpoint、CSV、JSON 和必要日志。
 
+### 2.1 保留 Git 身份的离线迁移
+
+正式 preflight 会校验 commit、分支和工作树是否干净，因此云端训练根目录必须保留
+完整 `.git` 元数据。优先在云端从可信远端克隆 `codex/work-1`；不能访问远端时，在
+干净工作树中生成 Git bundle：
+
+```bash
+git status --short
+git bundle create fruit-merge-rl.bundle codex/work-1
+git bundle verify fruit-merge-rl.bundle
+sha256sum fruit-merge-rl.bundle
+```
+
+通过已经批准的安全传输通道上传 bundle 和单独记录的 SHA-256，在云端先核对哈希，
+再克隆和复核身份：
+
+```bash
+sha256sum -c fruit-merge-rl.bundle.sha256
+git clone fruit-merge-rl.bundle fruit-merge-rl
+cd fruit-merge-rl
+git switch codex/work-1
+git rev-parse HEAD
+git status --short
+```
+
+普通 ZIP/源码归档没有 `.git`，不能作为正式 5k、10k 或 500k 的项目根目录；否则
+preflight 无法证明 commit 与 `dirty=false`。ZIP 只可用于人工阅读或附带非 Git
+产物。每次 HEAD 变化后都必须重新生成、验证并计算 bundle 哈希，不能复用旧包。
+
 ## 3. Ubuntu 云服务器安装
 
 ### 3.1 系统前置条件
@@ -191,6 +220,21 @@ conda run --no-capture-output -n python-torch \
 
 监控输出默认位于 `runs/resource_monitor/<时间戳>/`。它与训练进程隔离，即使训练被
 OOM killer 终止，也能留下崩溃前的 CPU、内存、GPU 和进程日志。
+
+每个短跑与正式 run 都必须独占一个监控目录。阶段结束时至少核对：
+
+- `events.jsonl` 出现 `target_process_started` 和 `target_exited_stop_requested`；
+- `process_metrics.csv` 至少包含一条目标训练进程记录；
+- `summary.json` 的 `samples > 0`、`min_mem_available_mb >= 4096`、
+  `peak_swap_used_mb <= 1024`、`peak_target_rss_mb <= 16384`；
+- `gpu_metrics.csv` 存在有效 GPU 样本，显存没有连续 3 次超过总量 95%；
+- `events.jsonl` 没有在结束时仍未恢复的 `low_system_memory`、
+  `swap_usage_high`、`target_rss_high`、`gpu_memory_high` 或
+  `gpu_query_failed`。
+
+训练目录内的 readiness 报告不会自动读取这个旁路目录，因此即使其
+`ready=true`，也必须把上述结果和监控目录路径人工登记到 readiness 记录；两部分
+证据缺一不可。
 
 另开一个终端启动训练。启动器会设置 `PYTHONPATH`、使用 `python-torch` Conda 环境，
 并把终端输出同时写入 `runs/launcher_logs/`：

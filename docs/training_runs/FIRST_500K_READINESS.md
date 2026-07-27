@@ -9,7 +9,8 @@
 ## 1. 当前结论
 
 本地训练前实现已经完成并通过最终全量回归。60-update 性能/闭环探针证明完整因果
-链路能在小规模闭合，但不是正式 5k 证据；正式 5k、10k 和 500k 均未启动。
+链路能在小规模闭合；当前干净 HEAD 上的 20-update 探针进一步证明物理反事实样本
+会被优化器实际消费。两者都不是正式 5k 证据；正式 5k、10k 和 500k 均未启动。
 
 本机总内存约 15.2 GiB，本轮可用内存实测约 0.5–2 GiB，不满足新版 preflight 的
 32 GiB 总内存与 8 GiB 可用内存硬门禁，因此不得在本机继续正式 5k/10k。下一份有效
@@ -20,6 +21,7 @@ preflight 和两个短跑必须迁移到云服务器执行。云服务器配置�
 | --- | --- | --- |
 | 源码与单元测试 | 已通过 | 286 项测试，0 failure / 0 error |
 | 60-update 本地探针 | 已完成 | 仅作性能/闭环证据，不替代 5k |
+| 干净 HEAD 20-update 探针 | 已完成 | 规则与反事实监督均实际进入 optimizer，不替代 5k |
 | 正式配置 preflight | 本机硬门禁失败，云端待运行 | 本机内存不足；旧 `ready=true` 已失效 |
 | 5k 冒烟 | 未运行 | 必须在通过新版 preflight 的云服务器启动 |
 | 10k 校准 | 待运行、待填 | 5k 通过后启动 |
@@ -32,6 +34,7 @@ preflight 和两个短跑必须迁移到云服务器执行。云服务器配置�
 | --- | --- |
 | 分支 | `codex/work-1` |
 | 训练源码冻结 commit | `89d86a2d9a953c0e2b613aba7169909a870b0444` |
+| 最新干净 HEAD 本地运行证据 | `474cf453c559336b2e2fd8c18c994a74cd016fb2` |
 | 全量测试 | 2026-07-27：286/286 通过；测试后只更新本文证据字段 |
 | 正式配置 | `configs/train_dqn_causal_500k.toml` |
 | 正式配置 SHA-256 | `08c35479ddabd1cb383cd2287a94a457ae951b80acef483c3177e64b37ed2541` |
@@ -60,6 +63,21 @@ hardlink 周期 checkpoint、资源清理和失败指针生命周期。它完成
 readiness 后 `ready=true`，只有 episode 样本不足和关闭时清空 top-K 候选池两项预期
 warning。该 run 使用诊断覆盖参数，仍然不替代正式 5k。
 
+随后在干净 commit `474cf453c559336b2e2fd8c18c994a74cd016fb2` 上执行
+`runs/dqn_causal_head474cf45_probe_20/`：20/20 updates、320 warmup、正常退出，
+`failure_latest.json` 不存在；主 TD 在全部 5 个日志窗口更新，规则 batch 与物理
+反事实 batch 各在 2 个窗口进入同一次 optimizer，最大 rule batch 为 31、最大
+counterfactual batch 为 1。反事实累计完成 1、原动作复现通过 1、样本插入 1，
+失败 0，实际 token 比例最高约 6.23%，没有突破 10% 硬上限。最终 update 20
+checkpoint 的 online/target 模型、Adam 与 CPU/CUDA RNG 均通过真实恢复检查。
+
+对应诊断 readiness 报告位于
+`runs/preflight/dqn_causal_head474cf45_probe_20_readiness.json`。它只因本探针主动把
+`num_envs`、物理 worker、采样率和训练长度缩小而触发
+`baseline_training_semantics_match`，拒绝把诊断 run 冒充正式 5k；另有 episode
+样本不足和关闭时丢弃未调度候选两项预期 warning。这一失败是门禁正确工作的证据，
+不是训练链路失败。
+
 旧的 245 项测试和 commit `7d7676f` 只属于此前历史版本，不得把它们登记为本轮
 结果。本轮最终全量回归为 286 项全部通过；commit 在本轮提交后补入第 2 节。
 
@@ -67,9 +85,9 @@ warning。该 run 使用诊断覆盖参数，仍然不替代正式 5k。
 
 | 检查 | 当前结果 | 说明 |
 | --- | --- | --- |
-| 本机真实门槛 preflight | 失败且符合预期 | commit `89d86a2`，32/32 快照；唯一 required failure 为 `host_physical_memory` |
+| 本机真实门槛 preflight | 失败且符合预期 | commit `474cf45`，32/32 快照；唯一 required failure 为 `host_physical_memory` |
 | 本机总内存 | 失败 | 15.22 GiB，低于 32 GiB |
-| 本机可用内存 | 失败 | 本次实测 0.69 GiB，低于 8 GiB |
+| 本机可用内存 | 失败 | 本次实测 0.75 GiB，低于 8 GiB |
 | 本机磁盘 / 有效 CPU | 通过 | 221.05 GiB 可用；16 个有效 CPU |
 | 本机功能性 preflight | 通过但无启动效力 | 只把内存/磁盘阈值临时置 0；`ready=true`、32/32 快照、无 warning，用于证明其余门禁闭合 |
 | 旧 preflight | 已失效 | `runs/preflight/first_500k_pre_smoke.json` 来自旧 commit 和旧门禁，只作历史诊断 |
