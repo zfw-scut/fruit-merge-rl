@@ -52,9 +52,8 @@ sha256sum fruit-merge-rl.bundle
 
 ```bash
 sha256sum -c fruit-merge-rl.bundle.sha256
-git clone fruit-merge-rl.bundle fruit-merge-rl
+git clone --branch codex/work-1 fruit-merge-rl.bundle fruit-merge-rl
 cd fruit-merge-rl
-git switch codex/work-1
 git rev-parse HEAD
 git status --short
 ```
