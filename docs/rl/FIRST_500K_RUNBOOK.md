@@ -73,11 +73,11 @@ preflight 无法证明 commit 与 `dirty=false`。ZIP 只可用于人工阅读�
 - NVIDIA GPU 和能支持 CUDA 12.6 PyTorch wheel 的驱动；
 - 至少 80 GiB 可用磁盘空间；因果 replay 精确 checkpoint 与 100k 冷 TD replay
   会同时占盘，不能只按模型权重估算；
-- 至少 32 GiB 内存，建议 64 GiB；8 个 rollout worker、20k 因果 replay、
+- 至少 24 GiB 内存，建议 32 GiB 或更多；3 个 rollout worker、20k 因果 replay、
   8k 热 TD replay 和 2k 冷缓存会并存；
-- 至少 13 个经 affinity/cgroup 限制后仍实际可用的 CPU 逻辑核，建议 16 个。
-  正式配置固定使用 8 个 rollout worker 和 4 个反事实/局部 Shapley 共享物理
-  worker，并为主进程保留至少 1 核；preflight 按有效核数而不是宿主机名义核数检查。
+- 至少 6 个经 affinity/cgroup 限制后仍实际可用的 CPU 逻辑核。正式配置固定使用
+  3 个 rollout worker 和 2 个反事实/局部 Shapley 共享物理 worker，并为主进程
+  保留 1 核；preflight 按有效核数而不是宿主机名义核数检查。
 
 安装基础工具：
 
@@ -187,7 +187,7 @@ conda run --no-capture-output -n python-torch \
   --output runs/preflight/first_500k_pre_smoke.json \
   --snapshot-audits 32 \
   --min-free-gb 80 \
-  --min-memory-gb 32 \
+  --min-memory-gb 24 \
   --min-available-memory-gb 8
 ```
 
@@ -198,10 +198,11 @@ conda run --no-capture-output -n python-torch \
 - `required_failures=[]`；
 - `warnings=[]`，或每条 warning 已有人为解释；
 - `engine_snapshot_reproduction.matches=32`；
-- `formal_500k_config_contract` 通过，确认输入确实是冻结的 500k/CUDA/8 env/
-  3-step/完整因果与 Shapley 配置，而不是误传 5k 或关闭归因的配置；
+- `formal_500k_config_contract` 通过，确认输入确实是冻结的 500k/CUDA/3 env/
+  9 steps per update/3-step/完整因果与 Shapley 配置，而不是误传 5k 或关闭归因的
+  配置；
 - `full_causal_optimizer_step` 和 `local_shapley_physical` 均通过；
-- 主机物理内存至少 32 GiB，启动时可用内存至少 8 GiB；
+- cgroup 可用物理内存上限至少 24 GiB，启动时可用内存至少 8 GiB；
 - JSON 中 commit 与准备运行的源码 commit 一致，`dirty=false`。
 
 preflight 通过只表示静态和小规模物理链路闭合，不等于 500k 已经获准启动。

@@ -17,8 +17,8 @@ total_updates = 500000
 # 预热经验：正式训练前随机采集多少条经验，用于填充 ReplayBuffer。
 warmup_steps = 5000
 
-# 每轮采集：每次参数更新前新采集多少次投放经验；并行时建议是 num_envs 的整数倍。
-collect_per_update = 8
+# 每轮采集：3 个 rollout worker 各采集 3 次，保持每次更新共 9 条真实投放经验。
+collect_per_update = 9
 
 # 批大小：每次训练从 ReplayBuffer 采样多少条 transition。
 batch_size = 64
@@ -90,14 +90,14 @@ counterfactual_target_clip = 5.0
 [counterfactual]
 # worker 侧只保存最近 32 个稳定动作边界；主进程按 CPU 余量自动预留独立进程。
 counterfactual_enabled = true
-# 首轮正式训练按 16 个可用 CPU 核冻结 4 个物理归因进程，其中 1 个专供 Shapley。
-# 预检会同时核对 affinity/cgroup 配额；云机不足 13 个有效核时直接拒绝启动。
-counterfactual_workers = 4
+# 首轮云容器只有 6 个 cgroup 有效核：3 个 rollout、2 个物理归因（其中 1 个
+# 专供 Shapley）和 1 个主进程。预检按真实配额拒绝任何过额启动。
+counterfactual_workers = 2
 counterfactual_horizon = 10
 counterfactual_cost_ratio = 0.06
 counterfactual_hard_limit = 0.10
 counterfactual_min_real_steps = 256
-counterfactual_cpu_core_ratio = 0.25
+counterfactual_cpu_core_ratio = 0.34
 counterfactual_queue_capacity = 256
 counterfactual_snapshot_ring_size = 32
 # 常规 proposal（包括连锁与规则冲突）只稳定抽取 1/16 跨进程传输；
@@ -143,8 +143,8 @@ action_count = 15
 physics_mode = "fast30"
 
 [parallel]
-# 并行环境数：并行 headless 环境数量，建议根据 CPU 核心和内存压力调整。
-num_envs = 8
+# 并行环境数：按首轮云容器的 6 核 cgroup 配额冻结为 3。
+num_envs = 3
 
 # Worker 同步：并行 worker 每多少次 update 同步一次 online model 参数。
 worker_sync_interval = 100

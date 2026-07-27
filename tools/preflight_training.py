@@ -92,6 +92,7 @@ PINNED_CUDA_RUNTIME = '12.6'
 FORMAL_500K_CONFIG_CONTRACT = {
     'total_updates': 500_000,
     'warmup_steps': 5_000,
+    'collect_per_update': 9,
     'batch_size': 64,
     'replay_capacity': 100_000,
     'hot_replay_capacity': 8_000,
@@ -99,17 +100,18 @@ FORMAL_500K_CONFIG_CONTRACT = {
     'causal_replay_capacity': 20_000,
     'causal_batch_size': 32,
     'causal_update_interval': 2,
-    'counterfactual_workers': 4,
+    'counterfactual_workers': 2,
     'counterfactual_max_alternatives': 2,
     'shapley_candidate_limit': 3,
     'action_count': 15,
-    'num_envs': 8,
+    'num_envs': 3,
 }
 FORMAL_500K_FLOAT_CONTRACT = {
     'lambda_rule': 0.15,
     'lambda_cf': 0.10,
     'counterfactual_cost_ratio': 0.06,
     'counterfactual_hard_limit': 0.10,
+    'counterfactual_cpu_core_ratio': 0.34,
     'counterfactual_proposal_sample_rate': 0.0625,
     'shapley_event_ratio_max': 0.0005,
 }
@@ -144,8 +146,8 @@ def parse_args(argv=None):
     parser.add_argument(
         '--min-memory-gb',
         type=float,
-        default=32.0,
-        help='正式长训主机最低物理内存；64 GiB 为推荐值。',
+        default=24.0,
+        help='首轮 3+2 worker 配置最低物理内存；32 GiB 以上为推荐值。',
     )
     parser.add_argument(
         '--min-available-memory-gb',

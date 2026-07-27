@@ -1024,12 +1024,12 @@ counterfactual_horizon_max = 12
 counterfactual_cost_ratio = 0.06
 counterfactual_cost_hard_limit = 0.10
 counterfactual_min_real_steps = 256
-counterfactual_cpu_core_ratio = 0.25
+counterfactual_cpu_core_ratio = 0.34
 counterfactual_queue_capacity = 256
 snapshot_ring_size = 32
 counterfactual_proposal_sample_rate = 0.0625
 counterfactual_max_alternatives = 2
-counterfactual_workers = 4
+counterfactual_workers = 2
 ```
 
 解释：
@@ -1037,9 +1037,9 @@ counterfactual_workers = 4
 - 普通反事实等价物理步以 6% 为软预算，普通反事实与局部 Shapley 合计不得超过 10%；
 - 任何情况下不得超过 10%；
 - 每 256 个真实投放最多创建一个任务；
-- 16 个有效 CPU 核的冻结配置使用 4 个物理归因进程，其中 1 个供 Shapley；启动器
-  同时按 affinity/cgroup 配额和 25% 比例验算，所有物理子进程各限制为 1 个 Torch
-  CPU 线程；
+- 首轮云容器的 6 个 cgroup 有效核配置使用 3 个 rollout 与 2 个物理归因进程，
+  其中 1 个供 Shapley，并为主进程保留 1 核；启动器同时按 affinity/cgroup 配额和
+  34% 比例验算，所有物理子进程各限制为 1 个 Torch CPU 线程；
 - 常规 proposal 只按稳定 SHA-256 身份抽取 1/16 跨进程传输，7 级以上高价值合成
   无条件保留；
 - 主进程候选池跨 256 步窗口保留更高优先级事件，整批完成 Shapley 路由后再按
