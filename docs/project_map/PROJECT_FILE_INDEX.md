@@ -59,13 +59,15 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/scripts/train_dqn.py` | 当前完整因果训练入口。组合 Double DQN + 3-step、主/因果 replay、并行采集、预算反事实、局部 Shapley、指标、评估、原子 checkpoint 与 hot-resume；保存配置/运行指纹及 warmup/shutdown/resume/failure sidecar。 | `python -m daxigua_rl.scripts.train_dqn --config ...`、`--resume ...` |
 | `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。用于测试降低 fps、最大物理帧、稳定帧和 Pymunk 迭代次数后的速度收益与游戏分布偏移。 | `python -m daxigua_rl.scripts.compare_physics_modes --checkpoint ...`；输出 `summary.csv`、`episode_metrics.csv` 和 `plots/physics_mode_comparison.png`。 |
+| `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线。 | `train_dqn_causal_smoke_5k.toml`、`train_dqn_causal_calibration_10k.toml`、`train_dqn_causal_500k.toml` |
 | `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：500k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套阶段配置继承它。 | `train_dqn.py --config ...` |
 | `configs/train_dqn_causal_smoke_5k.toml` | 第一次完整因果训练的 5000-update 集成烟测配置；算法与物理语义不降级，只覆盖规模和日志频率。 | 运行后才可记录烟测结论。 |
 | `configs/train_dqn_causal_calibration_10k.toml` | 10000-update 规模标定配置；若稀疏事件样本不足，可通过 CLI 覆盖从 update 0 另起独立 25000 校准。 | 不直接改变总步数恢复；用于校准量级，不预先代表已通过。 |
 | `configs/train_dqn_causal_500k.toml` | 第一次 500000-update 大规模训练的稳定启动名，继承完整冻结基线。 | 只在 preflight、烟测和标定门禁完成后启动。 |
-| `scripts/` | 项目级启动脚本目录。只放薄启动器，具体训练参数放在 `configs/`。 | `train_dqn.sh` |
+| `scripts/` | 项目级启动脚本目录。放训练和只读观察服务的薄启动器，具体训练参数仍放在 `configs/`。 | `train_dqn.sh`、`training_dashboard.sh` |
 | `scripts/train_dqn.sh` | DQN 训练启动器。默认读取 `configs/train_dqn_fast30_parallel.toml`，设置 `PYTHONPATH`，通过 `python-torch` conda 环境启动训练并 tee 日志。 | `./scripts/train_dqn.sh` |
+| `scripts/training_dashboard.sh` | 云端训练面板生命周期入口。通过 `setsid` 后台运行服务，并以 PID、Linux 启动时刻、命令行和工作目录共同校验进程身份，避免 stop/restart 误伤训练。 | `start`、`stop`、`status`、`restart`；默认 `127.0.0.1:8765`。 |
 
 ## 资源和说明
 
@@ -89,6 +91,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `tools/monitor_cgroup_memory.py` | Linux cgroup-v2 内存旁路监控。分别记录原始余量、`inactive_file` 页缓存、可回收工作集余量和 `memory.events`。 | 云容器训练时与通用资源监控并行运行；避免 checkpoint/replay 文件缓存造成假性低内存告警，同时保留真实 OOM/pressure 硬门禁。 |
 | `tools/temporary_rollout_smoke_test.py` | 临时 GNN rollout 验证脚本。用于检查 `DaxiguaEnv -> GraphBuilder -> GNNQNetwork -> step()` 链路是否闭合。 | 不是正式训练入口；验证完成或正式训练脚本落地后可删除或改造。 |
 | `tools/preflight_training.py` | 正式训练前只做短计算、不创建训练 run 的门禁。验证 V2 正式参数、Python/Pymunk/Chipmunk、cu130 CUDA 前后向、六维结构与完整因果 optimizer step、局部 Shapley 物理重演、`EngineSnapshot` 多次确定性重演、磁盘和 CPU 余量。 | JSON 写入 `runs/preflight/latest.json`；任一 required check 失败时返回非零。 |
+| `tools/training_dashboard.py` | 训练实时面板的只读标准库 HTTP 服务。自动或显式发现 run、资源监控和阶段控制目录，安全读取 CSV/JSONL/PNG，汇总进度、ETA、训练指标、episode、CPU/GPU/显存、告警和图表。 | `GET /api/state`、`GET /api/health`、白名单 `GET /plots/<name>`；默认仅监听 `127.0.0.1:8765`，不 import PyTorch、不控制训练。 |
 
 ## 测试目录
 
@@ -119,6 +122,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `tests/test_sync_cloud_training_artifacts.py` | 云端轻量产物同步测试。覆盖 SSH 命令引用、无密码参数、安全解包、白名单、完整模式、失败不覆盖、无关证据保留和幂等 manifest。 | 全部使用临时归档，不依赖真实云服务器。 |
 | `tests/test_training_metrics.py` | 训练指标测试。验证 Reward V2 breakdown、shaping p95、StateAnalyzer 性能、gamma 同源、TOML 参数和 episode 指标。 | 使用标准库 `unittest`。 |
 | `tests/test_compare_physics_modes.py` | 物理模式对比工具测试。验证 Reward V2 配置能够传入评估环境，且对比入口继续输出预期摘要。 | 使用标准库 `unittest`。 |
+| `tests/test_training_dashboard.py` | 训练面板后端测试。覆盖训练中心跳、并发写入中的不完整 CSV 尾行、cgroup/GPU 指标、完成/失败状态、自动发现、敏感信息过滤、静态资源/白名单曲线和路径穿越拒绝。 | 使用标准库 `unittest`，不依赖真实云服务器或 PyTorch。 |
 
 ## 文档目录
 
@@ -130,6 +134,8 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `docs/project_map/` | 项目文件职责索引。 | 结构变化后需要同步更新。 |
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
+| `docs/operations/` | 云端运行服务的部署和运维手册目录。 | 当前包含训练实时面板的启动、SSH 隧道访问、安全边界和排障说明。 |
+| `docs/operations/TRAINING_DASHBOARD.md` | 云端训练实时面板运维手册。 | 默认通过 `127.0.0.1:8765` 和 SSH 本地端口转发访问；明确只读边界、生命周期命令和 PID 安全校验。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
 | `docs/rl/STRUCTURE_AWARE_GNN_V2.md` | 当前结构感知 GNN 与首次新架构长训的主规格。 | 记录关系图、连锁 motif、关系 GNN、六维辅助监督、集中式 actor、无泄漏/非奖励边界、启用参数、指标以及旧 checkpoint/replay 不兼容范围。 |
 | `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、局部 Shapley、测试和长训流程；实现步骤 1～11 已落地，烟测/标定/正式长训结果仍须按实际运行记录。 |
@@ -203,6 +209,10 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `train_dqn.py`：完整训练入口，除 CSV、评估和曲线外，还保存反事实预算/重演、
   Shapley、主/因果 replay、运行指纹及 warmup/shutdown/resume/failure sidecar；
   checkpoint 支持严格配置校验和 hot-resume。
+- `training_dashboard.py`：把训练 CSV、资源监控 CSV/JSONL、阶段控制心跳和白名单
+  PNG 投影为只读 HTTP API；服务端不加载模型、不写训练目录，也不向训练进程发信号。
+- `training_dashboard.sh`：面板独立生命周期入口；默认回环监听并对 PID 记录做多重
+  身份校验，停止面板不会停止训练。
 - `board_game_state()` / `board_action_candidates()`：把原 pygame `Board` 的实时局面转换成 RL 图构建所需的数据结构。
 - `watch_dqn.py`：模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `export_training_catalog.py`：扫描被 Git 忽略的训练输出，生成配置快照、指标摘要、产物清单和跨实验索引，方便迁移后复盘训练数据。

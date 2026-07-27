@@ -5,6 +5,7 @@
 ## 目录说明
 
 - `codex/`: 记录 Codex 对项目做出的较大修改，以及修改记录的维护规则。
+- `operations/`: 云端训练面板等运行服务的部署、访问、安全和排障手册。
 - `project_map/`: 记录项目文件构成、职责分工、可复用组件和阅读入口。
 - `training_runs/`: 记录本地与云端训练实验的轻量摘要、配置、指标统计和产物索引，供迁移后的开发者或 agent 分析。
 - `CODING_STYLE.md`: 记录项目源码注释和编码风格，当前强调教学型详细注释。
@@ -23,6 +24,8 @@
 - `rl/FIRST_500K_RUNBOOK.md`: 云端安装、全量测试、preflight、5k/10k/500k
   阶段门禁、监控、停止和 checkpoint 恢复手册。
 - `rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md`: 当前训练吞吐优化和 fast 物理模式说明。
+- `operations/TRAINING_DASHBOARD.md`: 只读云端训练面板的启动、SSH 隧道访问、
+  生命周期管理、安全边界与故障排查手册。
 - `training_runs/FIRST_500K_READINESS.md`: 第一次 500k 的唯一就绪证据表；区分
   已完成检查、运行中阶段和待运行阶段，不能用配置存在或中间 CSV 替代结论。
 
@@ -67,6 +70,7 @@ hybrid 主 replay 恢复时只恢复有界热层，并在 sidecar 中明确记�
 2. 再读 `rl/STRUCTURE_AWARE_GNN_V2.md`，确认当前模型、训练开关和兼容边界。
 3. 需要继续训练或分析模型时，读 `training_runs/FIRST_500K_READINESS.md`、
    `training_runs/INDEX.md` 和目标实验的 `summary.md`。
-4. 再读 `CODING_STYLE.md`，了解源码注释和后续修改风格。
-5. 再读 `codex/` 下最新的修改记录，了解近期发生过哪些较大的结构或逻辑变化。
-6. 需要继续修改项目时，按对应目录下的 `RULES.md` 更新文档。
+4. 需要实时观察云端训练时，读 `operations/TRAINING_DASHBOARD.md`。
+5. 再读 `CODING_STYLE.md`，了解源码注释和后续修改风格。
+6. 再读 `codex/` 下最新的修改记录，了解近期发生过哪些较大的结构或逻辑变化。
+7. 需要继续修改项目时，按对应目录下的 `RULES.md` 更新文档。

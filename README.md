@@ -114,6 +114,32 @@ python tools/sync_cloud_training_artifacts.py \
 去掉 `--require-complete`。完整说明见
 `docs/rl/FIRST_500K_RUNBOOK.md` 的“把基础分析数据同步回本地”。
 
+## 实时查看云端训练
+
+云服务器可运行只读训练面板，汇总训练 update、预计剩余时间、loss、episode、
+CPU/GPU/显存和训练生成的评估曲线。面板只读取既有产物，不提供启动、停止、恢复或
+修改训练的控制接口。
+
+在服务器项目根目录启动：
+
+```bash
+scripts/training_dashboard.sh start \
+  --run-dir runs/<run_id> \
+  --monitor-dir runs/resource_monitor/<monitor_id> \
+  --control-dir runs/stage_control/<control_id>
+```
+
+服务默认只监听服务器的 `127.0.0.1:8765`。在本地电脑建立 SSH 隧道：
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 \
+  -p <SSH端口> <SSH用户>@<服务器地址>
+```
+
+保持隧道连接后访问 `http://127.0.0.1:8765/`。脚本也支持自动发现最新训练产物；
+服务器保留多个实验时建议显式指定三个目录。启动、停止、状态检查、安全边界和排障
+说明见 `docs/operations/TRAINING_DASHBOARD.md`。文档与脚本不保存 SSH 凭据。
+
 ## 项目说明
 
 - `Main.py`: 兼容旧启动方式的薄入口。
@@ -126,6 +152,8 @@ python tools/sync_cloud_training_artifacts.py \
 - `requirements-training.txt`: 训练侧 PyTorch 和绘图依赖版本。
 - `tools/preflight_training.py`: 第一次大规模训练前门禁。
 - `tools/sync_cloud_training_artifacts.py`: 只读同步云端轻量指标和曲线。
+- `tools/training_dashboard.py`: 只读汇总训练进度、资源状态和评估曲线的 HTTP 服务。
+- `scripts/training_dashboard.sh`: 云端面板的安全启动、停止、重启和状态检查入口。
 - `configs/`: 烟测、标定和正式训练配置。
 - `assets/fruits/`: 水果图片资源。
 - `assets/fruits.zip`: 原始水果图片压缩包归档。

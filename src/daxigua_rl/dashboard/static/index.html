@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#081310">
+  <meta name="description" content="合成大西瓜强化学习实时训练面板">
+  <title>FruitMerge · 训练观测台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+  <div class="noise" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+      <div>
+        <p class="eyebrow">FRUITMERGE · RL LAB</p>
+        <h1>训练观测台</h1>
+      </div>
+    </div>
+
+    <div class="connection" id="connection" role="status" aria-live="polite">
+      <span class="status-pulse" aria-hidden="true"></span>
+      <div>
+        <strong id="connection-label">正在连接</strong>
+        <span id="last-updated">等待第一帧数据</span>
+      </div>
+    </div>
+  </header>
+
+  <main id="main-content" class="dashboard">
+    <section class="hero" aria-labelledby="overview-title">
+      <div class="hero-copy">
+        <div class="section-kicker">
+          <span class="phase-pill" id="phase-pill">INITIALIZING</span>
+          <span class="run-name" id="run-name">正在读取运行信息…</span>
+        </div>
+        <h2 id="overview-title">模型正在学习如何为下一次合成铺路</h2>
+        <p id="run-message" class="hero-description">
+          面板每 2 秒自动同步训练、硬件与因果归因状态。
+        </p>
+
+        <dl class="hero-stats">
+          <div>
+            <dt>当前更新</dt>
+            <dd><span class="animated-number" id="update-step">—</span><small id="total-updates"> / —</small></dd>
+          </div>
+          <div>
+            <dt>累计投放</dt>
+            <dd><span class="animated-number" id="env-steps">—</span></dd>
+          </div>
+          <div>
+            <dt>预计剩余</dt>
+            <dd><span id="eta">计算中</span></dd>
+          </div>
+        </dl>
+      </div>
+
+      <div class="progress-stage">
+        <div
+          class="progress-ring"
+          id="progress-ring"
+          role="progressbar"
+          aria-label="训练进度"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div class="progress-core">
+            <span class="progress-value animated-number" id="progress-value">0.0%</span>
+            <span class="progress-label">TRAINED</span>
+          </div>
+        </div>
+        <div class="speed-strip" aria-label="实时吞吐">
+          <div>
+            <span id="updates-speed" class="animated-number">—</span>
+            <small>updates/s</small>
+          </div>
+          <span class="speed-separator" aria-hidden="true"></span>
+          <div>
+            <span id="steps-speed" class="animated-number">—</span>
+            <small>投放/s</small>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="metrics-section" aria-labelledby="hardware-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LIVE TELEMETRY</p>
+          <h2 id="hardware-title">算力状态</h2>
+        </div>
+        <p>资源数据来自训练进程与 GPU 旁路监控</p>
+      </div>
+
+      <div class="metric-grid hardware-grid">
+        <article class="metric-card accent-cyan">
+          <div class="metric-card-head">
+            <span class="metric-icon" aria-hidden="true">CPU</span>
+            <span class="metric-state" id="cpu-state">等待数据</span>
+          </div>
+          <div class="metric-primary">
+            <span class="animated-number" id="cpu-cores">—</span>
+            <small id="cpu-total">/ 25 核</small>
+          </div>
+          <div class="meter" role="meter" aria-label="CPU 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="cpu-meter">
+            <span id="cpu-meter-fill"></span>
+          </div>
+          <div class="metric-foot">
+            <span>CPU 使用</span>
+            <strong id="cpu-percent">—</strong>
+          </div>
+        </article>
+
+        <article class="metric-card accent-violet">
+          <div class="metric-card-head">
+            <span class="metric-icon" aria-hidden="true">GPU</span>
+            <span class="metric-state" id="gpu-name">NVIDIA GPU</span>
+          </div>
+          <div class="metric-primary">
+            <span class="animated-number" id="gpu-percent-value">—</span>
+            <small>%</small>
+          </div>
+          <div class="meter" role="meter" aria-label="GPU 使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="gpu-meter">
+            <span id="gpu-meter-fill"></span>
+          </div>
+          <div class="metric-foot">
+            <span>核心负载</span>
+            <strong id="gpu-temperature">— °C</strong>
+          </div>
+        </article>
+
+        <article class="metric-card accent-blue">
+          <div class="metric-card-head">
+            <span class="metric-icon" aria-hidden="true">VRAM</span>
+            <span class="metric-state">显存</span>
+          </div>
+          <div class="metric-primary">
+            <span class="animated-number" id="vram-used">—</span>
+            <small id="vram-total">/ — GB</small>
+          </div>
+          <div class="meter" role="meter" aria-label="显存使用率" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="vram-meter">
+            <span id="vram-meter-fill"></span>
+          </div>
+          <div class="metric-foot">
+            <span>占用比例</span>
+            <strong id="vram-percent">—</strong>
+          </div>
+        </article>
+
+        <article class="metric-card accent-amber">
+          <div class="metric-card-head">
+            <span class="metric-icon" aria-hidden="true">PWR</span>
+            <span class="metric-state">GPU 功耗</span>
+          </div>
+          <div class="metric-primary">
+            <span class="animated-number" id="power-draw">—</span>
+            <small>W</small>
+          </div>
+          <div class="meter" role="meter" aria-label="GPU 功耗占比" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="power-meter">
+            <span id="power-meter-fill"></span>
+          </div>
+          <div class="metric-foot">
+            <span>功耗上限</span>
+            <strong id="power-limit">— W</strong>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="metrics-section" aria-labelledby="learning-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">LEARNING SIGNALS</p>
+          <h2 id="learning-title">学习信号</h2>
+        </div>
+        <p>主 TD、结构辅助与因果监督的最近窗口</p>
+      </div>
+
+      <div class="metric-grid learning-grid">
+        <article class="signal-card">
+          <span class="signal-label">探索率 ε</span>
+          <strong class="animated-number" id="epsilon">—</strong>
+          <span class="signal-meta" id="epsilon-mode">epsilon greedy</span>
+        </article>
+        <article class="signal-card">
+          <span class="signal-label">总损失</span>
+          <strong class="animated-number" id="total-loss">—</strong>
+          <span class="signal-meta">TD <b id="td-loss">—</b></span>
+        </article>
+        <article class="signal-card">
+          <span class="signal-label">结构监督</span>
+          <strong class="animated-number" id="structural-loss">—</strong>
+          <span class="signal-meta"><b id="structural-valid">—</b> 个有效标签</span>
+        </article>
+        <article class="signal-card">
+          <span class="signal-label">因果监督</span>
+          <strong class="animated-number" id="causal-loss">—</strong>
+          <span class="signal-meta"><b id="causal-batch">—</b> 个样本入批</span>
+        </article>
+        <article class="signal-card actor-card">
+          <div>
+            <span class="signal-label">集中式 GPU Actor</span>
+            <strong><span class="animated-number" id="actor-batch">—</span><small> 平均 batch</small></strong>
+          </div>
+          <div class="actor-details">
+            <span><b id="actor-requests">—</b> 请求</span>
+            <span><b id="actor-batches">—</b> 批次</span>
+            <span><b id="actor-latency">—</b> ms</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="charts-section" aria-labelledby="curves-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">STREAMING CURVES</p>
+          <h2 id="curves-title">实时曲线</h2>
+        </div>
+        <p id="chart-window-label">最近训练窗口</p>
+      </div>
+
+      <div class="chart-grid">
+        <article class="chart-card">
+          <div class="chart-head">
+            <div>
+              <span class="chart-kicker">SCORE</span>
+              <h3>局分趋势</h3>
+            </div>
+            <strong id="score-latest">—</strong>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="score-chart" role="img" aria-label="近期每局得分折线图">
+              浏览器不支持 Canvas，无法显示得分折线图。
+            </canvas>
+            <p class="chart-empty" id="score-empty">等待单局数据</p>
+          </div>
+        </article>
+
+        <article class="chart-card">
+          <div class="chart-head">
+            <div>
+              <span class="chart-kicker">OPTIMIZATION</span>
+              <h3>损失分解</h3>
+            </div>
+            <strong id="loss-latest">—</strong>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="loss-chart" role="img" aria-label="TD、结构与因果损失折线图">
+              浏览器不支持 Canvas，无法显示损失折线图。
+            </canvas>
+            <p class="chart-empty" id="loss-empty">等待优化器数据</p>
+          </div>
+        </article>
+
+        <article class="chart-card">
+          <div class="chart-head">
+            <div>
+              <span class="chart-kicker">THROUGHPUT</span>
+              <h3>训练吞吐</h3>
+            </div>
+            <strong id="throughput-latest">—</strong>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="throughput-chart" role="img" aria-label="投放与参数更新吞吐折线图">
+              浏览器不支持 Canvas，无法显示吞吐折线图。
+            </canvas>
+            <p class="chart-empty" id="throughput-empty">等待吞吐数据</p>
+          </div>
+        </article>
+
+        <article class="chart-card">
+          <div class="chart-head">
+            <div>
+              <span class="chart-kicker">UTILIZATION</span>
+              <h3>CPU / GPU 负载</h3>
+            </div>
+            <strong id="util-latest">—</strong>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="util-chart" role="img" aria-label="CPU 与 GPU 使用率折线图">
+              浏览器不支持 Canvas，无法显示资源折线图。
+            </canvas>
+            <p class="chart-empty" id="util-empty">等待资源数据</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="plots-section" aria-labelledby="plots-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">GENERATED REPORTS</p>
+          <h2 id="plots-title">训练图表快照</h2>
+        </div>
+        <p>图片有新版本时无闪烁刷新</p>
+      </div>
+
+      <div class="plot-grid">
+        <figure class="plot-card">
+          <div class="plot-frame">
+            <img id="plot-training" alt="训练总体曲线" loading="lazy">
+            <div class="plot-placeholder" id="plot-training-placeholder">等待 training_curves.png</div>
+          </div>
+          <figcaption>
+            <span>训练总览</span>
+            <small id="plot-training-time">尚未生成</small>
+          </figcaption>
+        </figure>
+        <figure class="plot-card">
+          <div class="plot-frame">
+            <img id="plot-reward" alt="奖励分解曲线" loading="lazy">
+            <div class="plot-placeholder" id="plot-reward-placeholder">等待 reward_breakdown_curves.png</div>
+          </div>
+          <figcaption>
+            <span>奖励分解</span>
+            <small id="plot-reward-time">尚未生成</small>
+          </figcaption>
+        </figure>
+        <figure class="plot-card">
+          <div class="plot-frame">
+            <img id="plot-structure" alt="结构学习曲线" loading="lazy">
+            <div class="plot-placeholder" id="plot-structure-placeholder">等待 structure_learning_curves.png</div>
+          </div>
+          <figcaption>
+            <span>结构学习</span>
+            <small id="plot-structure-time">尚未生成</small>
+          </figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="events-section" aria-labelledby="events-title">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">RUN EVENTS</p>
+          <h2 id="events-title">事件与告警</h2>
+        </div>
+        <span class="event-count" id="event-count">0 条</span>
+      </div>
+
+      <ol class="event-list" id="event-list" aria-live="polite">
+        <li class="event-item event-neutral">
+          <span class="event-dot" aria-hidden="true"></span>
+          <div>
+            <strong>正在等待训练事件</strong>
+            <p>连接成功后会显示 checkpoint、门禁和资源告警。</p>
+          </div>
+          <time>—</time>
+        </li>
+      </ol>
+    </section>
+
+    <footer class="footer">
+      <span>FruitMerge Structure-aware GNN V2</span>
+      <span id="footer-identity">等待运行身份</span>
+    </footer>
+  </main>
+
+  <noscript>
+    <div class="noscript">此训练面板需要 JavaScript 才能读取实时状态。</div>
+  </noscript>
+  <script src="/app.js" defer></script>
+</body>
+</html>

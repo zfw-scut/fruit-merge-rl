@@ -1,6 +1,7 @@
 # 第一次 500k 完整因果训练就绪记录
 
-状态：结构感知 V2 证据已重置；新 5k/10k/500k 均未启动、未获准
+状态：结构感知 V2 的云端 preflight 与一次用户授权的独立 10k 已通过；正式
+5k→10k 顺序链仍不完整，500k 未获准
 
 最后更新：2026-07-28
 
@@ -24,12 +25,12 @@ motif，GNN 使用 relation gate + attention 和 dueling 读出，同时新增�
 
 | 阶段 | 状态 | 结论 |
 | --- | --- | --- |
-| V2 源码与单元测试 | 本地 364/364 通过 | 2026-07-28；compileall 与 diff check 同时通过，最终 commit 待下方登记 |
-| V2 正式配置 preflight | 本地功能链通过；云端资源门禁待运行 | 本机已覆盖 H256/L4、结构 loss、16-worker 集中 actor、CUDA 与物理链；本机仅 16 核，不能替代新服务器资源验收 |
+| V2 源码与单元测试 | 本地及新服务器 364/364 通过 | 训练源码 commit `ddcb249`；云端 compileall 同时通过，运行前工作树 clean |
+| V2 正式配置 preflight | 新服务器通过 | RTX 5090 / 25 核 / 90 GiB 容器上 `ready=true`、无 required failure/warning |
 | V2 5k 冒烟 | 未启动 | 全新空目录、update 0；旧 V1 5k 不替代 |
-| V2 10k 校准 | 未启动 | 全新空目录、update 0；旧 V1 10k 不替代 |
+| V2 独立 10k 测试 | 已通过自身 10k 门禁 | 用户明确授权直接从 update 0 运行；`ready=true`，但它没有发生在 V2 5k 之后，不能单独补齐手册的正式顺序链 |
 | V2 可选独立 25k 校准 | 待定 | 只在 10k 稀疏证据不足时决定 |
-| V2 500k 正式训练 | 未启动、未获准 | 等待前述门禁和新服务器最终资源复验 |
+| V2 500k 正式训练 | 未启动、未获准 | 至少仍需处理缺失的正式 V2 5k 顺序证据，并在当前最终提交上重跑最终 preflight |
 
 ## 2. V2 冻结源码身份
 
@@ -38,13 +39,13 @@ motif，GNN 使用 relation gate + attention 和 dueling 读出，同时新增�
 | 项目 | V2 当前证据 |
 | --- | --- |
 | 分支 | `codex/work-1` |
-| 目标 GPU | RTX 5090 32 GiB；待 V2 preflight 实测登记 |
-| 目标训练环境 | PyTorch `2.12.1+cu130`、CUDA runtime 13.0；待门禁确认 |
-| 最终训练 commit | 待填 |
-| 工作树 clean | 待确认 |
-| 全量测试 | 2026-07-28：本地 364/364 通过；compileall、diff check 通过 |
-| 正式配置 SHA-256 | 待填 |
-| 正式配置解析指纹 | 待填 |
+| 目标 GPU | NVIDIA GeForce RTX 5090，32,607 MiB |
+| 目标训练环境 | Python 3.11.15、PyTorch `2.12.1+cu130`、CUDA runtime 13.0 |
+| 冻结训练 commit | `ddcb249d0b5510700c87c6eec670a188a8400e5a` |
+| 工作树 clean | preflight 与 10k 启动时均为 clean |
+| 全量测试 | 2026-07-28：本地及新服务器 364/364 通过；compileall、diff check 通过 |
+| 正式配置 SHA-256 | `08c35479ddabd1cb383cd2287a94a457ae951b80acef483c3177e64b37ed2541` |
+| 正式配置解析指纹 | `3530d4aea2873fa3eacbc1d9622de949a7069042c3b12d30057cc0ebb6a7bd913` |
 
 以下是 V1 历史身份，仅用于解释旧短跑：
 
@@ -74,6 +75,64 @@ schema、模型、Reward、loss、采集或物理语义，仍必须再次更新�
 个有效 CPU 核，无法同时为 16 个 rollout worker 和 6 个反事实 worker 保留资源。
 它只证明功能链路，不批准云端短跑；最终 commit 后仍须在 RTX 5090 服务器重新运行
 完整 preflight。
+
+## 2.1 V2 新服务器 preflight 与独立 10k 记录
+
+本次运行由用户明确授权直接执行 10k，用于验证结构感知新模型和新服务器性能。
+它使用空目录、从 update 0 开始，没有加载旧 checkpoint/replay；但此前没有先运行
+V2 5k，因此本节只登记为“独立 10k 技术证据”，不把它改写成已经完成正式
+5k→10k 顺序门禁。
+
+| 项目 | 记录 |
+| --- | --- |
+| 训练源码 | `ddcb249d0b5510700c87c6eec670a188a8400e5a`，分支 `codex/work-1`，启动时 clean |
+| 云端正式 preflight | `runs/preflight/first_500k_pre_10k_ddcb249.json`，`ready=true`、`required_failures=[]`、`warnings=[]` |
+| 配置 | `configs/train_dqn_causal_calibration_10k.toml`；H256/L4、batch 128、16 rollout、6 物理 worker、集中式 GPU actor |
+| 输出目录 | `runs/dqn_structure_v2_calibration_10k/` |
+| 运行时间 | 2026-07-28 05:10:31 → 06:05:56（55 分 25 秒） |
+| control / monitor | `runs/stage_control/v2_10k_ddcb249_20260728T0510/` / `runs/resource_monitor/v2_10k_ddcb249_20260728T0510/` |
+| 退出与进度 | 退出码 0；`10000 / 10000` updates，`162500` env steps |
+| 阶段 readiness | `runs/preflight/dqn_structure_v2_calibration_10k_readiness.json`，`ready=true`、`required_failures=[]` |
+| 本地轻量证据 | `runs/cloud_evidence/v2_calibration_10k/`；完整模式 9 个训练文件，另含 readiness 与资源监控 sidecar |
+| 最终 checkpoint | `checkpoints/latest.pt`，3,395,338,159 bytes；模型、target、optimizer、RNG、hot replay 与 causal replay 恢复检查通过 |
+
+核心训练结果：
+
+| 校准项 | 结果 |
+| --- | --- |
+| episode / truncated | 1175 局；4/1175 = 0.3404%，低于 2% |
+| 贪心评估 | update 5000：均分 560.2、最高 615；update 10000：均分 577.6、最高 646；`best_eval=646` |
+| 得分趋势 | 训练局分平滑均值由约 350 上升到约 640；仍有较大单局方差，10k 只证明已出现学习趋势，不代表收敛 |
+| 主 TD 数值 | 最终 loss/TD loss = 3.2224/3.1088；全程 `|Q|/|target|/TD MAE` 最大 49.548/49.280/5.122，无连续越过 100 |
+| 结构辅助 | 51/51 个日志窗口进入 optimizer；每批 128 个样本、768/768 有效维；结构 loss 从约 0.028 降至最终 0.0119，MAE 从约 0.160 降至 0.0786 |
+| 集中式 actor | 累计 105,682 请求、16,278 批；最大 batch 16、最终平均 batch 6.49，无异常重置 |
+| 普通反事实 | 501 个 label-ready 结果、907 个样本；strict/numeric/semantic = 502/1/2，语义分歧率 0.3960% < 1% |
+| 局部 Shapley | observed/selected/completed/strict/samples = 23729/11/11/11/32；全部选择均闭合并进入 optimizer |
+| 因果 replay | 最终 20,000：rule 19,169、counterfactual 799、Shapley 32；正/负规则 9,585/9,584 |
+| 共享预算 | 所有窗口 hard budget 为 true；实际/投影最大均 9.1178% < 10% |
+| Reward / analyzer | shaping p95 最大 0.05488 < 0.707；StateAnalyzer degraded 最大 0.03102% < 1% |
+| 吞吐 | 最终累计 3.047 updates/s、49.516 env steps/s；总墙钟 55 分 25 秒 |
+
+资源 sidecar 共 1110 个 3 秒样本。容器 CPU 配额为 25 核，训练进程平均使用
+13.39 核、峰值 17.27 核；GPU utilization 平均 37.15%、峰值 74%。显存峰值
+31,417 MiB（96.35%）只出现单个样本，连续超过 95% 的最大长度为 1，随后恢复，
+没有 OOM。cgroup 内存上限 90 GiB，working set 峰值 22.24 GiB，
+`memory.current` 峰值 36.76 GiB，有效可用内存最低 67.76 GiB；swap 和
+low/high/max/OOM/OOM-kill 事件增量全为 0。
+
+readiness 的两个非 required warning 已解释：
+
+- `counterfactual_candidate_close_dropped`：正常关闭时清空跨窗口 top-K 候选
+  256/23718 = 1.0793%；queued/inflight/token reservation 最终均为 0。
+- `replay_cold_storage_growth`：当前一代 89 个连续 cold segment 共 17.176 GiB，
+  高于 16 GiB 提醒线但不破坏恢复语义；正式 500k 前必须单独核算磁盘增长与清理
+  策略，不能把 warning 当成已解决。
+
+结论：结构输入、六维辅助监督、集中 actor、完整归因、预算反事实、Shapley、
+checkpoint 和资源稳定性均已在一次完整 10k 中闭合，且得分有明确上升趋势。该结果
+足以证明 V2 技术链路可以继续扩展，但按当前运行手册，缺失的 V2 5k 顺序证据仍需
+由用户明确决定是补跑，还是书面批准以本次更大规模独立 10k 替代；在此决定和最终
+preflight 完成前，不自动批准 500k。
 
 ## 3. V1 历史本地证据
 
@@ -263,24 +322,26 @@ orientation / angular velocity 最大误差为 0 / 0.0017626 / 0.0013093 /
 
 以下全部针对 V2，旧 V1 的勾选不继承。全部打勾前保持“未获准”：
 
-- [ ] V2 最终 commit 已提交，工作树 clean，全量测试和 compile 零失败。
-- [ ] 新服务器完成依赖、CUDA、32 次快照和正式配置 preflight。
+- [x] V2 冻结训练 commit 已提交，启动时工作树 clean，全量测试和 compile 零失败。
+- [x] 新服务器完成依赖、CUDA、32 次快照和正式配置 preflight。
 - [ ] 全新 V2 5k 正常完成，图 schema、结构 target、checkpoint/replay 均闭合。
-- [ ] 全新 V2 10k（或获批的独立 25k）正常完成并给出标定结论。
-- [ ] TD/结构/规则/反事实 loss 无 NaN/Inf，结构有效 target 持续进入 optimizer。
-- [ ] 集中 actor 无 timeout/失败，request/batch/sync/关闭统计闭合。
-- [ ] H256/L4、batch 128、16 rollout、6 物理 worker 的吞吐、内存和 GPU 可承受
+- [x] 一次从 update 0 开始的独立 V2 10k 正常完成并给出标定结论；但它未经
+  V2 5k 前置，正式顺序是否由该 10k 替代仍待明确批准。
+- [x] TD/结构/规则/反事实 loss 无 NaN/Inf，结构有效 target 持续进入 optimizer。
+- [x] 集中 actor 无 timeout/失败，request/batch/sync/关闭统计闭合。
+- [x] H256/L4、batch 128、16 rollout、6 物理 worker 的吞吐、内存和 GPU 可承受
   500k。
-- [ ] Reward shaping、StateAnalyzer degraded、truncated 和物理复现率符合手册。
-- [ ] 规则与物理反事实真实进入 optimizer，Shapley 稀疏状态已解释，10% 硬预算
+- [x] Reward shaping、StateAnalyzer degraded、truncated 和物理复现率符合手册。
+- [x] 规则与物理反事实真实进入 optimizer，Shapley 稀疏状态已解释，10% 硬预算
   未超限。
-- [ ] 正式配置没有在 V2 短跑后被无记录修改。
+- [x] 正式配置没有在 V2 独立 10k 后被无记录修改。
 - [ ] 云端输出盘满足最终 preflight 门槛。
 - [ ] 正式输出目录为空，不会覆盖或读取任何旧 run/replay。
 - [ ] 旁路资源监控已经启动。
 - [ ] 同一 V2 run 的 checkpoint 恢复命令和训练产物备份位置已确认。
 
-批准状态：**未获准；等待 V2 最终 commit、preflight、5k 和 10k 新证据**
+批准状态：**未获准；等待处理缺失的 V2 5k 顺序证据、重跑最终 preflight，并完成
+正式输出/监控/恢复与备份确认**
 
 批准人/时间：待填
 
