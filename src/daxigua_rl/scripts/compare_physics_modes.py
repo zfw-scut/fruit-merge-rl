@@ -28,6 +28,9 @@ from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.reward import RewardConfig
 from daxigua_rl.training import TransitionKey
+from daxigua_rl.training.checkpointing import (
+    extract_inference_checkpoint,
+)
 
 
 EPISODE_FIELDS = (
@@ -318,14 +321,16 @@ def build_model_from_checkpoint(checkpoint, device):
     if checkpoint is None:
         return None
 
-    checkpoint_args = checkpoint.get('args', {})
+    checkpoint_args, online_model_state = (
+        extract_inference_checkpoint(checkpoint)
+    )
     model = GNNQNetwork(
         hidden_dim=int(checkpoint_args.get('hidden_dim', 128)),
         message_layers=int(checkpoint_args.get('message_layers', 3)),
         activation=checkpoint_args.get('activation', 'silu'),
         dropout=float(checkpoint_args.get('dropout', 0.0)),
     ).to(device)
-    model.load_state_dict(checkpoint['online_model'])
+    model.load_state_dict(online_model_state)
     model.eval()
     return model
 
@@ -336,7 +341,10 @@ def resolve_action_count(args, checkpoint):
     if args.action_count is not None:
         return int(args.action_count)
     if checkpoint is not None:
-        return int(checkpoint.get('args', {}).get('action_count', 15))
+        checkpoint_args, _online_model_state = (
+            extract_inference_checkpoint(checkpoint)
+        )
+        return int(checkpoint_args.get('action_count', 15))
     return 15
 
 

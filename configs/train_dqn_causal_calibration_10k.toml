@@ -1,0 +1,19 @@
+# 第一次完整因果训练的 10k 校准；若稀疏 Shapley 样本不足，可恢复至 25k。
+extends = "train_dqn_fast30_parallel.toml"
+
+[runtime]
+run_dir = "runs/dqn_causal_calibration_10k"
+
+[training]
+total_updates = 10000
+warmup_steps = 2500
+
+[logging]
+log_interval = 200
+save_interval = 5000
+checkpoint_keep_last = 2
+eval_interval = 5000
+eval_episodes = 5
+eval_max_steps = 400
+plot_interval = 2000
+progress_interval = 3

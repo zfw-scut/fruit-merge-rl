@@ -1,0 +1,20 @@
+# 第一次完整因果训练的 5k 冒烟门禁。
+# 未覆盖字段全部继承正式 500k 配置，保证模型、Reward、归因与物理语义一致。
+extends = "train_dqn_fast30_parallel.toml"
+
+[runtime]
+run_dir = "runs/dqn_causal_smoke_5k"
+
+[training]
+total_updates = 5000
+warmup_steps = 1000
+
+[logging]
+log_interval = 100
+save_interval = 2500
+checkpoint_keep_last = 2
+eval_interval = 2500
+eval_episodes = 3
+eval_max_steps = 300
+plot_interval = 1000
+progress_interval = 3

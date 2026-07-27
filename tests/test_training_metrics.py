@@ -70,6 +70,67 @@ class TrainingMetricsTest(unittest.TestCase):
         self.assertEqual(rows[1]['env_steps'], '108')
         self.assertEqual(rows[1]['truncated'], '1')
 
+    def test_episode_logger_resume_backs_up_orphan_tail_and_continues_index(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / 'episode_metrics.csv'
+            stats = RolloutStats(
+                steps=1,
+                episodes=1,
+                total_reward=1.0,
+                episode_rewards=(1.0,),
+                episode_lengths=(1,),
+                episode_scores=(2.0,),
+                episode_end_offsets=(1,),
+                episode_terminated_flags=(True,),
+                episode_truncated_flags=(False,),
+            )
+            initial = EpisodeLogger(path)
+            initial.log_collect_stats(
+                stats,
+                phase='train',
+                update_step=1,
+                start_env_steps=0,
+                epsilon=1.0,
+            )
+            initial.log_collect_stats(
+                stats,
+                phase='train',
+                update_step=4,
+                start_env_steps=1,
+                epsilon=0.5,
+            )
+            initial.close()
+
+            resumed = EpisodeLogger(
+                path,
+                resume_update_step=2,
+            )
+            try:
+                self.assertEqual(resumed.orphaned_row_count, 1)
+                self.assertTrue(
+                    resumed.orphaned_backup_path.is_file()
+                )
+                resumed.log_collect_stats(
+                    stats,
+                    phase='train',
+                    update_step=3,
+                    start_env_steps=1,
+                    epsilon=0.75,
+                )
+            finally:
+                resumed.close()
+
+            with path.open(newline='', encoding='utf-8') as file_obj:
+                rows = list(csv.DictReader(file_obj))
+        self.assertEqual(
+            [row['update_step'] for row in rows],
+            ['1', '3'],
+        )
+        self.assertEqual(
+            [row['episode_index'] for row in rows],
+            ['1', '2'],
+        )
+
     def test_evaluate_policy_returns_score_extremes(self):
         """evaluate_policy 应返回本次评估最高分和最低分。"""
 
@@ -102,6 +163,16 @@ class TrainingMetricsTest(unittest.TestCase):
 
         collect_stats = RolloutStats(
             steps=4,
+            replay_transitions_emitted=3,
+            n_step_pending_count=2,
+            causal_rule_input_event_count=7,
+            causal_rule_eligible_event_count=5,
+            causal_rule_budget_count=3,
+            causal_samples_emitted=2,
+            causal_rule_skip_reason_counts=(
+                ('missing_context', 1),
+                ('confidence_tier_c', 2),
+            ),
             episodes=0,
             total_reward=10.0,
             reward_breakdown_totals=(
@@ -145,6 +216,20 @@ class TrainingMetricsTest(unittest.TestCase):
         )
         train_stats = SimpleNamespace(
             loss=1.0,
+            td_loss=0.8,
+            rule_rank_loss=0.5,
+            weighted_rule_rank_loss=0.075,
+            counterfactual_loss=0.25,
+            weighted_counterfactual_loss=0.025,
+            causal_update_applied=True,
+            causal_batch_size=6,
+            rule_batch_size=4,
+            counterfactual_batch_size=1,
+            shapley_batch_size=1,
+            rule_pair_accuracy=0.75,
+            rule_margin_satisfaction_rate=0.5,
+            counterfactual_sign_accuracy=1.0,
+            counterfactual_mean_abs_error=0.4,
             mean_q=2.0,
             mean_target=3.0,
             mean_reward=4.0,
@@ -164,8 +249,41 @@ class TrainingMetricsTest(unittest.TestCase):
             best_eval_score=float('-inf'),
             best_eval_update=0,
             timing={'elapsed': 2.0},
+            causal_replay_stats={
+                'total_count': 9,
+                'stratum_counts': {
+                    'positive_setup': 4,
+                    'negative_blocking': 3,
+                    'counterfactual': 2,
+                },
+                'supervision_kind_counts': {
+                    'rule': 7,
+                    'counterfactual': 1,
+                    'shapley': 1,
+                },
+                'estimated_unique_graph_bytes': 1234,
+                'estimated_graph_sharing_saved_bytes': 567,
+            },
         )
 
+        self.assertEqual(row['td_loss'], 0.8)
+        self.assertEqual(row['rule_rank_loss'], 0.5)
+        self.assertEqual(row['counterfactual_loss'], 0.25)
+        self.assertEqual(row['causal_batch_size'], 6)
+        self.assertEqual(row['collect_replay_transitions_emitted'], 3)
+        self.assertEqual(row['collect_n_step_pending_count'], 2)
+        self.assertEqual(row['collect_causal_samples_emitted'], 2)
+        self.assertEqual(row['collect_rule_causal_budget_count'], 3)
+        self.assertEqual(
+            row['collect_rule_causal_skip_reasons'],
+            '{"confidence_tier_c":2,"missing_context":1}',
+        )
+        self.assertEqual(row['causal_replay_size'], 9)
+        self.assertEqual(row['causal_replay_positive_count'], 4)
+        self.assertEqual(row['causal_replay_negative_count'], 3)
+        self.assertEqual(row['causal_replay_counterfactual_count'], 2)
+        self.assertEqual(row['causal_replay_shared_tensor_bytes'], 1234)
+        self.assertEqual(row['causal_replay_saved_tensor_bytes'], 567)
         self.assertEqual(row['collect_mean_reward_total'], 2.5)
         self.assertEqual(row['collect_mean_task_reward'], 2.0)
         self.assertEqual(row['collect_mean_potential_shaping_reward'], 0.4)
@@ -389,6 +507,31 @@ class TrainingMetricsTest(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 load_config_defaults(config_path)
+
+    def test_toml_config_extends_base_and_rejects_cycles(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            base = root / 'base.toml'
+            child = root / 'child.toml'
+            base.write_text(
+                '[training]\ntotal_updates = 100\nbatch_size = 64\n',
+                encoding='utf-8',
+            )
+            child.write_text(
+                'extends = "base.toml"\n'
+                '[training]\ntotal_updates = 5\n',
+                encoding='utf-8',
+            )
+            defaults = load_config_defaults(child)
+            self.assertEqual(defaults['total_updates'], 5)
+            self.assertEqual(defaults['batch_size'], 64)
+
+            base.write_text(
+                'extends = "child.toml"\n',
+                encoding='utf-8',
+            )
+            with self.assertRaisesRegex(ValueError, 'cyclic'):
+                load_config_defaults(child)
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@
 
 [runtime]
 # 输出目录：保存 metrics、episode_metrics、checkpoint、plots 等训练产物。
-run_dir = "runs/dqn_fast30_parallel_h128_l3_100k"
+run_dir = "runs/dqn_causal_fast30_h128_l3_n3_500k"
 
 # 训练设备：模型参数更新使用的 PyTorch 设备，可选 "cuda"、"cuda:0" 或 "cpu"。
 device = "cuda"
@@ -62,11 +62,56 @@ learning_rate = 1e-4
 # 折扣因子：未来奖励在 TD target 中的折扣权重。
 gamma = 0.99
 
+# 多步回报：每个 worker 按连续轨迹构造 3-step return，终局尾部自然缩短。
+n_step = 3
+
 # 目标网络同步：target network 每多少次 update 同步一次 online network。
 target_update_interval = 1000
 
 # 梯度裁剪：限制梯度范数，防止训练初期 Q 值和梯度爆炸；0 表示关闭。
 grad_clip_norm = 10.0
+
+[causal]
+# 因果回放独立于主 TD replay，只保留规则动作对、反事实差值和局部 Shapley。
+causal_replay_capacity = 20000
+
+# 因果 batch 和更新间隔：每两次 TD update 最多联合训练 32 条稀疏样本。
+causal_batch_size = 32
+causal_update_interval = 2
+
+# 第一次正式长训直接启用完整规则排序和稀疏反事实监督。
+lambda_rule = 0.15
+lambda_cf = 0.10
+
+# 7 级合成效用 2**2.5，用于归一化跨分支 return 差值。
+counterfactual_return_scale = 5.656854249492381
+counterfactual_target_clip = 5.0
+
+[counterfactual]
+# worker 侧只保存最近 32 个稳定动作边界；主进程按 CPU 余量自动预留独立进程。
+counterfactual_enabled = true
+counterfactual_horizon = 10
+counterfactual_cost_ratio = 0.06
+counterfactual_hard_limit = 0.10
+counterfactual_min_real_steps = 256
+counterfactual_cpu_core_ratio = 0.25
+counterfactual_queue_capacity = 256
+counterfactual_snapshot_ring_size = 32
+counterfactual_max_alternatives = 2
+counterfactual_max_inflight_per_worker = 2
+counterfactual_circuit_breaker_failures = 5
+counterfactual_soft_borrow_priority = 10.0
+
+[shapley]
+# 只对累计约 0.05% 的最高价值、多动作协同事件运行局部 Shapley。
+# 最多 3 个候选可把 subset 上限控制在 8 个，且与普通反事实共用 10% 硬预算。
+shapley_enabled = true
+shapley_event_ratio_max = 0.0005
+shapley_candidate_limit = 3
+shapley_paired_permutations = 4
+shapley_minimum_candidates = 2
+shapley_minimum_utility = 5.656854249492381
+shapley_pending_capacity = 4
 
 [model]
 # 隐藏维度：GNN hidden_dim；越大表达能力越强，但显存和计算开销越高。
@@ -123,6 +168,9 @@ log_interval = 500
 
 # 模型保存：每多少次 update 保存一次 step checkpoint；0 表示关闭周期保存。
 save_interval = 20000
+
+# 周期 checkpoint 只滚动保留最近 3 个；latest.pt 和 best.pt 不计入此窗口。
+checkpoint_keep_last = 3
 
 # 模型评估：每多少次 update 做一次 greedy 评估；0 表示关闭。
 eval_interval = 20000

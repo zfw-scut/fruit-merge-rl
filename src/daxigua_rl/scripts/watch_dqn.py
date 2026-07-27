@@ -15,6 +15,9 @@ import torch
 from daxigua_rl.graph import GraphBuilder
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.playable_adapter import board_action_candidates, board_game_state
+from daxigua_rl.training.checkpointing import (
+    extract_inference_checkpoint,
+)
 
 
 def parse_args():
@@ -51,14 +54,14 @@ def load_checkpoint(path, device):
 def build_model_from_checkpoint(checkpoint, device):
     """根据 checkpoint 里的训练参数重建 GNN-Q 模型。"""
 
-    args = checkpoint.get('args', {})
+    args, online_model_state = extract_inference_checkpoint(checkpoint)
     model = GNNQNetwork(
         hidden_dim=int(args.get('hidden_dim', 128)),
         message_layers=int(args.get('message_layers', 3)),
         activation=args.get('activation', 'silu'),
         dropout=float(args.get('dropout', 0.0)),
     ).to(device)
-    model.load_state_dict(checkpoint['online_model'])
+    model.load_state_dict(online_model_state)
     model.eval()
     return model
 
@@ -180,7 +183,9 @@ def main():
     args = parse_args()
     device = resolve_device(args.device)
     checkpoint = load_checkpoint(args.checkpoint, device)
-    checkpoint_args = checkpoint.get('args', {})
+    checkpoint_args, _online_model_state = (
+        extract_inference_checkpoint(checkpoint)
+    )
 
     seed = args.seed if args.seed is not None else checkpoint_args.get('seed')
     if seed is not None:

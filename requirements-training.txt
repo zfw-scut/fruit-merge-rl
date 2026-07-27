@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# 云端应从与 CUDA 驱动匹配的 PyTorch wheel 源安装；首轮训练冻结为此版本。
+torch==2.12.1
+matplotlib==3.11.1

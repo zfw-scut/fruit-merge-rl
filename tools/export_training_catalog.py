@@ -89,8 +89,31 @@ KEY_CONFIG_FIELDS = (
     'epsilon_decay_steps',
     'learning_rate',
     'gamma',
+    'n_step',
     'target_update_interval',
     'grad_clip_norm',
+    'causal_replay_capacity',
+    'causal_batch_size',
+    'causal_update_interval',
+    'lambda_rule',
+    'lambda_cf',
+    'counterfactual_return_scale',
+    'counterfactual_target_clip',
+    'counterfactual_enabled',
+    'counterfactual_workers',
+    'counterfactual_horizon',
+    'counterfactual_cost_ratio',
+    'counterfactual_hard_limit',
+    'counterfactual_min_real_steps',
+    'counterfactual_snapshot_ring_size',
+    'counterfactual_max_alternatives',
+    'shapley_enabled',
+    'shapley_event_ratio_max',
+    'shapley_candidate_limit',
+    'shapley_paired_permutations',
+    'shapley_minimum_candidates',
+    'shapley_minimum_utility',
+    'checkpoint_keep_last',
     'hidden_dim',
     'message_layers',
     'action_count',
@@ -211,6 +234,17 @@ def truthy(value: Any) -> bool:
     """兼容 CSV 中的 0/1 和 true/false。"""
 
     return str(value).strip().lower() in {'1', 'true', 'yes', 'y'}
+
+
+def json_value(value: Any) -> Any:
+    """安全解析 CSV 中的结构化 JSON 指标。"""
+
+    if value is None or value == '':
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 
 def last_number(rows: Iterable[dict[str, str]], field: str) -> float | None:
@@ -404,6 +438,19 @@ def collect_final_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
         'epsilon',
         'buffer_size',
         'loss',
+        'td_loss',
+        'rule_rank_loss',
+        'weighted_rule_rank_loss',
+        'counterfactual_loss',
+        'weighted_counterfactual_loss',
+        'causal_batch_size',
+        'rule_batch_size',
+        'counterfactual_batch_size',
+        'shapley_batch_size',
+        'rule_pair_accuracy',
+        'rule_margin_satisfaction_rate',
+        'counterfactual_sign_accuracy',
+        'counterfactual_mean_abs_error',
         'mean_q',
         'mean_target',
         'mean_reward',
@@ -413,6 +460,46 @@ def collect_final_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
         'env_steps_per_second',
         'best_eval_score',
         'best_eval_update',
+        'causal_replay_size',
+        'causal_replay_positive_count',
+        'causal_replay_negative_count',
+        'causal_replay_counterfactual_count',
+        'causal_replay_rule_count',
+        'causal_replay_cf_count',
+        'causal_replay_shapley_count',
+        'causal_rule_empirical_agreement_count',
+        'causal_rule_empirical_disagreement_count',
+        'causal_rule_empirical_agreement_rate',
+        'counterfactual_proposals_received',
+        'counterfactual_proposals_admitted',
+        'counterfactual_proposals_rejected',
+        'counterfactual_results_completed',
+        'counterfactual_results_partial',
+        'counterfactual_results_failed',
+        'counterfactual_reproduction_passed',
+        'counterfactual_reproduction_failed',
+        'counterfactual_label_ready_results',
+        'counterfactual_samples_inserted',
+        'counterfactual_tokens_reserved',
+        'counterfactual_tokens_consumed',
+        'counterfactual_tokens_refunded',
+        'counterfactual_actual_token_ratio',
+        'counterfactual_projected_token_ratio',
+        'counterfactual_hard_budget_respected',
+        'counterfactual_circuit_open',
+        'shapley_events_observed',
+        'shapley_events_selected',
+        'shapley_tasks_submitted',
+        'shapley_tasks_completed',
+        'shapley_tasks_failed',
+        'shapley_reproduction_passed',
+        'shapley_reproduction_failed',
+        'shapley_samples_inserted',
+        'shapley_tokens_consumed',
+        'checkpoint_bytes',
+        'checkpoint_pruned_count',
+        'save_seconds',
+        'collect_max_fruit_level',
         # Reward V2/StateAnalyzer 校准指标。旧 CSV 中不存在时自然得到 None。
         'collect_p95_abs_potential_shaping_reward',
         'collect_state_analysis_calls',
@@ -424,6 +511,14 @@ def collect_final_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
         'collect_state_analysis_degraded_rate',
     )
     result = {field: number(final_row.get(field)) for field in fields}
+    for field in (
+            'collect_attribution_event_status_counts',
+            'collect_attribution_confidence_tier_counts',
+            'collect_merge_level_counts',
+            'causal_replay_cause_type_counts',
+            'counterfactual_drop_reasons',
+            'shapley_drop_reasons'):
+        result[field] = json_value(final_row.get(field))
 
     # 评估列只有在 eval_interval 命中时才有值，因此不能只看最后一行。
     for field in ('eval_score_mean', 'eval_score_max', 'eval_score_min', 'eval_reward_mean', 'eval_length_mean'):
@@ -587,6 +682,12 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
         'source_relative_path': f'runs/{summary.run_id}',
         'total_size_bytes': summary.total_size_bytes,
         'config': key_config(summary.config_args),
+        'identity': {
+            'run_manifest': summary.config.get('run_manifest'),
+            'fingerprints': summary.config.get('fingerprints'),
+            'runtime': summary.config.get('runtime'),
+            'git': summary.config.get('git'),
+        },
         'final_metrics': summary.final_metrics,
         'episode_stats': summary.episode_stats,
         'reward_breakdown_weighted_mean': summary.reward_stats,
@@ -616,7 +717,11 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
         f'| 物理模式 | {markdown_cell(config.get("physics_mode"))} |',
         f'| 本地数据体积 | {human_size(summary.total_size_bytes)} |',
         '',
-        '> Git commit 未写入历史 config.json，因此不能从现有训练产物可靠恢复。',
+        (
+            '> 代码身份：'
+            f'`{summary.config.get("git", {}).get("commit", "历史产物未记录")}`；'
+            '完整 manifest、指纹与运行时见 `metrics_summary.json`。'
+        ),
         '',
         '## 模型与训练参数',
         '',
@@ -639,6 +744,9 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
         'epsilon',
         'buffer_size',
         'loss',
+        'td_loss',
+        'weighted_rule_rank_loss',
+        'weighted_counterfactual_loss',
         'mean_q',
         'mean_target',
         'mean_reward',
@@ -651,6 +759,23 @@ def write_run_summary(output_dir: Path, summary: RunSummary) -> None:
         'eval_score_min',
         'best_eval_score',
         'best_eval_update',
+        'causal_replay_size',
+        'causal_replay_rule_count',
+        'causal_replay_cf_count',
+        'causal_replay_shapley_count',
+        'causal_rule_empirical_agreement_rate',
+        'counterfactual_proposals_received',
+        'counterfactual_proposals_admitted',
+        'counterfactual_reproduction_passed',
+        'counterfactual_reproduction_failed',
+        'counterfactual_samples_inserted',
+        'counterfactual_actual_token_ratio',
+        'counterfactual_hard_budget_respected',
+        'shapley_events_selected',
+        'shapley_tasks_completed',
+        'shapley_samples_inserted',
+        'checkpoint_bytes',
+        'save_seconds',
     ):
         summary_lines.append(f'| `{field}` | {markdown_cell(final.get(field))} |')
 
