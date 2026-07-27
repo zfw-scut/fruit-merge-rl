@@ -157,6 +157,59 @@ class EngineSnapshotTest(unittest.TestCase):
             expected.physics_result.merge_events[0].new_fruit_id,
         )
 
+    def test_replay_report_separates_numeric_jitter_from_semantic_divergence(
+            self):
+        game = self._game(seed=3, fruit_queue=(2, 1, 3, 4))
+        expected = self._execute(game)
+        fruit = expected.final_state.board_fruits[0]
+        jittered_fruit = replace(fruit, x=fruit.x + 0.1)
+        jittered_state = replace(
+            expected.final_state,
+            board_fruits=(jittered_fruit,),
+        )
+        jittered = replace(expected, final_state=jittered_state)
+
+        numeric_report = HeadlessGame.compare_action_outcomes(
+            expected,
+            jittered,
+        )
+
+        self.assertFalse(numeric_report.matches)
+        self.assertEqual(
+            numeric_report.reproduction_status,
+            'numeric_jitter_drop',
+        )
+        self.assertEqual(
+            numeric_report.mismatch_codes,
+            ('fruit_position',),
+        )
+        self.assertAlmostEqual(
+            numeric_report.max_fruit_position_error,
+            0.1,
+        )
+        self.assertEqual(numeric_report.max_linear_velocity_error, 0.0)
+        self.assertEqual(numeric_report.max_orientation_error, 0.0)
+        self.assertEqual(numeric_report.max_angular_velocity_error, 0.0)
+
+        semantic_fruit = replace(jittered_fruit, level=fruit.level + 1)
+        semantic = replace(
+            jittered,
+            final_state=replace(
+                jittered_state,
+                board_fruits=(semantic_fruit,),
+            ),
+        )
+        semantic_report = HeadlessGame.compare_action_outcomes(
+            expected,
+            semantic,
+        )
+
+        self.assertEqual(
+            semantic_report.reproduction_status,
+            'semantic_divergence_drop',
+        )
+        self.assertIn('fruit_semantics', semantic_report.mismatch_codes)
+
     def test_two_level_chain_replays_ordered_merge_semantics(self):
         # 先放 2 级，再在其上堆一个 1 级。第三颗 1 级会先合成 2 级，随后与
         # 底部 2 级继续合成 3 级，是检验 arbiter/Shape ID 顺序的关键场景。

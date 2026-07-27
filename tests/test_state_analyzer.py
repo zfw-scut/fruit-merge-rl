@@ -26,6 +26,7 @@ from daxigua_rl.attribution import (
     StateAnalyzerConfig,
     drop_x_positions_for_level,
 )
+from daxigua_rl.attribution.state_analyzer import _bounded_mean
 from daxigua_rl.training.identity import TransitionKey
 
 
@@ -36,6 +37,18 @@ GEOMETRY = BoardGeometry(
     wall_width=20,
     floor_y=780,
 )
+
+
+class StableGeometryPrimitiveTest(unittest.TestCase):
+    """覆盖只在退化单行/单列区域出现的浮点边界回归。"""
+
+    def test_bounded_mean_of_repeated_coordinate_stays_on_coordinate(self):
+        coordinate = 21.0 / 211.0
+
+        self.assertEqual(
+            _bounded_mean((coordinate, coordinate, coordinate)),
+            coordinate,
+        )
 
 
 def _fruit(
@@ -486,6 +499,10 @@ class StateAnalyzerStructureTest(unittest.TestCase):
         for region in analysis.free_space_regions:
             self.assertGreater(region.cell_count, 0)
             self.assertTrue(set(region.boundary_fruit_ids) <= fruit_ids)
+            self.assertLessEqual(region.min_x, region.centroid_x)
+            self.assertLessEqual(region.centroid_x, region.max_x)
+            self.assertLessEqual(region.min_y, region.centroid_y)
+            self.assertLessEqual(region.centroid_y, region.max_y)
             if region.sealed:
                 self.assertEqual(region.reachable_action_mask, 0)
             else:
@@ -528,6 +545,32 @@ class StateAnalyzerStructureTest(unittest.TestCase):
         )))
         self.assertEqual(opened.sealed_cavity_count, 0)
         self.assertAlmostEqual(opened.sealed_cavity_ratio, 0.0)
+
+    def test_single_row_cavity_centroid_stays_inside_bounding_box(self):
+        """退化成单行的区域不能因均值舍入在包围盒外崩溃。"""
+
+        fruits = tuple(
+            _fruit(
+                offset + 1,
+                1,
+                200 + 70 * math.cos(2 * math.pi * offset / 8),
+                300 + 50 * math.sin(2 * math.pi * offset / 8),
+            )
+            for offset in range(8)
+        )
+
+        analysis = _analyze(_state(fruits))
+        cavities = tuple(
+            region
+            for region in analysis.free_space_regions
+            if region.sealed
+        )
+
+        self.assertEqual(len(cavities), 1)
+        cavity = cavities[0]
+        self.assertEqual(cavity.cell_count, 5)
+        self.assertEqual(cavity.min_y, cavity.max_y)
+        self.assertEqual(cavity.centroid_y, cavity.min_y)
 
 
 class StateAnalyzerValidationAndSymmetryTest(unittest.TestCase):

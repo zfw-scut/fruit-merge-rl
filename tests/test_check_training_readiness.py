@@ -59,6 +59,13 @@ METRIC_FIELDS = (
     'counterfactual_results_failed',
     'counterfactual_reproduction_passed',
     'counterfactual_reproduction_failed',
+    'counterfactual_numeric_jitter_dropped',
+    'counterfactual_semantic_divergence_dropped',
+    'counterfactual_numeric_jitter_max_merge_event_position_error',
+    'counterfactual_numeric_jitter_max_fruit_position_error',
+    'counterfactual_numeric_jitter_max_linear_velocity_error',
+    'counterfactual_numeric_jitter_max_orientation_error',
+    'counterfactual_numeric_jitter_max_angular_velocity_error',
     'counterfactual_samples_inserted',
     'counterfactual_pending_tasks',
     'counterfactual_admission_slots_used',
@@ -84,6 +91,13 @@ METRIC_FIELDS = (
     'shapley_terminal_dropped',
     'shapley_reproduction_passed',
     'shapley_reproduction_failed',
+    'shapley_numeric_jitter_dropped',
+    'shapley_semantic_divergence_dropped',
+    'shapley_numeric_jitter_max_merge_event_position_error',
+    'shapley_numeric_jitter_max_fruit_position_error',
+    'shapley_numeric_jitter_max_linear_velocity_error',
+    'shapley_numeric_jitter_max_orientation_error',
+    'shapley_numeric_jitter_max_angular_velocity_error',
     'shapley_samples_inserted',
     'checkpoint_bytes',
     'checkpoint_step_materialization',
@@ -307,6 +321,13 @@ class SyntheticTrainingRun:
                         1 if index == 2 else 0
                     ),
                     'counterfactual_reproduction_failed': 0,
+                    'counterfactual_numeric_jitter_dropped': 0,
+                    'counterfactual_semantic_divergence_dropped': 0,
+                    'counterfactual_numeric_jitter_max_merge_event_position_error': 0.0,
+                    'counterfactual_numeric_jitter_max_fruit_position_error': 0.0,
+                    'counterfactual_numeric_jitter_max_linear_velocity_error': 0.0,
+                    'counterfactual_numeric_jitter_max_orientation_error': 0.0,
+                    'counterfactual_numeric_jitter_max_angular_velocity_error': 0.0,
                     'counterfactual_samples_inserted': (
                         2 if index == 2 else 0
                     ),
@@ -344,6 +365,13 @@ class SyntheticTrainingRun:
                     'shapley_terminal_dropped': 0,
                     'shapley_reproduction_passed': 0,
                     'shapley_reproduction_failed': 0,
+                    'shapley_numeric_jitter_dropped': 0,
+                    'shapley_semantic_divergence_dropped': 0,
+                    'shapley_numeric_jitter_max_merge_event_position_error': 0.0,
+                    'shapley_numeric_jitter_max_fruit_position_error': 0.0,
+                    'shapley_numeric_jitter_max_linear_velocity_error': 0.0,
+                    'shapley_numeric_jitter_max_orientation_error': 0.0,
+                    'shapley_numeric_jitter_max_angular_velocity_error': 0.0,
                     'shapley_samples_inserted': 0,
                     'checkpoint_bytes': 1024,
                     'checkpoint_step_materialization': (
@@ -457,6 +485,13 @@ class SyntheticTrainingRun:
                 'results_failed': 0,
                 'reproduction_passed': 1,
                 'reproduction_failed': 0,
+                'numeric_jitter_dropped': 0,
+                'semantic_divergence_dropped': 0,
+                'numeric_jitter_max_merge_event_position_error': 0.0,
+                'numeric_jitter_max_fruit_position_error': 0.0,
+                'numeric_jitter_max_linear_velocity_error': 0.0,
+                'numeric_jitter_max_orientation_error': 0.0,
+                'numeric_jitter_max_angular_velocity_error': 0.0,
                 'samples_inserted': 2,
             },
             'actual_token_ratio': 0.05,
@@ -497,6 +532,13 @@ class SyntheticTrainingRun:
                 'selected_terminal_dropped': 0,
                 'reproduction_passed': 0,
                 'reproduction_failed': 0,
+                'numeric_jitter_dropped': 0,
+                'semantic_divergence_dropped': 0,
+                'numeric_jitter_max_merge_event_position_error': 0.0,
+                'numeric_jitter_max_fruit_position_error': 0.0,
+                'numeric_jitter_max_linear_velocity_error': 0.0,
+                'numeric_jitter_max_orientation_error': 0.0,
+                'numeric_jitter_max_angular_velocity_error': 0.0,
                 'samples_inserted': 0,
             },
         }
@@ -645,6 +687,153 @@ class CheckTrainingReadinessTest(unittest.TestCase):
             if check['name'] == name
         )
 
+    def _set_counterfactual_reproduction_outcomes(
+            self,
+            *,
+            strict,
+            numeric,
+            semantic,
+            numeric_errors=None):
+        """把 fixture 最后一段改成指定的三态累计账本。"""
+
+        numeric_errors = dict(numeric_errors or {})
+        failed = numeric + semantic
+        reason_counts = {}
+        if numeric:
+            reason_counts['original_reproduction_numeric_jitter'] = numeric
+        if semantic:
+            reason_counts[
+                'original_reproduction_semantic_divergence'
+            ] = semantic
+
+        rows = self.fixture.read_metrics()
+        row = rows[-1]
+        row['counterfactual_results_completed'] = str(strict)
+        row['counterfactual_results_failed'] = str(failed)
+        row['counterfactual_reproduction_passed'] = str(strict)
+        row['counterfactual_reproduction_failed'] = str(failed)
+        row['counterfactual_numeric_jitter_dropped'] = str(numeric)
+        row['counterfactual_semantic_divergence_dropped'] = str(
+            semantic
+        )
+        row['counterfactual_failure_reasons'] = json.dumps(
+            reason_counts
+        )
+        row['counterfactual_failure_diagnostic_codes'] = json.dumps(
+            {'reproduction_outcome_classified': failed}
+            if failed
+            else {}
+        )
+        row['counterfactual_failure_trigger_reasons'] = json.dumps(
+            {'fixture': failed} if failed else {}
+        )
+        for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity'):
+            row[
+                f'counterfactual_numeric_jitter_max_{suffix}_error'
+            ] = str(numeric_errors.get(suffix, 0.0))
+        self.fixture.write_metrics(rows)
+
+        shutdown = self.fixture.read_counterfactual_shutdown()
+        shutdown['scheduler']['failed'] = failed
+        shutdown['cumulative'].update(
+            {
+                'results_completed': strict,
+                'results_failed': failed,
+                'reproduction_passed': strict,
+                'reproduction_failed': failed,
+                'numeric_jitter_dropped': numeric,
+                'semantic_divergence_dropped': semantic,
+                'failure_reason_counts': reason_counts,
+                'failure_diagnostic_code_counts': (
+                    {'reproduction_outcome_classified': failed}
+                    if failed
+                    else {}
+                ),
+                'failure_trigger_reason_counts': (
+                    {'fixture': failed} if failed else {}
+                ),
+            }
+        )
+        for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity'):
+            shutdown['cumulative'][
+                f'numeric_jitter_max_{suffix}_error'
+            ] = numeric_errors.get(suffix, 0.0)
+        self.fixture.write_counterfactual_shutdown(shutdown)
+
+    def _set_shapley_reproduction_outcomes(
+            self,
+            *,
+            strict,
+            numeric,
+            semantic,
+            numeric_errors=None):
+        """生成既有严格样本、又有可审计 drop 的 Shapley 账本。"""
+
+        numeric_errors = dict(numeric_errors or {})
+        failed = numeric + semantic
+        selected = strict + failed
+        rows = self.fixture.read_metrics()
+        row = rows[-1]
+        row['causal_update_applied'] = '1'
+        row['shapley_batch_size'] = '1'
+        row['shapley_events_selected'] = str(selected)
+        row['shapley_tasks_completed'] = str(strict)
+        row['shapley_tasks_failed'] = str(failed)
+        row['shapley_reproduction_passed'] = str(strict)
+        row['shapley_reproduction_failed'] = str(failed)
+        row['shapley_numeric_jitter_dropped'] = str(numeric)
+        row['shapley_semantic_divergence_dropped'] = str(semantic)
+        row['shapley_samples_inserted'] = str(max(1, strict))
+        for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity'):
+            row[
+                f'shapley_numeric_jitter_max_{suffix}_error'
+            ] = str(numeric_errors.get(suffix, 0.0))
+        self.fixture.write_metrics(rows)
+
+        state = self.fixture._default_shapley_state()
+        state.update(
+            {
+                'selected_event_count': selected,
+                'selected_ratio': selected / 300,
+            }
+        )
+        state['cumulative'].update(
+            {
+                'results_completed': strict,
+                'results_failed': failed,
+                'reproduction_passed': strict,
+                'reproduction_failed': failed,
+                'numeric_jitter_dropped': numeric,
+                'semantic_divergence_dropped': semantic,
+                'samples_inserted': max(1, strict),
+            }
+        )
+        for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity'):
+            state['cumulative'][
+                f'numeric_jitter_max_{suffix}_error'
+            ] = numeric_errors.get(suffix, 0.0)
+        self.fixture.write_shapley_checkpoint(state)
+
     def test_complete_5k_fixture_passes_with_recorded_shutdown_cancellations(self):
         payload = audit_training_run(
             self.fixture.run_dir,
@@ -652,6 +841,7 @@ class CheckTrainingReadinessTest(unittest.TestCase):
         )
 
         self.assertTrue(payload['ready'])
+        self.assertEqual(payload['schema_version'], 2)
         self.assertEqual(payload['exit_code'], 0)
         self.assertGreater(
             payload['attribution_shutdown']['cancelled_pending_count'],
@@ -765,6 +955,9 @@ class CheckTrainingReadinessTest(unittest.TestCase):
         rows = self.fixture.read_metrics()
         rows[-1]['counterfactual_results_failed'] = '1'
         rows[-1]['counterfactual_reproduction_failed'] = '1'
+        rows[-1][
+            'counterfactual_semantic_divergence_dropped'
+        ] = '1'
         rows[-1]['counterfactual_failure_reasons'] = json.dumps(
             {'original_reproduction_mismatch': 1}
         )
@@ -782,6 +975,7 @@ class CheckTrainingReadinessTest(unittest.TestCase):
             {
                 'results_failed': 1,
                 'reproduction_failed': 1,
+                'semantic_divergence_dropped': 1,
                 'failure_records_created': 1,
                 'failure_reason_counts': {
                     'original_reproduction_mismatch': 1,
@@ -822,6 +1016,130 @@ class CheckTrainingReadinessTest(unittest.TestCase):
         self.assertIn(
             'counterfactual_failures_classified_and_infrastructure_clean',
             unclassified['required_failures'],
+        )
+
+    def test_counterfactual_numeric_jitter_is_reported_without_warning(self):
+        self._set_counterfactual_reproduction_outcomes(
+            strict=1,
+            numeric=1,
+            semantic=0,
+            numeric_errors={
+                'merge_event_position': 0.09,
+                'fruit_position': 0.03,
+                'linear_velocity': 0.008,
+                'orientation': 0.0006,
+                'angular_velocity': 0.0004,
+            },
+        )
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertTrue(payload['ready'])
+        self.assertNotIn(
+            'counterfactual_reproduction_failure_rate_sample_size',
+            payload['warnings'],
+        )
+        outcome = self._check(
+            payload,
+            'counterfactual_reproduction_outcome_accounting',
+        )['details']
+        self.assertTrue(outcome['failure_outcomes_fully_accounted'])
+        self.assertEqual(outcome['numeric_jitter_dropped'], 1)
+        self.assertEqual(outcome['semantic_divergence_dropped'], 0)
+        self.assertEqual(outcome['unknown_failed'], 0)
+        self.assertEqual(
+            outcome['numeric_jitter_error_maxima'][
+                'numeric_jitter_max_merge_event_position_error'
+            ],
+            0.09,
+        )
+
+    def test_counterfactual_semantic_rate_uses_all_three_outcomes(self):
+        self._set_counterfactual_reproduction_outcomes(
+            strict=98,
+            numeric=1,
+            semantic=1,
+        )
+        passing = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertTrue(passing['ready'])
+        gate = self._check(
+            passing,
+            'counterfactual_reproduction_failure_rate',
+        )
+        self.assertEqual(gate['details']['total'], 100)
+        self.assertEqual(gate['details']['strict_matches'], 98)
+        self.assertEqual(
+            gate['details']['numeric_jitter_dropped'],
+            1,
+        )
+        self.assertAlmostEqual(gate['details']['rate'], 0.01)
+
+        self._set_counterfactual_reproduction_outcomes(
+            strict=97,
+            numeric=1,
+            semantic=2,
+        )
+        failing = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+        self.assertFalse(failing['ready'])
+        self.assertIn(
+            'counterfactual_reproduction_failure_rate',
+            failing['required_failures'],
+        )
+
+    def test_counterfactual_unknown_failure_and_negative_maximum_block(self):
+        rows = self.fixture.read_metrics()
+        rows[-1]['counterfactual_results_failed'] = '1'
+        rows[-1]['counterfactual_reproduction_failed'] = '1'
+        rows[-1]['counterfactual_failure_reasons'] = json.dumps(
+            {'original_reproduction_mismatch': 1}
+        )
+        rows[-1][
+            'counterfactual_numeric_jitter_max_fruit_position_error'
+        ] = '-0.1'
+        self.fixture.write_metrics(rows)
+        shutdown = self.fixture.read_counterfactual_shutdown()
+        shutdown['scheduler']['failed'] = 1
+        shutdown['cumulative'].update(
+            {
+                'results_failed': 1,
+                'reproduction_failed': 1,
+                'failure_reason_counts': {
+                    'original_reproduction_mismatch': 1,
+                },
+            }
+        )
+        self.fixture.write_counterfactual_shutdown(shutdown)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        self.assertIn(
+            'counterfactual_reproduction_outcome_accounting',
+            payload['required_failures'],
+        )
+        outcome = self._check(
+            payload,
+            'counterfactual_reproduction_outcome_accounting',
+        )['details']
+        self.assertEqual(outcome['unknown_failed'], 1)
+        self.assertEqual(
+            outcome['invalid_metric_numeric_error_rows'][
+                'numeric_jitter_max_fruit_position_error'
+            ],
+            [2],
         )
 
     def test_counterfactual_runner_exception_is_infrastructure_failure(self):
@@ -942,8 +1260,15 @@ class CheckTrainingReadinessTest(unittest.TestCase):
         failed_state['cumulative'] = {
             'results_completed': 0,
             'results_failed': 1,
-            'reproduction_passed': 0,
-            'reproduction_failed': 1,
+            'reproduction_passed': 1,
+            'reproduction_failed': 0,
+            'numeric_jitter_dropped': 0,
+            'semantic_divergence_dropped': 0,
+            'numeric_jitter_max_merge_event_position_error': 0.0,
+            'numeric_jitter_max_fruit_position_error': 0.0,
+            'numeric_jitter_max_linear_velocity_error': 0.0,
+            'numeric_jitter_max_orientation_error': 0.0,
+            'numeric_jitter_max_angular_velocity_error': 0.0,
             'samples_inserted': 0,
         }
         fixture.write_shapley_checkpoint(failed_state)
@@ -956,6 +1281,90 @@ class CheckTrainingReadinessTest(unittest.TestCase):
         self.assertIn(
             'shapley_stage_evidence_and_shutdown',
             failed_payload['required_failures'],
+        )
+        self.assertEqual(
+            failed_payload['shapley']['reproduction_outcomes'][
+                'unknown_failed'
+            ],
+            0,
+        )
+        self.assertEqual(
+            failed_payload['shapley']['reproduction_outcomes'][
+                'non_gate_result_failed'
+            ],
+            1,
+        )
+
+    def test_shapley_numeric_jitter_does_not_replace_strict_evidence(self):
+        self._set_shapley_reproduction_outcomes(
+            strict=1,
+            numeric=1,
+            semantic=0,
+            numeric_errors={'fruit_position': 0.02},
+        )
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertTrue(payload['ready'])
+        self.assertEqual(payload['shapley']['completed'], 1)
+        self.assertEqual(payload['shapley']['reproduction_passed'], 1)
+        self.assertEqual(payload['shapley']['numeric_jitter_dropped'], 1)
+        self.assertTrue(payload['shapley']['optimizer_consumed'])
+        self.assertNotIn(
+            'shapley_reproduction_failure_rate_sample_size',
+            payload['warnings'],
+        )
+
+    def test_shapley_low_sample_semantic_divergence_is_warning(self):
+        self._set_shapley_reproduction_outcomes(
+            strict=1,
+            numeric=0,
+            semantic=1,
+        )
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertTrue(payload['ready'])
+        self.assertIn(
+            'shapley_reproduction_failure_rate_sample_size',
+            payload['warnings'],
+        )
+        outcome = payload['shapley']['reproduction_outcomes']
+        self.assertEqual(outcome['semantic_rate_denominator'], 2)
+        self.assertAlmostEqual(
+            outcome['semantic_divergence_rate'],
+            0.5,
+        )
+
+    def test_shapley_semantic_rate_blocks_at_sufficient_sample_size(self):
+        self._set_shapley_reproduction_outcomes(
+            strict=98,
+            numeric=0,
+            semantic=2,
+        )
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        self.assertIn(
+            'shapley_stage_evidence_and_shutdown',
+            payload['required_failures'],
+        )
+        outcome = payload['shapley']['reproduction_outcomes']
+        self.assertTrue(outcome['semantic_rate_evaluated'])
+        self.assertFalse(outcome['semantic_rate_passed'])
+        self.assertAlmostEqual(
+            outcome['semantic_divergence_rate'],
+            0.02,
         )
 
     def test_resume_sidecar_breaks_equal_counter_segments(self):

@@ -36,7 +36,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 
-READINESS_SCHEMA_VERSION = 1
+READINESS_SCHEMA_VERSION = 2
 DEFAULT_SHAPING_P95_LIMIT = (2.0 ** 1.5) * 0.25
 DEFAULT_BASELINE_CONFIG = (
     PROJECT_ROOT / 'configs' / 'train_dqn_causal_500k.toml'
@@ -88,6 +88,26 @@ METRIC_JSON_FIELDS = METRIC_TEXT_FIELDS.difference(
     }
 )
 EPISODE_TEXT_FIELDS = frozenset({'phase'})
+
+REPRODUCTION_NUMERIC_ERROR_SUFFIXES = (
+    'merge_event_position',
+    'fruit_position',
+    'linear_velocity',
+    'orientation',
+    'angular_velocity',
+)
+REPRODUCTION_OUTCOME_METRIC_FIELDS = frozenset(
+    f'{prefix}_{field}'
+    for prefix in ('counterfactual', 'shapley')
+    for field in (
+        'numeric_jitter_dropped',
+        'semantic_divergence_dropped',
+        *(
+            f'numeric_jitter_max_{suffix}_error'
+            for suffix in REPRODUCTION_NUMERIC_ERROR_SUFFIXES
+        ),
+    )
+)
 
 REQUIRED_METRIC_FIELDS = frozenset(
     {
@@ -142,7 +162,7 @@ REQUIRED_METRIC_FIELDS = frozenset(
         'checkpoint_step_materialization',
         'checkpoint_extra_materialization',
     }
-)
+) | REPRODUCTION_OUTCOME_METRIC_FIELDS
 REQUIRED_EPISODE_FIELDS = frozenset(
     {
         'episode_index',
@@ -554,6 +574,196 @@ def _segmented_cumulative_total(
                 segment_max = max(segment_max, final_number)
     total = completed_segments + segment_max
     return int(total) if total.is_integer() else total
+
+
+def _reproduction_outcome_audit(
+        *,
+        prefix,
+        metrics_rows,
+        cumulative,
+        strict_matches,
+        results_failed,
+        reproduction_failed,
+        segment_starts,
+        max_semantic_rate,
+        min_results_for_rate):
+    """汇总 strict / 数值抖动 / 语义分叉三态复现账本。
+
+    ``reproduction_failed`` 是为兼容旧日志保留的复现失败计数，其中应同时
+    包含 ``numeric_jitter_dropped`` 和 ``semantic_divergence_dropped``；
+    两者之外的差额是未归入三态的未知复现失败。``results_failed`` 还可能包含
+    subset、效率门或 runner 失败，因此独立返回其非复现门差额供调用方判断。
+
+    两类 drop 计数和 strict 计数在 resume 后会归零，因此使用显式 sidecar
+    分段累计；五类数值误差是累计最大值，只需跨所有分段和最终状态取最大值。
+    """
+
+    if not isinstance(cumulative, Mapping):
+        cumulative = {}
+
+    count_fields = (
+        'numeric_jitter_dropped',
+        'semantic_divergence_dropped',
+    )
+    metric_count_values = {}
+    invalid_metric_count_rows = {}
+    checkpoint_counts = {}
+    invalid_checkpoint_count_fields = []
+    aggregated_counts = {}
+    for field in count_fields:
+        metric_field = f'{prefix}_{field}'
+        normalized = tuple(
+            _nonnegative_count(_number(row, metric_field))
+            for row in metrics_rows
+        )
+        invalid_rows = [
+            index
+            for index, value in enumerate(normalized)
+            if value is None
+        ]
+        metric_count_values[field] = tuple(
+            0 if value is None else value
+            for value in normalized
+        )
+        invalid_metric_count_rows[field] = invalid_rows
+
+        checkpoint_value = _nonnegative_count(cumulative.get(field))
+        checkpoint_counts[field] = checkpoint_value
+        if checkpoint_value is None:
+            invalid_checkpoint_count_fields.append(field)
+        aggregated_counts[field] = _segmented_cumulative_total(
+            metric_count_values[field],
+            checkpoint_value,
+            segment_starts=segment_starts,
+        )
+
+    metric_error_values = {}
+    invalid_metric_error_rows = {}
+    checkpoint_error_maxima = {}
+    invalid_checkpoint_error_fields = []
+    error_maxima = {}
+    for suffix in REPRODUCTION_NUMERIC_ERROR_SUFFIXES:
+        field = f'numeric_jitter_max_{suffix}_error'
+        metric_field = f'{prefix}_{field}'
+        normalized = tuple(
+            _number(row, metric_field)
+            for row in metrics_rows
+        )
+        invalid_rows = [
+            index
+            for index, value in enumerate(normalized)
+            if value is None or value < 0.0
+        ]
+        valid_metric_values = tuple(
+            value
+            for value in normalized
+            if value is not None and value >= 0.0
+        )
+        metric_error_values[field] = valid_metric_values
+        invalid_metric_error_rows[field] = invalid_rows
+
+        checkpoint_value = _finite_number(cumulative.get(field))
+        if checkpoint_value is None or checkpoint_value < 0.0:
+            invalid_checkpoint_error_fields.append(field)
+            checkpoint_error_maxima[field] = None
+            valid_checkpoint_values = ()
+        else:
+            checkpoint_error_maxima[field] = checkpoint_value
+            valid_checkpoint_values = (checkpoint_value,)
+        error_maxima[field] = max(
+            (*valid_metric_values, *valid_checkpoint_values),
+            default=0.0,
+        )
+
+    strict_count = _nonnegative_count(strict_matches)
+    failed_count = _nonnegative_count(results_failed)
+    legacy_reproduction_failed = _nonnegative_count(
+        reproduction_failed
+    )
+    numeric_jitter = aggregated_counts['numeric_jitter_dropped']
+    semantic_divergence = aggregated_counts[
+        'semantic_divergence_dropped'
+    ]
+    unknown_failed = (
+        legacy_reproduction_failed
+        - numeric_jitter
+        - semantic_divergence
+        if legacy_reproduction_failed is not None
+        else None
+    )
+    non_gate_result_failed = (
+        failed_count - numeric_jitter - semantic_divergence
+        if failed_count is not None
+        else None
+    )
+    semantic_denominator = (
+        strict_count + numeric_jitter + semantic_divergence
+        if strict_count is not None
+        else None
+    )
+    semantic_rate = (
+        semantic_divergence / semantic_denominator
+        if semantic_denominator
+        else None
+    )
+    semantic_rate_evaluated = (
+        semantic_denominator is not None
+        and semantic_denominator >= min_results_for_rate
+    )
+    semantic_rate_passed = (
+        not semantic_rate_evaluated
+        or (
+            semantic_rate is not None
+            and semantic_rate <= max_semantic_rate + 1e-12
+        )
+    )
+    valid = (
+        strict_count is not None
+        and failed_count is not None
+        and legacy_reproduction_failed is not None
+        and not invalid_checkpoint_count_fields
+        and not any(invalid_metric_count_rows.values())
+        and not invalid_checkpoint_error_fields
+        and not any(invalid_metric_error_rows.values())
+    )
+    return {
+        'valid': valid,
+        'strict_match': strict_count,
+        'legacy_results_failed': failed_count,
+        'legacy_reproduction_failed': legacy_reproduction_failed,
+        'numeric_jitter_dropped': numeric_jitter,
+        'semantic_divergence_dropped': semantic_divergence,
+        'unknown_failed': unknown_failed,
+        'non_gate_result_failed': non_gate_result_failed,
+        'failure_outcomes_fully_accounted': (
+            valid and unknown_failed == 0
+        ),
+        'semantic_rate_denominator': semantic_denominator,
+        'semantic_divergence_rate': semantic_rate,
+        'semantic_rate_evaluated': semantic_rate_evaluated,
+        'semantic_rate_passed': semantic_rate_passed,
+        'semantic_rate_threshold': max_semantic_rate,
+        'semantic_rate_minimum_results': min_results_for_rate,
+        'numeric_jitter_error_maxima': error_maxima,
+        'checkpoint_counts': checkpoint_counts,
+        'checkpoint_numeric_jitter_error_maxima': (
+            checkpoint_error_maxima
+        ),
+        'invalid_metric_count_rows': invalid_metric_count_rows,
+        'invalid_checkpoint_count_fields': (
+            invalid_checkpoint_count_fields
+        ),
+        'invalid_metric_numeric_error_rows': (
+            invalid_metric_error_rows
+        ),
+        'invalid_checkpoint_numeric_error_fields': (
+            invalid_checkpoint_error_fields
+        ),
+        'aggregation': (
+            'resume-segmented counts plus final state; '
+            'cross-segment maxima for numeric errors'
+        ),
+    }
 
 
 def _resume_sidecar_audit(run_dir, metric_updates):
@@ -1939,6 +2149,8 @@ def _shapley_audit(
         metrics_rows,
         checkpoint_state,
         require_samples,
+        max_semantic_rate,
+        min_results_for_rate,
         resume_segment_starts=()):
     """使用最终 checkpoint 中关闭后的 Shapley 状态给出阶段化结论。"""
 
@@ -1985,6 +2197,12 @@ def _shapley_audit(
             'reproduction_failed',
             0,
         ),
+        'numeric_jitter_dropped': cumulative.get(
+            'numeric_jitter_dropped',
+        ),
+        'semantic_divergence_dropped': cumulative.get(
+            'semantic_divergence_dropped',
+        ),
         'samples': cumulative.get(
             'samples_inserted',
             0,
@@ -2007,6 +2225,12 @@ def _shapley_audit(
         'terminal_dropped': 'shapley_terminal_dropped',
         'reproduction_passed': 'shapley_reproduction_passed',
         'reproduction_failed': 'shapley_reproduction_failed',
+        'numeric_jitter_dropped': (
+            'shapley_numeric_jitter_dropped'
+        ),
+        'semantic_divergence_dropped': (
+            'shapley_semantic_divergence_dropped'
+        ),
         'samples': 'shapley_samples_inserted',
     }
     aggregated_counts = {
@@ -2028,7 +2252,24 @@ def _shapley_audit(
     reproduction_failed = aggregated_counts[
         'reproduction_failed'
     ]
+    numeric_jitter_dropped = aggregated_counts[
+        'numeric_jitter_dropped'
+    ]
+    semantic_divergence_dropped = aggregated_counts[
+        'semantic_divergence_dropped'
+    ]
     samples = aggregated_counts['samples']
+    reproduction_outcomes = _reproduction_outcome_audit(
+        prefix='shapley',
+        metrics_rows=metrics_rows,
+        cumulative=cumulative,
+        strict_matches=reproduction_passed,
+        results_failed=failed,
+        reproduction_failed=reproduction_failed,
+        segment_starts=resume_segment_starts,
+        max_semantic_rate=max_semantic_rate,
+        min_results_for_rate=min_results_for_rate,
+    )
     # “runner 结果闭环”和“所有 selected 终态闭环”必须分开表达。
     # terminal_dropped 能解释任务去了哪里，但绝不能冒充有效物理结果，
     # 否则一次全部被预算饿死的运行会被错误放行。
@@ -2083,12 +2324,25 @@ def _shapley_audit(
             completed > 0
             and selected_result_accounting_closed
             and terminal_dropped == 0
-            and failed == 0
             and reproduction_passed > 0
-            and reproduction_failed == 0
+            and reproduction_outcomes[
+                'failure_outcomes_fully_accounted'
+            ]
+            and reproduction_outcomes[
+                'non_gate_result_failed'
+            ] == 0
+            and reproduction_outcomes['semantic_rate_passed']
             and samples > 0
             and optimizer_consumed
         )
+        if (
+                semantic_divergence_dropped > 0
+                and not reproduction_outcomes[
+                    'semantic_rate_evaluated'
+                ]):
+            warnings.append(
+                'shapley_reproduction_failure_rate_sample_size'
+            )
         if terminal_dropped > 0:
             warnings.append('shapley_selected_terminal_drops')
     if require_samples:
@@ -2099,6 +2353,10 @@ def _shapley_audit(
         and metrics_enabled
         and cleanup_complete
         and not invalid_counts
+        and reproduction_outcomes['valid']
+        and reproduction_outcomes['failure_outcomes_fully_accounted']
+        and reproduction_outcomes['non_gate_result_failed'] == 0
+        and reproduction_outcomes['semantic_rate_passed']
         and selected_terminal_accounting_closed
         and signal_passed
     )
@@ -2120,6 +2378,11 @@ def _shapley_audit(
         'terminal_dropped': terminal_dropped,
         'reproduction_passed': reproduction_passed,
         'reproduction_failed': reproduction_failed,
+        'numeric_jitter_dropped': numeric_jitter_dropped,
+        'semantic_divergence_dropped': (
+            semantic_divergence_dropped
+        ),
+        'reproduction_outcomes': reproduction_outcomes,
         'samples_inserted': samples,
         'selected_result_accounting_closed': (
             selected_result_accounting_closed
@@ -3321,6 +3584,21 @@ def audit_training_run(
         cf_count_values['candidate_close_dropped'],
         segment_starts=resume_segment_starts,
     )
+    cf_reproduction_outcomes = _reproduction_outcome_audit(
+        prefix='counterfactual',
+        metrics_rows=metrics_rows,
+        cumulative=cumulative,
+        strict_matches=cf_reproduced,
+        results_failed=cf_results_failed,
+        reproduction_failed=cf_reproduction_failed,
+        segment_starts=resume_segment_starts,
+        max_semantic_rate=(
+            thresholds.max_cf_reproduction_failure_rate
+        ),
+        min_results_for_rate=(
+            thresholds.min_cf_results_for_failure_rate
+        ),
+    )
     _add_check(
         checks,
         'counterfactual_completed_reproduced_samples',
@@ -3336,6 +3614,17 @@ def audit_training_run(
         samples_inserted=cf_samples,
         invalid_count_fields=cf_invalid_counts,
         aggregation='resume-segmented metrics plus shutdown',
+    )
+    _add_check(
+        checks,
+        'counterfactual_reproduction_outcome_accounting',
+        (
+            cf_reproduction_outcomes['valid']
+            and cf_reproduction_outcomes[
+                'failure_outcomes_fully_accounted'
+            ]
+        ),
+        **cf_reproduction_outcomes,
     )
     metric_cf_failures = _series(
         metrics_rows,
@@ -3574,29 +3863,36 @@ def audit_training_run(
                 'graceful close; this is reported but is not a failure'
             ),
         )
-    cf_reproduction_total = cf_reproduced + cf_reproduction_failed
-    cf_failure_rate = (
-        cf_reproduction_failed / cf_reproduction_total
-        if cf_reproduction_total > 0
-        else None
-    )
-    if (
-            cf_reproduction_total
-            >= thresholds.min_cf_results_for_failure_rate):
+    cf_reproduction_total = cf_reproduction_outcomes[
+        'semantic_rate_denominator'
+    ]
+    cf_failure_rate = cf_reproduction_outcomes[
+        'semantic_divergence_rate'
+    ]
+    cf_semantic_divergence = cf_reproduction_outcomes[
+        'semantic_divergence_dropped'
+    ]
+    if cf_reproduction_outcomes['semantic_rate_evaluated']:
         _add_check(
             checks,
             'counterfactual_reproduction_failure_rate',
-            (
-                cf_failure_rate
-                <= thresholds.max_cf_reproduction_failure_rate + 1e-12
-            ),
+            cf_reproduction_outcomes['semantic_rate_passed'],
             evaluated=True,
             total=cf_reproduction_total,
-            failures=cf_reproduction_failed,
+            strict_matches=cf_reproduced,
+            numeric_jitter_dropped=cf_reproduction_outcomes[
+                'numeric_jitter_dropped'
+            ],
+            failures=cf_semantic_divergence,
             rate=cf_failure_rate,
             threshold=thresholds.max_cf_reproduction_failure_rate,
+            interpretation=(
+                'only semantic divergence consumes the physical '
+                'reproduction failure-rate allowance; numeric jitter is '
+                'reported and dropped without consuming that allowance'
+            ),
         )
-    elif cf_reproduction_failed > 0:
+    elif cf_semantic_divergence > 0:
         _add_check(
             checks,
             'counterfactual_reproduction_failure_rate_sample_size',
@@ -3605,7 +3901,11 @@ def audit_training_run(
             evaluated=False,
             total=cf_reproduction_total,
             minimum=thresholds.min_cf_results_for_failure_rate,
-            failures=cf_reproduction_failed,
+            strict_matches=cf_reproduced,
+            numeric_jitter_dropped=cf_reproduction_outcomes[
+                'numeric_jitter_dropped'
+            ],
+            failures=cf_semantic_divergence,
             rate=cf_failure_rate,
         )
 
@@ -3822,6 +4122,12 @@ def audit_training_run(
             else None
         ),
         require_samples=thresholds.require_shapley_samples,
+        max_semantic_rate=(
+            thresholds.max_cf_reproduction_failure_rate
+        ),
+        min_results_for_rate=(
+            thresholds.min_cf_results_for_failure_rate
+        ),
         resume_segment_starts=resume_segment_starts,
     )
     _add_check(
@@ -3946,6 +4252,23 @@ def audit_training_run(
             'results_failed': cf_results_failed,
             'reproduction_passed': cf_reproduced,
             'reproduction_failed': cf_reproduction_failed,
+            'numeric_jitter_dropped': cf_reproduction_outcomes[
+                'numeric_jitter_dropped'
+            ],
+            'semantic_divergence_dropped': (
+                cf_semantic_divergence
+            ),
+            'unknown_failed': cf_reproduction_outcomes[
+                'unknown_failed'
+            ],
+            'non_gate_result_failed': cf_reproduction_outcomes[
+                'non_gate_result_failed'
+            ],
+            'numeric_jitter_error_maxima': (
+                cf_reproduction_outcomes[
+                    'numeric_jitter_error_maxima'
+                ]
+            ),
             'reproduction_failure_rate': cf_failure_rate,
             'samples_inserted': cf_samples,
             'candidate_offers': cf_candidate_offers,

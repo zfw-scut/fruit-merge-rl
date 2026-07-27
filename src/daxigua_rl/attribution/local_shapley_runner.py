@@ -587,6 +587,11 @@ class LocalShapleySubsetResult:
     simulated_steps: int
     terminated: bool
     truncated: bool
+    replay_max_merge_event_position_error: float = 0.0
+    replay_max_fruit_position_error: float = 0.0
+    replay_max_linear_velocity_error: float = 0.0
+    replay_max_orientation_error: float = 0.0
+    replay_max_angular_velocity_error: float = 0.0
 
     def __post_init__(self):
         members = tuple(self.member_keys)
@@ -613,6 +618,21 @@ class LocalShapleySubsetResult:
         )
         object.__setattr__(self, 'terminated', bool(self.terminated))
         object.__setattr__(self, 'truncated', bool(self.truncated))
+        for field_name in (
+                'replay_max_merge_event_position_error',
+                'replay_max_fruit_position_error',
+                'replay_max_linear_velocity_error',
+                'replay_max_orientation_error',
+                'replay_max_angular_velocity_error'):
+            object.__setattr__(
+                self,
+                field_name,
+                _finite_float(
+                    field_name,
+                    getattr(self, field_name),
+                    minimum=0.0,
+                ),
+            )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -634,6 +654,12 @@ class LocalShapleyResult:
     simulated_steps: int
     failure_reason: str | None = None
     diagnostic_codes: tuple[str, ...] = ()
+    reproduction_outcome: str | None = None
+    replay_max_merge_event_position_error: float = 0.0
+    replay_max_fruit_position_error: float = 0.0
+    replay_max_linear_velocity_error: float = 0.0
+    replay_max_orientation_error: float = 0.0
+    replay_max_angular_velocity_error: float = 0.0
 
     def __post_init__(self):
         object.__setattr__(
@@ -752,12 +778,78 @@ class LocalShapleyResult:
                     self.failure_reason,
                 ),
             )
+        reproduction_outcome = self.reproduction_outcome
+        if reproduction_outcome is None:
+            if self.grand_reproduced:
+                reproduction_outcome = 'strict_match'
+            elif (
+                    self.failure_reason
+                    == 'grand_reproduction_numeric_jitter'):
+                reproduction_outcome = 'numeric_jitter_drop'
+            elif self.failure_reason == 'grand_reproduction_mismatch':
+                reproduction_outcome = 'semantic_divergence_drop'
+            else:
+                reproduction_outcome = 'not_evaluated'
+        if reproduction_outcome not in {
+                'strict_match',
+                'numeric_jitter_drop',
+                'semantic_divergence_drop',
+                'not_evaluated'}:
+            raise ValueError('unsupported reproduction_outcome')
+        if (
+                self.grand_reproduced
+                != (reproduction_outcome == 'strict_match')):
+            raise ValueError(
+                'grand_reproduced must match reproduction_outcome'
+            )
+        expected_gate_reason = {
+            'numeric_jitter_drop': (
+                'grand_reproduction_numeric_jitter'
+            ),
+            'semantic_divergence_drop': (
+                'grand_reproduction_mismatch'
+            ),
+        }.get(reproduction_outcome)
+        if (
+                expected_gate_reason is not None
+                and self.failure_reason != expected_gate_reason):
+            raise ValueError(
+                'reproduction_outcome does not match failure_reason'
+            )
+        if (
+                reproduction_outcome == 'not_evaluated'
+                and self.failure_reason in {
+                    'grand_reproduction_numeric_jitter',
+                    'grand_reproduction_mismatch'}):
+            raise ValueError(
+                'gate failure reason requires a classified outcome'
+            )
+        object.__setattr__(
+            self,
+            'reproduction_outcome',
+            reproduction_outcome,
+        )
+        for field_name in (
+                'replay_max_merge_event_position_error',
+                'replay_max_fruit_position_error',
+                'replay_max_linear_velocity_error',
+                'replay_max_orientation_error',
+                'replay_max_angular_velocity_error'):
+            object.__setattr__(
+                self,
+                field_name,
+                _finite_float(
+                    field_name,
+                    getattr(self, field_name),
+                    minimum=0.0,
+                ),
+            )
 
     @property
     def label_ready(self):
         return (
             self.status == 'completed'
-            and self.grand_reproduced
+            and self.reproduction_outcome == 'strict_match'
             and self.efficiency_residual is not None
             and self.efficiency_tolerance is not None
             and abs(self.efficiency_residual)
@@ -772,12 +864,59 @@ class _SubsetFailure(RuntimeError):
             *,
             simulated_steps,
             subset_result=None,
-            diagnostic_codes=()):
+            diagnostic_codes=(),
+            replay_error_maxima=None):
         super().__init__(reason)
         self.reason = reason
         self.simulated_steps = simulated_steps
         self.subset_result = subset_result
         self.diagnostic_codes = tuple(diagnostic_codes)
+        self.replay_error_maxima = dict(replay_error_maxima or {})
+
+
+def _update_replay_error_maxima(maxima, report):
+    for suffix in (
+            'merge_event_position',
+            'fruit_position',
+            'linear_velocity',
+            'orientation',
+            'angular_velocity'):
+        report_name = f'max_{suffix}_error'
+        maxima[suffix] = max(
+            maxima.get(suffix, 0.0),
+            float(getattr(report, report_name)),
+        )
+
+
+def _replay_error_fields(maxima):
+    return {
+        f'replay_max_{suffix}_error': float(maxima.get(suffix, 0.0))
+        for suffix in (
+            'merge_event_position',
+            'fruit_position',
+            'linear_velocity',
+            'orientation',
+            'angular_velocity')
+    }
+
+
+def _subset_replay_error_fields(subsets):
+    maxima = {}
+    for subset in subsets:
+        for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity'):
+            maxima[suffix] = max(
+                maxima.get(suffix, 0.0),
+                float(getattr(
+                    subset,
+                    f'replay_max_{suffix}_error',
+                )),
+            )
+    return _replay_error_fields(maxima)
 
 
 def _env_config(task):
@@ -827,6 +966,7 @@ def _run_subset(
     simulated_steps = 0
     terminated = False
     truncated = False
+    replay_error_maxima = {}
     try:
         for offset, entry in enumerate(task.trace_entries):
             if terminated or truncated:
@@ -870,14 +1010,25 @@ def _run_subset(
                     entry.factual_outcome,
                     outcome,
                 )
+                _update_replay_error_maxima(
+                    replay_error_maxima,
+                    report,
+                )
                 if not report.matches:
+                    failure_reason = (
+                        'grand_reproduction_numeric_jitter'
+                        if report.reproduction_status
+                        == 'numeric_jitter_drop'
+                        else 'grand_reproduction_mismatch'
+                    )
                     raise _SubsetFailure(
-                        'grand_reproduction_mismatch',
+                        failure_reason,
                         simulated_steps=simulated_steps,
                         diagnostic_codes=tuple(
                             f'grand_mismatch_{code}'
                             for code in report.mismatch_codes
                         ),
+                        replay_error_maxima=replay_error_maxima,
                     )
 
         if not terminated:
@@ -904,6 +1055,7 @@ def _run_subset(
         simulated_steps=simulated_steps,
         terminated=terminated,
         truncated=truncated,
+        **_replay_error_fields(replay_error_maxima),
     )
 
 
@@ -931,6 +1083,7 @@ def _failed_result(
         simulated_steps=sum(item.simulated_steps for item in subsets),
         failure_reason=reason,
         diagnostic_codes=tuple(diagnostic_codes),
+        **_subset_replay_error_fields(subsets),
     )
 
 
@@ -967,6 +1120,7 @@ def run_local_shapley_task(task):
             simulated_steps=exc.simulated_steps,
             terminated=False,
             truncated=False,
+            **_replay_error_fields(exc.replay_error_maxima),
         )
         return _failed_result(
             task,
@@ -1056,6 +1210,7 @@ def run_local_shapley_task(task):
             ),
             failure_reason='efficiency_residual_exceeded',
             diagnostic_codes=('efficiency_gate_failed',),
+            **_subset_replay_error_fields(subset_results.values()),
         )
 
     return LocalShapleyResult(
@@ -1076,6 +1231,7 @@ def run_local_shapley_task(task):
             for item in subset_results.values()
         ),
         diagnostic_codes=('grand_trace_reproduced',),
+        **_subset_replay_error_fields(subset_results.values()),
     )
 
 

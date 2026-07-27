@@ -113,6 +113,51 @@ def _unreproduced_coordinator_runner(task):
     )
 
 
+def _classified_unreproduced_coordinator_runner(task):
+    event_index = task.budget_key.event_index
+    if event_index == 60:
+        outcome = 'numeric_jitter_drop'
+        failure_reason = 'original_reproduction_numeric_jitter'
+        maxima = (0.10, 0.50, 0.30, 0.20, 0.40)
+    elif event_index == 61:
+        outcome = 'numeric_jitter_drop'
+        failure_reason = 'original_reproduction_numeric_jitter'
+        maxima = (0.60, 0.20, 0.70, 0.80, 0.10)
+    elif event_index == 62:
+        outcome = 'semantic_divergence_drop'
+        failure_reason = 'original_reproduction_mismatch'
+        maxima = (9.0, 9.0, 9.0, 9.0, 9.0)
+    else:
+        outcome = 'not_evaluated'
+        failure_reason = 'original_comparison_failure'
+        maxima = (8.0, 8.0, 8.0, 8.0, 8.0)
+    diagnostic_codes = (f'coordinator_test_{outcome}',)
+    branch = CounterfactualBranchResult(
+        action_offset=task.actual_action_offset,
+        status='failed',
+        objective_return=None,
+        simulated_steps=1,
+        failure_reason=failure_reason,
+        diagnostic_codes=diagnostic_codes,
+    )
+    return CounterfactualResult(
+        task_id=task.task_id,
+        status='failed',
+        actual_action_offset=task.actual_action_offset,
+        original_reproduced=False,
+        branches=(branch,),
+        simulated_steps=1,
+        failure_reason=failure_reason,
+        diagnostic_codes=diagnostic_codes,
+        reproduction_outcome=outcome,
+        replay_max_merge_event_position_error=maxima[0],
+        replay_max_fruit_position_error=maxima[1],
+        replay_max_linear_velocity_error=maxima[2],
+        replay_max_orientation_error=maxima[3],
+        replay_max_angular_velocity_error=maxima[4],
+    )
+
+
 def _raising_coordinator_runner(_task):
     raise RuntimeError('intentional coordinator runner failure')
 
@@ -382,6 +427,14 @@ class CounterfactualCoordinatorTest(unittest.TestCase):
             self.assertEqual(len(replay), 0)
             self.assertEqual(stats.cumulative.results_failed, 1)
             self.assertEqual(stats.cumulative.reproduction_failed, 1)
+            self.assertEqual(
+                stats.cumulative.semantic_divergence_dropped,
+                1,
+            )
+            self.assertEqual(
+                stats.cumulative.numeric_jitter_dropped,
+                0,
+            )
             self.assertEqual(stats.cumulative.label_ready_results, 0)
             self.assertEqual(stats.cumulative.samples_inserted, 0)
             self.assertEqual(
@@ -411,6 +464,10 @@ class CounterfactualCoordinatorTest(unittest.TestCase):
             self.assertEqual(record.observed_real_step, 400)
             self.assertEqual(record.result_status, 'failed')
             self.assertFalse(record.original_reproduced)
+            self.assertEqual(
+                record.reproduction_outcome,
+                'semantic_divergence_drop',
+            )
             self.assertEqual(
                 record.failure_reason,
                 'original_reproduction_mismatch',
@@ -491,6 +548,111 @@ class CounterfactualCoordinatorTest(unittest.TestCase):
             self.assertEqual(stats.recent_failure_records, ())
         finally:
             raised.close()
+
+    def test_three_state_counts_legacy_failures_and_numeric_maxima(self):
+        replay = CausalReplayBuffer(capacity=16)
+        coordinator = _coordinator(
+            _classified_unreproduced_coordinator_runner,
+            replay=replay,
+            config=CounterfactualConfig(
+                min_real_steps=1,
+                cost_ratio=1.0,
+                cost_hard_limit=1.0,
+            ),
+        )
+        proposals = tuple(
+            _proposal(event_index=event_index)
+            for event_index in range(60, 64)
+        )
+        try:
+            _refresh(coordinator)
+            coordinator.record_real_steps(1_000)
+            submissions = tuple(
+                coordinator.submit(proposal)
+                for proposal in proposals
+            )
+
+            self.assertTrue(all(
+                submission.accepted
+                for submission in submissions
+            ))
+            self.assertEqual(len(replay), 0)
+            stats = coordinator.stats
+            cumulative = stats.cumulative
+            self.assertEqual(cumulative.results_failed, 4)
+            # 兼容旧 readiness 分母：所有未复现结果仍累计在同一个总数。
+            self.assertEqual(cumulative.reproduction_failed, 4)
+            self.assertEqual(cumulative.numeric_jitter_dropped, 2)
+            self.assertEqual(cumulative.semantic_divergence_dropped, 1)
+            self.assertEqual(
+                (
+                    cumulative
+                    .numeric_jitter_max_merge_event_position_error,
+                    cumulative.numeric_jitter_max_fruit_position_error,
+                    cumulative
+                    .numeric_jitter_max_linear_velocity_error,
+                    cumulative.numeric_jitter_max_orientation_error,
+                    cumulative
+                    .numeric_jitter_max_angular_velocity_error,
+                ),
+                (0.60, 0.50, 0.70, 0.80, 0.40),
+            )
+            self.assertEqual(cumulative.label_ready_results, 0)
+            self.assertEqual(cumulative.samples_inserted, 0)
+
+            records = stats.recent_failure_records
+            self.assertEqual(
+                tuple(record.reproduction_outcome for record in records),
+                (
+                    'numeric_jitter_drop',
+                    'numeric_jitter_drop',
+                    'semantic_divergence_drop',
+                    'not_evaluated',
+                ),
+            )
+            self.assertEqual(
+                (
+                    records[0]
+                    .replay_max_merge_event_position_error,
+                    records[0].replay_max_fruit_position_error,
+                    records[0].replay_max_linear_velocity_error,
+                    records[0].replay_max_orientation_error,
+                    records[0].replay_max_angular_velocity_error,
+                ),
+                (0.10, 0.50, 0.30, 0.20, 0.40),
+            )
+            summary = coordinator.summary()
+            self.assertEqual(summary['reproduction_failed'], 4)
+            self.assertEqual(summary['numeric_jitter_dropped'], 2)
+            self.assertEqual(summary['semantic_divergence_dropped'], 1)
+            self.assertEqual(
+                summary[
+                    'numeric_jitter_max_merge_event_position_error'
+                ],
+                0.60,
+            )
+            self.assertEqual(
+                summary['numeric_jitter_max_fruit_position_error'],
+                0.50,
+            )
+            self.assertEqual(
+                summary[
+                    'numeric_jitter_max_linear_velocity_error'
+                ],
+                0.70,
+            )
+            self.assertEqual(
+                summary['numeric_jitter_max_orientation_error'],
+                0.80,
+            )
+            self.assertEqual(
+                summary[
+                    'numeric_jitter_max_angular_velocity_error'
+                ],
+                0.40,
+            )
+        finally:
+            coordinator.close()
 
     def test_failure_records_are_bounded_and_window_counts_reset(self):
         coordinator = _coordinator(

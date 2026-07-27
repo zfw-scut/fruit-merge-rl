@@ -44,6 +44,7 @@ _TEMPORARY_BUDGET_REJECTIONS = {
     'external_soft_token_budget',
     'external_hard_token_budget',
 }
+LOCAL_SHAPLEY_COORDINATOR_CHECKPOINT_VERSION = 2
 
 
 def _strict_int(name, value, *, minimum=None):
@@ -214,6 +215,8 @@ class LocalShapleyActivityStats:
     results_failed: int
     reproduction_passed: int
     reproduction_failed: int
+    numeric_jitter_dropped: int
+    semantic_divergence_dropped: int
     label_ready_results: int
     samples_generated: int
     samples_inserted: int
@@ -221,6 +224,11 @@ class LocalShapleyActivityStats:
     simulated_steps: int
     external_settlements: int
     external_refunds: int
+    numeric_jitter_max_merge_event_position_error: float
+    numeric_jitter_max_fruit_position_error: float
+    numeric_jitter_max_linear_velocity_error: float
+    numeric_jitter_max_orientation_error: float
+    numeric_jitter_max_angular_velocity_error: float
     drop_reason_counts: tuple[tuple[str, int], ...]
 
 
@@ -270,6 +278,8 @@ class _Accumulator:
         'results_failed',
         'reproduction_passed',
         'reproduction_failed',
+        'numeric_jitter_dropped',
+        'semantic_divergence_dropped',
         'label_ready_results',
         'samples_generated',
         'samples_inserted',
@@ -282,6 +292,11 @@ class _Accumulator:
     def __init__(self):
         for name in self._FIELDS:
             setattr(self, name, 0)
+        self.numeric_jitter_max_merge_event_position_error = 0.0
+        self.numeric_jitter_max_fruit_position_error = 0.0
+        self.numeric_jitter_max_linear_velocity_error = 0.0
+        self.numeric_jitter_max_orientation_error = 0.0
+        self.numeric_jitter_max_angular_velocity_error = 0.0
         self.drop_reason_counts = Counter()
 
     def increment(self, name, amount=1):
@@ -290,12 +305,45 @@ class _Accumulator:
     def drop(self, reason, count=1):
         self.drop_reason_counts[str(reason)] += int(count)
 
+    def add_numeric_jitter_errors(self, result):
+        for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity'):
+            aggregate_name = f'numeric_jitter_max_{suffix}_error'
+            result_name = f'replay_max_{suffix}_error'
+            setattr(
+                self,
+                aggregate_name,
+                max(
+                    getattr(self, aggregate_name),
+                    float(getattr(result, result_name)),
+                ),
+            )
+
     def snapshot(self):
         return LocalShapleyActivityStats(
             **{
                 name: getattr(self, name)
                 for name in self._FIELDS
             },
+            numeric_jitter_max_merge_event_position_error=float(
+                self.numeric_jitter_max_merge_event_position_error
+            ),
+            numeric_jitter_max_fruit_position_error=float(
+                self.numeric_jitter_max_fruit_position_error
+            ),
+            numeric_jitter_max_linear_velocity_error=float(
+                self.numeric_jitter_max_linear_velocity_error
+            ),
+            numeric_jitter_max_orientation_error=float(
+                self.numeric_jitter_max_orientation_error
+            ),
+            numeric_jitter_max_angular_velocity_error=float(
+                self.numeric_jitter_max_angular_velocity_error
+            ),
             drop_reason_counts=tuple(sorted(
                 self.drop_reason_counts.items()
             )),
@@ -417,6 +465,10 @@ class LocalShapleyCoordinator:
     def _drop(self, reason, count=1):
         self._cumulative.drop(reason, count)
         self._window.drop(reason, count)
+
+    def _add_numeric_jitter_errors(self, result):
+        self._cumulative.add_numeric_jitter_errors(result)
+        self._window.add_numeric_jitter_errors(result)
 
     def consider(
             self,
@@ -755,6 +807,11 @@ class LocalShapleyCoordinator:
             self._increment('reproduction_passed')
         else:
             self._increment('reproduction_failed')
+        if result.reproduction_outcome == 'numeric_jitter_drop':
+            self._increment('numeric_jitter_dropped')
+            self._add_numeric_jitter_errors(result)
+        elif result.reproduction_outcome == 'semantic_divergence_drop':
+            self._increment('semantic_divergence_dropped')
         samples = ()
         if result.label_ready and settled:
             self._increment('label_ready_results')
@@ -847,6 +904,9 @@ class LocalShapleyCoordinator:
 
         stats = self.stats
         payload = asdict(stats)
+        payload['schema_version'] = (
+            LOCAL_SHAPLEY_COORDINATOR_CHECKPOINT_VERSION
+        )
         payload['cumulative']['drop_reason_counts'] = dict(
             stats.cumulative.drop_reason_counts
         )
@@ -875,6 +935,30 @@ class LocalShapleyCoordinator:
             'pending': stats.pending_task_count,
             'completed': stats.cumulative.results_completed,
             'failed': stats.cumulative.results_failed,
+            'reproduction_passed': (
+                stats.cumulative.reproduction_passed
+            ),
+            'reproduction_failed': (
+                stats.cumulative.reproduction_failed
+            ),
+            'numeric_jitter_dropped': (
+                stats.cumulative.numeric_jitter_dropped
+            ),
+            'semantic_divergence_dropped': (
+                stats.cumulative.semantic_divergence_dropped
+            ),
+            **{
+                f'numeric_jitter_max_{suffix}_error': getattr(
+                    stats.cumulative,
+                    f'numeric_jitter_max_{suffix}_error',
+                )
+                for suffix in (
+                    'merge_event_position',
+                    'fruit_position',
+                    'linear_velocity',
+                    'orientation',
+                    'angular_velocity')
+            },
             'label_ready': stats.cumulative.label_ready_results,
             'samples_inserted': (
                 stats.cumulative.samples_inserted
@@ -955,6 +1039,7 @@ class LocalShapleyCoordinator:
 
 
 __all__ = [
+    'LOCAL_SHAPLEY_COORDINATOR_CHECKPOINT_VERSION',
     'LocalShapleyActivityStats',
     'LocalShapleyCoordinator',
     'LocalShapleyCoordinatorStats',

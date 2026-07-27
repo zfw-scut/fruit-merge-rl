@@ -26,6 +26,8 @@
 规则因果样本和有界反事实 proposal；更新器使用 Double DQN，并把 TD、
 规则 Q 排序与反事实/局部 Shapley 差值监督联合训练。`EngineSnapshot` 保存并校验
 完整 Pymunk、队列、RNG 和 episode 状态，反事实只在原动作可复现后生成标签。
+复现门禁区分严格一致、仅连续数值抖动和物理语义分歧；后两类均丢弃标签，
+但只有语义分歧进入独立 1% 比率门禁。
 `CounterfactualCoordinator` 与 `LocalShapleyCoordinator` 共用软预算和 10% 硬账本；
 普通反事实最多借用到 9%，最后 1% 为已选中的局部 Shapley 保留。队列或预算不足时
 不阻塞 rollout，并对 selected 后未执行的任务做独立终态记账。

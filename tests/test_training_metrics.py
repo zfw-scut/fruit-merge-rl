@@ -296,8 +296,30 @@ class TrainingMetricsTest(unittest.TestCase):
                     candidate_dispatch_attempts=7,
                     candidate_dispatch_admitted=6,
                     candidate_close_dropped=1,
+                    numeric_jitter_dropped=2,
+                    semantic_divergence_dropped=1,
+                    numeric_jitter_max_merge_event_position_error=0.11,
+                    numeric_jitter_max_fruit_position_error=0.12,
+                    numeric_jitter_max_linear_velocity_error=0.013,
+                    numeric_jitter_max_orientation_error=0.0014,
+                    numeric_jitter_max_angular_velocity_error=0.0015,
                 ),
                 scheduler=None,
+            ),
+            shapley_stats=SimpleNamespace(
+                enabled=True,
+                observed_event_count=20,
+                selected_event_count=2,
+                pending_task_count=0,
+                cumulative=SimpleNamespace(
+                    numeric_jitter_dropped=1,
+                    semantic_divergence_dropped=0,
+                    numeric_jitter_max_merge_event_position_error=0.21,
+                    numeric_jitter_max_fruit_position_error=0.22,
+                    numeric_jitter_max_linear_velocity_error=0.023,
+                    numeric_jitter_max_orientation_error=0.0024,
+                    numeric_jitter_max_angular_velocity_error=0.0025,
+                ),
             ),
         )
 
@@ -334,6 +356,27 @@ class TrainingMetricsTest(unittest.TestCase):
         self.assertEqual(
             row['counterfactual_candidate_close_dropped'],
             1,
+        )
+        self.assertEqual(row['counterfactual_numeric_jitter_dropped'], 2)
+        self.assertEqual(
+            row['counterfactual_semantic_divergence_dropped'],
+            1,
+        )
+        self.assertEqual(
+            row[
+                'counterfactual_numeric_jitter_max_'
+                'linear_velocity_error'
+            ],
+            0.013,
+        )
+        self.assertEqual(row['shapley_numeric_jitter_dropped'], 1)
+        self.assertEqual(
+            row['shapley_semantic_divergence_dropped'],
+            0,
+        )
+        self.assertEqual(
+            row['shapley_numeric_jitter_max_orientation_error'],
+            0.0024,
         )
         self.assertEqual(row['updates_per_second'], 1.5)
         self.assertEqual(row['env_steps_per_second'], 4.0)

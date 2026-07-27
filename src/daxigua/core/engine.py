@@ -1251,6 +1251,11 @@ class HeadlessGame:
         max_position_error = 0.0
         max_velocity_error = 0.0
         max_angle_error = 0.0
+        max_merge_event_position_error = 0.0
+        max_fruit_position_error = 0.0
+        max_linear_velocity_error = 0.0
+        max_orientation_error = 0.0
+        max_angular_velocity_error = 0.0
 
         expected_drop = expected.drop_result
         actual_drop = actual.drop_result
@@ -1315,6 +1320,10 @@ class HeadlessGame:
             )
             max_position_error = max(
                 max_position_error,
+                event_position_error,
+            )
+            max_merge_event_position_error = max(
+                max_merge_event_position_error,
                 event_position_error,
             )
             if event_position_error > position_tolerance:
@@ -1396,15 +1405,17 @@ class HeadlessGame:
                 abs(float(expected_fruit.vx) - float(actual_fruit.vx)),
                 abs(float(expected_fruit.vy) - float(actual_fruit.vy)),
             )
+            orientation_error = abs(
+                float(expected_fruit.angle)
+                - float(actual_fruit.angle)
+            )
+            angular_velocity_error = abs(
+                float(expected_fruit.angular_velocity)
+                - float(actual_fruit.angular_velocity)
+            )
             angle_error = max(
-                abs(
-                    float(expected_fruit.angle)
-                    - float(actual_fruit.angle)
-                ),
-                abs(
-                    float(expected_fruit.angular_velocity)
-                    - float(actual_fruit.angular_velocity)
-                ),
+                orientation_error,
+                angular_velocity_error,
             )
             max_position_error = max(
                 max_position_error,
@@ -1415,6 +1426,22 @@ class HeadlessGame:
                 velocity_error,
             )
             max_angle_error = max(max_angle_error, angle_error)
+            max_fruit_position_error = max(
+                max_fruit_position_error,
+                position_error,
+            )
+            max_linear_velocity_error = max(
+                max_linear_velocity_error,
+                velocity_error,
+            )
+            max_orientation_error = max(
+                max_orientation_error,
+                orientation_error,
+            )
+            max_angular_velocity_error = max(
+                max_angular_velocity_error,
+                angular_velocity_error,
+            )
             if position_error > position_tolerance:
                 add_mismatch('fruit_position')
             if velocity_error > velocity_tolerance:
@@ -1435,6 +1462,15 @@ class HeadlessGame:
             max_position_error=float(max_position_error),
             max_velocity_error=float(max_velocity_error),
             max_angle_error=float(max_angle_error),
+            max_merge_event_position_error=float(
+                max_merge_event_position_error
+            ),
+            max_fruit_position_error=float(max_fruit_position_error),
+            max_linear_velocity_error=float(max_linear_velocity_error),
+            max_orientation_error=float(max_orientation_error),
+            max_angular_velocity_error=float(
+                max_angular_velocity_error
+            ),
             actual_outcome=actual,
         )
 

@@ -224,6 +224,13 @@ METRIC_FIELDS = (
     'counterfactual_results_failed',
     'counterfactual_reproduction_passed',
     'counterfactual_reproduction_failed',
+    'counterfactual_numeric_jitter_dropped',
+    'counterfactual_semantic_divergence_dropped',
+    'counterfactual_numeric_jitter_max_merge_event_position_error',
+    'counterfactual_numeric_jitter_max_fruit_position_error',
+    'counterfactual_numeric_jitter_max_linear_velocity_error',
+    'counterfactual_numeric_jitter_max_orientation_error',
+    'counterfactual_numeric_jitter_max_angular_velocity_error',
     'counterfactual_label_ready_results',
     'counterfactual_samples_inserted',
     'counterfactual_tokens_reserved',
@@ -246,6 +253,13 @@ METRIC_FIELDS = (
     'shapley_terminal_dropped',
     'shapley_reproduction_passed',
     'shapley_reproduction_failed',
+    'shapley_numeric_jitter_dropped',
+    'shapley_semantic_divergence_dropped',
+    'shapley_numeric_jitter_max_merge_event_position_error',
+    'shapley_numeric_jitter_max_fruit_position_error',
+    'shapley_numeric_jitter_max_linear_velocity_error',
+    'shapley_numeric_jitter_max_orientation_error',
+    'shapley_numeric_jitter_max_angular_velocity_error',
     'shapley_samples_inserted',
     'shapley_tokens_consumed',
     'shapley_pending_count',
@@ -3168,6 +3182,29 @@ def build_metric_row(
                 'reproduction_failed',
                 0,
             ),
+            'numeric_jitter_dropped': getattr(
+                shapley_cumulative,
+                'numeric_jitter_dropped',
+                0,
+            ),
+            'semantic_divergence_dropped': getattr(
+                shapley_cumulative,
+                'semantic_divergence_dropped',
+                0,
+            ),
+            **{
+                f'numeric_jitter_max_{suffix}_error': getattr(
+                    shapley_cumulative,
+                    f'numeric_jitter_max_{suffix}_error',
+                    0.0,
+                )
+                for suffix in (
+                    'merge_event_position',
+                    'fruit_position',
+                    'linear_velocity',
+                    'orientation',
+                    'angular_velocity')
+            },
             'samples_inserted': getattr(
                 shapley_cumulative,
                 'samples_inserted',
@@ -3690,6 +3727,31 @@ def build_metric_row(
             'reproduction_failed',
             0,
         )),
+        'counterfactual_numeric_jitter_dropped': int(getattr(
+            cf_cumulative,
+            'numeric_jitter_dropped',
+            0,
+        )),
+        'counterfactual_semantic_divergence_dropped': int(getattr(
+            cf_cumulative,
+            'semantic_divergence_dropped',
+            0,
+        )),
+        **{
+            f'counterfactual_numeric_jitter_max_{suffix}_error': float(
+                getattr(
+                    cf_cumulative,
+                    f'numeric_jitter_max_{suffix}_error',
+                    0.0,
+                )
+            )
+            for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity')
+        },
         'counterfactual_label_ready_results': int(getattr(
             cf_cumulative,
             'label_ready_results',
@@ -3804,6 +3866,28 @@ def build_metric_row(
             'reproduction_failed',
             0,
         )),
+        'shapley_numeric_jitter_dropped': int(shapley_stats.get(
+            'numeric_jitter_dropped',
+            0,
+        )),
+        'shapley_semantic_divergence_dropped': int(shapley_stats.get(
+            'semantic_divergence_dropped',
+            0,
+        )),
+        **{
+            f'shapley_numeric_jitter_max_{suffix}_error': float(
+                shapley_stats.get(
+                    f'numeric_jitter_max_{suffix}_error',
+                    0.0,
+                )
+            )
+            for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity')
+        },
         'shapley_samples_inserted': int(shapley_stats.get(
             'samples_inserted',
             0,

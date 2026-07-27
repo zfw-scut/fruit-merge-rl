@@ -44,7 +44,7 @@ from daxigua_rl.attribution.counterfactual_runner import (
 )
 
 
-COUNTERFACTUAL_COORDINATOR_CHECKPOINT_VERSION = 1
+COUNTERFACTUAL_COORDINATOR_CHECKPOINT_VERSION = 2
 DEFAULT_COUNTERFACTUAL_FAILURE_RECORD_CAPACITY = 32
 _TRANSIENT_CANDIDATE_REJECTIONS = {
     'real_step_gate',
@@ -306,6 +306,7 @@ class CounterfactualFailureRecord:
     observed_real_step: int
     result_status: str
     original_reproduced: bool
+    reproduction_outcome: str
     failure_reason: str
     diagnostic_codes: tuple[str, ...]
     trigger_reasons: tuple[str, ...]
@@ -318,6 +319,11 @@ class CounterfactualFailureRecord:
     target_policy_version: str
     target_policy_fingerprint: str
     branches: tuple[CounterfactualFailureBranchRecord, ...]
+    replay_max_merge_event_position_error: float
+    replay_max_fruit_position_error: float
+    replay_max_linear_velocity_error: float
+    replay_max_orientation_error: float
+    replay_max_angular_velocity_error: float
 
     def to_dict(self):
         return {
@@ -330,6 +336,7 @@ class CounterfactualFailureRecord:
             'observed_real_step': self.observed_real_step,
             'result_status': self.result_status,
             'original_reproduced': self.original_reproduced,
+            'reproduction_outcome': self.reproduction_outcome,
             'failure_reason': self.failure_reason,
             'diagnostic_codes': list(self.diagnostic_codes),
             'trigger_reasons': list(self.trigger_reasons),
@@ -346,6 +353,21 @@ class CounterfactualFailureRecord:
             'target_policy_version': self.target_policy_version,
             'target_policy_fingerprint': (
                 self.target_policy_fingerprint
+            ),
+            'replay_max_merge_event_position_error': (
+                self.replay_max_merge_event_position_error
+            ),
+            'replay_max_fruit_position_error': (
+                self.replay_max_fruit_position_error
+            ),
+            'replay_max_linear_velocity_error': (
+                self.replay_max_linear_velocity_error
+            ),
+            'replay_max_orientation_error': (
+                self.replay_max_orientation_error
+            ),
+            'replay_max_angular_velocity_error': (
+                self.replay_max_angular_velocity_error
             ),
             'branches': [
                 branch.to_dict()
@@ -371,6 +393,8 @@ class CounterfactualCoordinatorActivityStats:
     results_failed: int
     reproduction_passed: int
     reproduction_failed: int
+    numeric_jitter_dropped: int
+    semantic_divergence_dropped: int
     branches_completed: int
     branches_partial: int
     branches_failed: int
@@ -386,6 +410,11 @@ class CounterfactualCoordinatorActivityStats:
     target_refresh_seconds: float
     result_wall_seconds_total: float
     result_wall_seconds_max: float
+    numeric_jitter_max_merge_event_position_error: float
+    numeric_jitter_max_fruit_position_error: float
+    numeric_jitter_max_linear_velocity_error: float
+    numeric_jitter_max_orientation_error: float
+    numeric_jitter_max_angular_velocity_error: float
     drop_reason_counts: tuple[tuple[str, int], ...]
     failure_reason_counts: tuple[tuple[str, int], ...]
     failure_diagnostic_code_counts: tuple[tuple[str, int], ...]
@@ -564,6 +593,8 @@ class _ActivityAccumulator:
         'results_failed',
         'reproduction_passed',
         'reproduction_failed',
+        'numeric_jitter_dropped',
+        'semantic_divergence_dropped',
         'branches_completed',
         'branches_partial',
         'branches_failed',
@@ -584,6 +615,11 @@ class _ActivityAccumulator:
         self.target_refresh_seconds = 0.0
         self.result_wall_seconds_total = 0.0
         self.result_wall_seconds_max = 0.0
+        self.numeric_jitter_max_merge_event_position_error = 0.0
+        self.numeric_jitter_max_fruit_position_error = 0.0
+        self.numeric_jitter_max_linear_velocity_error = 0.0
+        self.numeric_jitter_max_orientation_error = 0.0
+        self.numeric_jitter_max_angular_velocity_error = 0.0
         self.drop_reason_counts = Counter()
         self.failure_reason_counts = Counter()
         self.failure_diagnostic_code_counts = Counter()
@@ -621,6 +657,24 @@ class _ActivityAccumulator:
             value,
         )
 
+    def add_numeric_jitter_errors(self, result):
+        for suffix in (
+                'merge_event_position',
+                'fruit_position',
+                'linear_velocity',
+                'orientation',
+                'angular_velocity'):
+            aggregate_name = f'numeric_jitter_max_{suffix}_error'
+            result_name = f'replay_max_{suffix}_error'
+            setattr(
+                self,
+                aggregate_name,
+                max(
+                    getattr(self, aggregate_name),
+                    float(getattr(result, result_name)),
+                ),
+            )
+
     def snapshot(self):
         return CounterfactualCoordinatorActivityStats(
             **{
@@ -635,6 +689,21 @@ class _ActivityAccumulator:
             ),
             result_wall_seconds_max=float(
                 self.result_wall_seconds_max
+            ),
+            numeric_jitter_max_merge_event_position_error=float(
+                self.numeric_jitter_max_merge_event_position_error
+            ),
+            numeric_jitter_max_fruit_position_error=float(
+                self.numeric_jitter_max_fruit_position_error
+            ),
+            numeric_jitter_max_linear_velocity_error=float(
+                self.numeric_jitter_max_linear_velocity_error
+            ),
+            numeric_jitter_max_orientation_error=float(
+                self.numeric_jitter_max_orientation_error
+            ),
+            numeric_jitter_max_angular_velocity_error=float(
+                self.numeric_jitter_max_angular_velocity_error
             ),
             drop_reason_counts=tuple(sorted(
                 self.drop_reason_counts.items()
@@ -772,6 +841,10 @@ class CounterfactualCoordinator:
         self._cumulative.add_result_wall_seconds(value)
         self._window.add_result_wall_seconds(value)
 
+    def _add_numeric_jitter_errors(self, result):
+        self._cumulative.add_numeric_jitter_errors(result)
+        self._window.add_numeric_jitter_errors(result)
+
     def _add_failure_dimensions(
             self,
             *,
@@ -834,6 +907,7 @@ class CounterfactualCoordinator:
             observed_real_step=observed_real_step,
             result_status=result.status,
             original_reproduced=result.original_reproduced,
+            reproduction_outcome=result.reproduction_outcome,
             failure_reason=failure_reason,
             diagnostic_codes=diagnostic_codes,
             trigger_reasons=task.trigger_reasons,
@@ -852,6 +926,21 @@ class CounterfactualCoordinator:
             ),
             target_policy_fingerprint=(
                 task.target_policy.fingerprint
+            ),
+            replay_max_merge_event_position_error=(
+                result.replay_max_merge_event_position_error
+            ),
+            replay_max_fruit_position_error=(
+                result.replay_max_fruit_position_error
+            ),
+            replay_max_linear_velocity_error=(
+                result.replay_max_linear_velocity_error
+            ),
+            replay_max_orientation_error=(
+                result.replay_max_orientation_error
+            ),
+            replay_max_angular_velocity_error=(
+                result.replay_max_angular_velocity_error
             ),
             branches=branches,
         )
@@ -1415,6 +1504,11 @@ class CounterfactualCoordinator:
             self._increment('reproduction_passed')
         else:
             self._increment('reproduction_failed')
+        if result.reproduction_outcome == 'numeric_jitter_drop':
+            self._increment('numeric_jitter_dropped')
+            self._add_numeric_jitter_errors(result)
+        elif result.reproduction_outcome == 'semantic_divergence_drop':
+            self._increment('semantic_divergence_dropped')
         for branch in result.branches:
             self._increment(f'branches_{branch.status}')
         if result.status == 'failed' or not result.original_reproduced:
@@ -1712,6 +1806,24 @@ class CounterfactualCoordinator:
             'reproduction_failed': (
                 stats.cumulative.reproduction_failed
             ),
+            'numeric_jitter_dropped': (
+                stats.cumulative.numeric_jitter_dropped
+            ),
+            'semantic_divergence_dropped': (
+                stats.cumulative.semantic_divergence_dropped
+            ),
+            **{
+                f'numeric_jitter_max_{suffix}_error': getattr(
+                    stats.cumulative,
+                    f'numeric_jitter_max_{suffix}_error',
+                )
+                for suffix in (
+                    'merge_event_position',
+                    'fruit_position',
+                    'linear_velocity',
+                    'orientation',
+                    'angular_velocity')
+            },
             'label_ready_results': (
                 stats.cumulative.label_ready_results
             ),

@@ -517,4 +517,37 @@ class OriginalActionReplayReport:
     max_position_error: float
     max_velocity_error: float
     max_angle_error: float
+    max_merge_event_position_error: float
+    max_fruit_position_error: float
+    max_linear_velocity_error: float
+    max_orientation_error: float
+    max_angular_velocity_error: float
     actual_outcome: EngineActionOutcome
+
+    @property
+    def reproduction_status(self):
+        """把复现门禁拆成严格通过、纯数值抖动和语义分歧三态。
+
+        纯数值抖动仍然不能生成标签；它只与会改变得分、ID、等级、顺序、帧数、
+        终止状态或其他离散物理语义的分歧分开记账。
+        """
+
+        if self.matches:
+            return 'strict_match'
+        physical_numeric_codes = {
+            'merge_event_position',
+            'fruit_position',
+            'fruit_velocity',
+            'fruit_angle',
+        }
+        allowed_numeric_codes = (
+            physical_numeric_codes | {'final_state_derived'}
+        )
+        if (
+                self.mismatch_codes
+                and set(self.mismatch_codes) <= allowed_numeric_codes
+                and set(self.mismatch_codes).intersection(
+                    physical_numeric_codes
+                )):
+            return 'numeric_jitter_drop'
+        return 'semantic_divergence_drop'

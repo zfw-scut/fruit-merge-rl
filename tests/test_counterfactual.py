@@ -444,9 +444,8 @@ class CounterfactualContractTest(unittest.TestCase):
             )
 
     def test_failed_or_unreproduced_result_never_exposes_delta(self):
-        result = CounterfactualResult(
+        result_kwargs = dict(
             task_id='cf-test',
-            status='partial',
             actual_action_offset=0,
             original_reproduced=False,
             branches=(
@@ -465,6 +464,18 @@ class CounterfactualContractTest(unittest.TestCase):
             ),
             simulated_steps=2,
             failure_reason='original_reproduction_mismatch',
+        )
+        with self.assertRaisesRegex(
+                ValueError,
+                'usable result requires strict reproduction'):
+            CounterfactualResult(
+                status='partial',
+                **result_kwargs,
+            )
+
+        result = CounterfactualResult(
+            status='failed',
+            **result_kwargs,
         )
         self.assertFalse(result.label_ready)
         self.assertEqual(result.return_deltas, ())

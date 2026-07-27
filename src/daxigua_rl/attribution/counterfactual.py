@@ -1118,6 +1118,12 @@ class CounterfactualResult:
     simulated_steps: int
     failure_reason: str | None = None
     diagnostic_codes: tuple[str, ...] = ()
+    reproduction_outcome: str | None = None
+    replay_max_merge_event_position_error: float = 0.0
+    replay_max_fruit_position_error: float = 0.0
+    replay_max_linear_velocity_error: float = 0.0
+    replay_max_orientation_error: float = 0.0
+    replay_max_angular_velocity_error: float = 0.0
 
     def __post_init__(self):
         object.__setattr__(
@@ -1220,12 +1226,86 @@ class CounterfactualResult:
                 self.diagnostic_codes,
             ),
         )
+        reproduction_outcome = self.reproduction_outcome
+        if reproduction_outcome is None:
+            if self.original_reproduced:
+                reproduction_outcome = 'strict_match'
+            elif (
+                    self.failure_reason
+                    == 'original_reproduction_numeric_jitter'):
+                reproduction_outcome = 'numeric_jitter_drop'
+            elif (
+                    self.failure_reason
+                    == 'original_reproduction_mismatch'):
+                reproduction_outcome = 'semantic_divergence_drop'
+            else:
+                reproduction_outcome = 'not_evaluated'
+        if reproduction_outcome not in {
+                'strict_match',
+                'numeric_jitter_drop',
+                'semantic_divergence_drop',
+                'not_evaluated'}:
+            raise ValueError('unsupported reproduction_outcome')
+        if (
+                self.original_reproduced
+                != (reproduction_outcome == 'strict_match')):
+            raise ValueError(
+                'original_reproduced must match reproduction_outcome'
+            )
+        expected_gate_reason = {
+            'numeric_jitter_drop': (
+                'original_reproduction_numeric_jitter'
+            ),
+            'semantic_divergence_drop': (
+                'original_reproduction_mismatch'
+            ),
+        }.get(reproduction_outcome)
+        if (
+                expected_gate_reason is not None
+                and self.failure_reason != expected_gate_reason):
+            raise ValueError(
+                'reproduction_outcome does not match failure_reason'
+            )
+        if (
+                reproduction_outcome == 'not_evaluated'
+                and self.failure_reason in {
+                    'original_reproduction_numeric_jitter',
+                    'original_reproduction_mismatch'}):
+            raise ValueError(
+                'gate failure reason requires a classified outcome'
+            )
+        object.__setattr__(
+            self,
+            'reproduction_outcome',
+            reproduction_outcome,
+        )
+        if (
+                self.status in {'completed', 'partial'}
+                and reproduction_outcome != 'strict_match'):
+            raise ValueError(
+                'usable result requires strict reproduction'
+            )
+        for field_name in (
+                'replay_max_merge_event_position_error',
+                'replay_max_fruit_position_error',
+                'replay_max_linear_velocity_error',
+                'replay_max_orientation_error',
+                'replay_max_angular_velocity_error'):
+            object.__setattr__(
+                self,
+                field_name,
+                _finite_float(
+                    field_name,
+                    getattr(self, field_name),
+                    minimum=0.0,
+                ),
+            )
 
     @property
     def label_ready(self):
         """只有原动作复现成功且至少一个替代分支可用时才允许造标签。"""
 
-        if not self.original_reproduced:
+        if self.reproduction_outcome != 'strict_match':
             return False
         actual = next((
             branch

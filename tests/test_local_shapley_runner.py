@@ -8,6 +8,8 @@ import time
 import unittest
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from daxigua.core.engine import HeadlessGame
 from daxigua_rl.attribution.causal_replay import (
@@ -224,6 +226,23 @@ def _tamper_first_trace_outcome(proposal):
     )
 
 
+def _replay_report(
+        *,
+        reproduction_status,
+        mismatch_codes,
+        maxima=(0.0, 0.0, 0.0, 0.0, 0.0)):
+    return SimpleNamespace(
+        matches=False,
+        reproduction_status=reproduction_status,
+        mismatch_codes=tuple(mismatch_codes),
+        max_merge_event_position_error=maxima[0],
+        max_fruit_position_error=maxima[1],
+        max_linear_velocity_error=maxima[2],
+        max_orientation_error=maxima[3],
+        max_angular_velocity_error=maxima[4],
+    )
+
+
 class LocalShapleyPhysicalRunnerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -328,7 +347,66 @@ class LocalShapleyPhysicalRunnerTest(unittest.TestCase):
             'grand_reproduction_mismatch',
         )
         self.assertEqual(
+            result.reproduction_outcome,
+            'semantic_divergence_drop',
+        )
+        self.assertEqual(
             local_shapley_result_to_causal_samples(task, result),
+            (),
+        )
+
+    def test_numeric_jitter_has_distinct_outcome_and_rejects_all_labels(self):
+        report = _replay_report(
+            reproduction_status='numeric_jitter_drop',
+            mismatch_codes=(
+                'merge_event_position',
+                'fruit_position',
+                'fruit_velocity',
+                'fruit_angle',
+            ),
+            maxima=(0.11, 0.22, 0.33, 0.44, 0.55),
+        )
+        with patch.object(
+                HeadlessGame,
+                'compare_action_outcomes',
+                return_value=report):
+            result = run_local_shapley_task(self.task)
+
+        self.assertEqual(result.status, 'failed')
+        self.assertFalse(result.grand_reproduced)
+        self.assertFalse(result.label_ready)
+        self.assertEqual(
+            result.failure_reason,
+            'grand_reproduction_numeric_jitter',
+        )
+        self.assertEqual(
+            result.reproduction_outcome,
+            'numeric_jitter_drop',
+        )
+        self.assertEqual(
+            result.diagnostic_codes,
+            (
+                'grand_mismatch_merge_event_position',
+                'grand_mismatch_fruit_position',
+                'grand_mismatch_fruit_velocity',
+                'grand_mismatch_fruit_angle',
+            ),
+        )
+        self.assertEqual(
+            (
+                result.replay_max_merge_event_position_error,
+                result.replay_max_fruit_position_error,
+                result.replay_max_linear_velocity_error,
+                result.replay_max_orientation_error,
+                result.replay_max_angular_velocity_error,
+            ),
+            (0.11, 0.22, 0.33, 0.44, 0.55),
+        )
+        self.assertEqual(
+            local_shapley_result_to_causal_samples(
+                self.task,
+                result,
+            ),
             (),
         )
 

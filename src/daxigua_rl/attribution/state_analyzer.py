@@ -95,6 +95,20 @@ def _clip_unit(value):
     return max(0.0, min(1.0, float(value)))
 
 
+def _bounded_mean(values):
+    """返回严格位于样本包围盒内的稳定均值。
+
+    ``sum(values) / len(values)`` 在一行或一列包含多个相同浮点坐标时，可能因
+    累加舍入比该唯一坐标小一个 ULP，继而违反质心必定位于包围盒内的几何不变量。
+    ``fsum`` 降低累计误差，最终裁剪只消除这种边界舍入，不改变区域几何。
+    """
+
+    lower = min(values)
+    upper = max(values)
+    mean = math.fsum(values) / len(values)
+    return max(lower, min(upper, mean))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class StateAnalyzerConfig:
     """控制静态分析精度、容差和结构搜索预算。
@@ -1455,8 +1469,8 @@ class StateAnalyzer:
                 ),
                 cell_count=len(members),
                 area_ratio=len(members) / cell_count,
-                centroid_x=sum(normalized_x) / len(normalized_x),
-                centroid_y=sum(normalized_y) / len(normalized_y),
+                centroid_x=_bounded_mean(normalized_x),
+                centroid_y=_bounded_mean(normalized_y),
                 min_x=min(normalized_x),
                 max_x=max(normalized_x),
                 min_y=min(normalized_y),

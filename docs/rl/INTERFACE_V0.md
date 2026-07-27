@@ -788,9 +788,10 @@ runs/dqn_YYYYMMDD_HHMMSS/
 - AttributionTracker 调用耗时、事件生命周期、pending、谱系/连锁、延迟和
   event/status JSON。
 - 规则因果样本 builder、`CausalReplayBuffer` 分层/监督类型/存储状态。
-- 快照/proposal 数、重演完成/失败/不可复现、模拟步、soft/hard token 比例、队列、
-  熔断和 drop reason。
-- 局部 Shapley 的考虑/选择/完成/失败、subset、效率门禁、共享 token 和样本数。
+- 快照/proposal 数、重演 strict/numeric/semantic 三态、五类连续误差最大值、模拟
+  步、soft/hard token 比例、队列、熔断和 drop reason。
+- 局部 Shapley 的考虑/选择/完成/失败、三态复现、subset、效率门禁、共享 token 和
+  样本数。
 - greedy 评估均分、最高分、最低分、历史最高分、平均 reward、平均 episode 长度。
 - 采样和训练速度。
 

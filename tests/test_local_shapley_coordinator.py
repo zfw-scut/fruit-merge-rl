@@ -209,6 +209,61 @@ def _failed_runner(task):
     )
 
 
+def _classified_failed_runner(task):
+    event_index = task.budget_key.event_index
+    if event_index == 1:
+        outcome = 'numeric_jitter_drop'
+        failure_reason = 'grand_reproduction_numeric_jitter'
+        maxima = (0.10, 0.50, 0.30, 0.20, 0.40)
+    elif event_index == 2:
+        outcome = 'numeric_jitter_drop'
+        failure_reason = 'grand_reproduction_numeric_jitter'
+        maxima = (0.60, 0.20, 0.70, 0.80, 0.10)
+    elif event_index == 3:
+        outcome = 'semantic_divergence_drop'
+        failure_reason = 'grand_reproduction_mismatch'
+        maxima = (9.0, 9.0, 9.0, 9.0, 9.0)
+    else:
+        outcome = 'not_evaluated'
+        failure_reason = 'grand_comparison_failure'
+        maxima = (8.0, 8.0, 8.0, 8.0, 8.0)
+    subset = LocalShapleySubsetResult(
+        member_keys=task.candidate_keys,
+        objective_return=0.0,
+        simulated_steps=1,
+        terminated=False,
+        truncated=False,
+        replay_max_merge_event_position_error=maxima[0],
+        replay_max_fruit_position_error=maxima[1],
+        replay_max_linear_velocity_error=maxima[2],
+        replay_max_orientation_error=maxima[3],
+        replay_max_angular_velocity_error=maxima[4],
+    )
+    return LocalShapleyResult(
+        task_id=task.task_id,
+        status='failed',
+        grand_reproduced=False,
+        contributions=(),
+        empty_value=None,
+        full_value=None,
+        efficiency_residual=None,
+        efficiency_tolerance=None,
+        subset_results=(subset,),
+        evaluated_subset_count=1,
+        cache_hit_count=0,
+        permutation_count=0,
+        simulated_steps=1,
+        failure_reason=failure_reason,
+        diagnostic_codes=(f'coordinator_test_{outcome}',),
+        reproduction_outcome=outcome,
+        replay_max_merge_event_position_error=maxima[0],
+        replay_max_fruit_position_error=maxima[1],
+        replay_max_linear_velocity_error=maxima[2],
+        replay_max_orientation_error=maxima[3],
+        replay_max_angular_velocity_error=maxima[4],
+    )
+
+
 def _raising_runner(_task):
     raise RuntimeError('intentional runner failure')
 
@@ -509,6 +564,14 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
                 failed.stats.cumulative.reproduction_failed,
                 1,
             )
+            self.assertEqual(
+                failed.stats.cumulative.semantic_divergence_dropped,
+                1,
+            )
+            self.assertEqual(
+                failed.stats.cumulative.numeric_jitter_dropped,
+                0,
+            )
         finally:
             failed.close()
 
@@ -534,6 +597,95 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
             )
         finally:
             crashed.close()
+
+    def test_three_state_counts_legacy_failures_and_numeric_maxima(self):
+        config = LocalShapleyConfig(event_ratio_max=1.0)
+        replay = CausalReplayBuffer(capacity=8)
+        coordinator = self._coordinator(
+            config=config,
+            replay=replay,
+            runner=_classified_failed_runner,
+        )
+        try:
+            outcomes = []
+            for proposal in self.proposals[:4]:
+                submission = coordinator.consider(
+                    proposal,
+                    self.payload,
+                )
+                self.assertTrue(submission.selected)
+                self.assertTrue(submission.accepted)
+                polled = coordinator.poll()
+                self.assertEqual(polled.result_count, 1)
+                self.assertEqual(polled.inserted_sample_count, 0)
+                outcomes.append(
+                    polled.results[0].reproduction_outcome
+                )
+
+            self.assertEqual(
+                outcomes,
+                [
+                    'numeric_jitter_drop',
+                    'numeric_jitter_drop',
+                    'semantic_divergence_drop',
+                    'not_evaluated',
+                ],
+            )
+            self.assertEqual(len(replay), 0)
+            cumulative = coordinator.stats.cumulative
+            self.assertEqual(cumulative.results_failed, 4)
+            # 兼容旧 readiness 分母：所有未复现结果仍进入总失败数。
+            self.assertEqual(cumulative.reproduction_failed, 4)
+            self.assertEqual(cumulative.numeric_jitter_dropped, 2)
+            self.assertEqual(cumulative.semantic_divergence_dropped, 1)
+            self.assertEqual(
+                (
+                    cumulative
+                    .numeric_jitter_max_merge_event_position_error,
+                    cumulative.numeric_jitter_max_fruit_position_error,
+                    cumulative
+                    .numeric_jitter_max_linear_velocity_error,
+                    cumulative.numeric_jitter_max_orientation_error,
+                    cumulative
+                    .numeric_jitter_max_angular_velocity_error,
+                ),
+                (0.60, 0.50, 0.70, 0.80, 0.40),
+            )
+            self.assertEqual(cumulative.label_ready_results, 0)
+            self.assertEqual(cumulative.samples_inserted, 0)
+
+            summary = coordinator.summary()
+            self.assertEqual(summary['reproduction_failed'], 4)
+            self.assertEqual(summary['numeric_jitter_dropped'], 2)
+            self.assertEqual(summary['semantic_divergence_dropped'], 1)
+            self.assertEqual(
+                summary[
+                    'numeric_jitter_max_merge_event_position_error'
+                ],
+                0.60,
+            )
+            self.assertEqual(
+                summary['numeric_jitter_max_fruit_position_error'],
+                0.50,
+            )
+            self.assertEqual(
+                summary[
+                    'numeric_jitter_max_linear_velocity_error'
+                ],
+                0.70,
+            )
+            self.assertEqual(
+                summary['numeric_jitter_max_orientation_error'],
+                0.80,
+            )
+            self.assertEqual(
+                summary[
+                    'numeric_jitter_max_angular_velocity_error'
+                ],
+                0.40,
+            )
+        finally:
+            coordinator.close()
 
     def test_executor_submit_failure_refunds_full_reservation(self):
         config = LocalShapleyConfig(event_ratio_max=1.0)

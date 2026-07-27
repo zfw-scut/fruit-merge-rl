@@ -91,8 +91,10 @@ def _failed_result(
         original_reproduced,
         failure_reason,
         branches=(),
-        diagnostic_codes=()):
+        diagnostic_codes=(),
+        replay_report=None):
     branches = tuple(branches)
+    replay_fields = _replay_report_fields(replay_report)
     return CounterfactualResult(
         task_id=task.task_id,
         status='failed',
@@ -105,7 +107,31 @@ def _failed_result(
         ),
         failure_reason=failure_reason,
         diagnostic_codes=tuple(diagnostic_codes),
+        **replay_fields,
     )
+
+
+def _replay_report_fields(report):
+    """提取不含实际 outcome 载荷的复现三态与五类最大误差。"""
+
+    if report is None:
+        return {}
+    return {
+        'reproduction_outcome': report.reproduction_status,
+        'replay_max_merge_event_position_error': (
+            report.max_merge_event_position_error
+        ),
+        'replay_max_fruit_position_error': (
+            report.max_fruit_position_error
+        ),
+        'replay_max_linear_velocity_error': (
+            report.max_linear_velocity_error
+        ),
+        'replay_max_orientation_error': report.max_orientation_error,
+        'replay_max_angular_velocity_error': (
+            report.max_angular_velocity_error
+        ),
+    }
 
 
 def _torch_load_state_dict(payload):
@@ -543,6 +569,14 @@ def run_counterfactual_task(task):
         )
 
     if not replay_report.matches:
+        numeric_jitter = (
+            replay_report.reproduction_status == 'numeric_jitter_drop'
+        )
+        failure_reason = (
+            'original_reproduction_numeric_jitter'
+            if numeric_jitter
+            else 'original_reproduction_mismatch'
+        )
         mismatch_codes = tuple(
             f'original_mismatch_{code}'
             for code in replay_report.mismatch_codes
@@ -550,15 +584,16 @@ def run_counterfactual_task(task):
         failed = _failed_branch(
             task.actual_action_offset,
             simulated_steps=1,
-            failure_reason='original_reproduction_mismatch',
+            failure_reason=failure_reason,
             diagnostic_codes=mismatch_codes,
         )
         return _failed_result(
             task,
             original_reproduced=False,
-            failure_reason='original_reproduction_mismatch',
+            failure_reason=failure_reason,
             branches=(failed,),
             diagnostic_codes=mismatch_codes,
+            replay_report=replay_report,
         )
 
     # 模型错误发生在复现成功之后，但仍不得把不完整实际分支用作 label。
@@ -578,6 +613,7 @@ def run_counterfactual_task(task):
             failure_reason='target_policy_initialization_failure',
             branches=(failed,),
             diagnostic_codes=failed.diagnostic_codes,
+            replay_report=replay_report,
         )
 
     branches = [
@@ -596,6 +632,7 @@ def run_counterfactual_task(task):
             failure_reason='actual_branch_failure',
             branches=branches,
             diagnostic_codes=branches[0].diagnostic_codes,
+            replay_report=replay_report,
         )
 
     for action_offset in task.alternative_action_offsets:
@@ -634,6 +671,7 @@ def run_counterfactual_task(task):
             failure_reason='no_usable_alternative_branch',
             branches=branches,
             diagnostic_codes=diagnostics,
+            replay_report=replay_report,
         )
 
     all_completed = all(
@@ -663,6 +701,7 @@ def run_counterfactual_task(task):
         ),
         failure_reason=failure_reason,
         diagnostic_codes=diagnostics,
+        **_replay_report_fields(replay_report),
     )
 
 

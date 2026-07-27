@@ -288,7 +288,8 @@ runs/dqn_causal_smoke_5k/
 - 无崩溃、NaN/Inf、死锁、ID 串线和重复预算记账；
 - 主 TD、规则排序和反事实监督都能进入真实 optimizer step；
 - 规则因果 replay 同时出现正、负样本；
-- 物理反事实存在可复现且可生成标签的结果；
+- 物理反事实存在 `strict_match` 且可生成标签的结果；numeric jitter 与 semantic
+  divergence 均被丢弃且三态账本闭合；
 - 预算始终不超过 10% 硬上限；
 - 普通反事实最多占 9%，保留的 1% 能让已选中 Shapley 最终获得共享预算；
 - checkpoint、CSV、曲线和 shutdown sidecar 能完整落盘。
@@ -392,7 +393,7 @@ failure_latest.json                 # 仅异常时出现
 | 因果训练 | `rule_rank_loss`、`counterfactual_loss`、各 batch size | 非零样本到来后能进入更新 |
 | 因果 replay | 正/负、rule/cf/Shapley 数量和 cause type | 不被单一类别永久饿死 |
 | 状态分析 | degraded rate、shaping p95、cache hit | 降级稀少，shaping 不压过任务效用 |
-| 反事实 | admitted/completed/failed、reproduction、samples | 失败被丢弃，不产生伪标签 |
+| 反事实 | admitted/completed/failed、strict/numeric/semantic、五类连续误差、samples | 只有 strict 生成标签，numeric 与 semantic 分开审计 |
 | 预算 | actual/projected token ratio、ordinary hard、external reserve、hard budget respected | 普通任务不侵占 1% 保留份额，共享 10% 硬预算始终成立 |
 | Shapley | observed/selected/submitted/completed/terminal dropped/reproduced/samples | 极稀疏、无预算饥饿、可复现、效率门通过 |
 | 性能 | updates/s、env steps/s、各阶段 seconds | 无持续退化或队列死锁 |
@@ -423,7 +424,10 @@ p95 不超过其 25%，即约 `0.707`。
 - StateAnalyzer degraded rate 大于 `1%`；
 - 至少 50 局后 truncated 比例大于 `2%`；
 - `abs(mean_q)`、`abs(mean_target)` 或 mean absolute TD error 大于 `100`；
-- 反事实累计完成至少 100 个任务后，原动作复现失败率大于 `1%`；
+- 反事实累计评估至少 100 个任务后，物理语义分歧率大于 `1%`；仅连续数值抖动
+  单独报告且不占用该 1% 配额；
+- `reproduction_failed - numeric_jitter_dropped -
+  semantic_divergence_dropped` 非零，表示存在未评估或未分类的复现失败；
 - 任何反事实失败没有可归类的 `failure_reason`，或出现 executor/runner 异常、
   pending 无结果、孤儿/重复结果、标签转换或 replay 写入失败；这类基础设施错误
   不受上面的 1% 物理复现率豁免；
