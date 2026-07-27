@@ -283,7 +283,22 @@ def _physical_memory_status():
 
 
 def _apply_cgroup_memory_limit(total_bytes, available_bytes):
-    """将宿主机内存收紧到当前 Linux cgroup 的 limit/usage。"""
+    """将宿主机内存收紧到当前 Linux cgroup 的可回收工作集余量。"""
+
+    status = _cgroup_memory_status()
+    if status is None:
+        return int(total_bytes), int(available_bytes)
+    return (
+        min(int(total_bytes), status['limit_bytes']),
+        min(
+            int(available_bytes),
+            status['effective_available_bytes'],
+        ),
+    )
+
+
+def _cgroup_memory_paths():
+    """返回当前进程及其祖先 cgroup 的 limit/usage/stat 路径。"""
 
     candidates = []
 
@@ -317,6 +332,7 @@ def _apply_cgroup_memory_limit(total_bytes, available_bytes):
                 candidates.append((
                     group_dir / 'memory.max',
                     group_dir / 'memory.current',
+                    group_dir / 'memory.stat',
                 ))
         elif 'memory' in controllers.split(','):
             root = Path('/sys/fs/cgroup/memory')
@@ -324,21 +340,30 @@ def _apply_cgroup_memory_limit(total_bytes, available_bytes):
                 candidates.append((
                     group_dir / 'memory.limit_in_bytes',
                     group_dir / 'memory.usage_in_bytes',
+                    group_dir / 'memory.stat',
                 ))
     candidates.extend((
         (
             Path('/sys/fs/cgroup/memory.max'),
             Path('/sys/fs/cgroup/memory.current'),
+            Path('/sys/fs/cgroup/memory.stat'),
         ),
         (
             Path('/sys/fs/cgroup/memory/memory.limit_in_bytes'),
             Path('/sys/fs/cgroup/memory/memory.usage_in_bytes'),
+            Path('/sys/fs/cgroup/memory/memory.stat'),
         ),
     ))
+    # 同一个 root 路径可能同时来自 /proc/self/cgroup 与固定 fallback。
+    return tuple(dict.fromkeys(candidates))
 
-    limits = []
-    remaining_limits = []
-    for limit_path, usage_path in candidates:
+
+def _cgroup_memory_status(paths=None):
+    """读取 cgroup 总量、原始余量和扣除 inactive_file 后的有效余量。"""
+
+    records = []
+    for limit_path, usage_path, stat_path in (
+            _cgroup_memory_paths() if paths is None else tuple(paths)):
         try:
             limit_text = limit_path.read_text(
                 encoding='ascii',
@@ -354,14 +379,67 @@ def _apply_cgroup_memory_limit(total_bytes, available_bytes):
         # cgroup v1 常用一个接近 2**63 的数表示无限制。
         if limit <= 0 or limit >= (1 << 60):
             continue
-        limits.append(limit)
-        remaining_limits.append(
-            max(0, limit - max(0, usage))
-        )
-    return (
-        min((int(total_bytes), *limits)),
-        min((int(available_bytes), *remaining_limits)),
+        inactive_file = 0
+        try:
+            memory_stat = {}
+            for line in stat_path.read_text(
+                    encoding='ascii').splitlines():
+                name, value = line.split()
+                memory_stat[name] = int(value)
+            inactive_file = max(
+                0,
+                memory_stat.get(
+                    'total_inactive_file',
+                    memory_stat.get('inactive_file', 0),
+                ),
+            )
+        except (OSError, TypeError, ValueError):
+            # 没有 stat 时保持旧的保守 raw headroom 语义。
+            inactive_file = 0
+        usage = max(0, usage)
+        working_set = max(0, usage - inactive_file)
+        records.append({
+            'limit_bytes': limit,
+            'usage_bytes': usage,
+            'inactive_file_bytes': inactive_file,
+            'working_set_bytes': working_set,
+            'raw_available_bytes': max(0, limit - usage),
+            'effective_available_bytes': max(
+                0,
+                limit - working_set,
+            ),
+            'limit_path': str(limit_path),
+        })
+    if not records:
+        return None
+    limiting_effective = min(
+        records,
+        key=lambda item: item['effective_available_bytes'],
     )
+    limiting_raw = min(
+        records,
+        key=lambda item: item['raw_available_bytes'],
+    )
+    return {
+        'limit_bytes': min(
+            item['limit_bytes']
+            for item in records
+        ),
+        'raw_available_bytes': limiting_raw[
+            'raw_available_bytes'
+        ],
+        'effective_available_bytes': limiting_effective[
+            'effective_available_bytes'
+        ],
+        'inactive_file_bytes': limiting_effective[
+            'inactive_file_bytes'
+        ],
+        'working_set_bytes': limiting_effective[
+            'working_set_bytes'
+        ],
+        'effective_limit_path': limiting_effective['limit_path'],
+        'candidate_count': len(records),
+    }
 
 
 def _snapshot_audit(training_args, count):
@@ -1079,6 +1157,7 @@ def run_preflight(args):
             if available_memory is not None
             else None
         )
+        cgroup_memory = _cgroup_memory_status()
         checks.append(_check(
             'host_physical_memory',
             (
@@ -1090,6 +1169,42 @@ def run_preflight(args):
             ),
             total_gb=total_memory_gb,
             available_gb=available_memory_gb,
+            available_basis=(
+                'min(host MemAvailable, cgroup reclaim-aware headroom)'
+                if cgroup_memory is not None
+                else 'host MemAvailable'
+            ),
+            cgroup=(
+                {
+                    'limit_gb': (
+                        cgroup_memory['limit_bytes'] / (1024 ** 3)
+                    ),
+                    'raw_available_gb': (
+                        cgroup_memory['raw_available_bytes']
+                        / (1024 ** 3)
+                    ),
+                    'effective_available_gb': (
+                        cgroup_memory['effective_available_bytes']
+                        / (1024 ** 3)
+                    ),
+                    'inactive_file_gb': (
+                        cgroup_memory['inactive_file_bytes']
+                        / (1024 ** 3)
+                    ),
+                    'working_set_gb': (
+                        cgroup_memory['working_set_bytes']
+                        / (1024 ** 3)
+                    ),
+                    'effective_limit_path': (
+                        cgroup_memory['effective_limit_path']
+                    ),
+                    'candidate_count': (
+                        cgroup_memory['candidate_count']
+                    ),
+                }
+                if cgroup_memory is not None
+                else None
+            ),
             minimum_total_gb=float(args.min_memory_gb),
             minimum_available_gb=float(
                 args.min_available_memory_gb

@@ -202,7 +202,8 @@ conda run --no-capture-output -n python-torch \
   9 steps per update/3-step/完整因果与 Shapley 配置，而不是误传 5k 或关闭归因的
   配置；
 - `full_causal_optimizer_step` 和 `local_shapley_physical` 均通过；
-- cgroup 可用物理内存上限至少 24 GiB，启动时可用内存至少 8 GiB；
+- cgroup 可用物理内存上限至少 24 GiB，启动时可回收工作集余量至少 8 GiB；
+  `memory.current` 中的 `inactive_file` 不计作不可回收占用，原始余量仍写入报告供审查；
 - JSON 中 commit 与准备运行的源码 commit 一致，`dirty=false`。
 
 preflight 通过只表示静态和小规模物理链路闭合，不等于 500k 已经获准启动。
