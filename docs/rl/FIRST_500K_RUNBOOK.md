@@ -222,6 +222,21 @@ conda run --no-capture-output -n python-torch \
   --warn-gpu-memory-used-mb 7600
 ```
 
+云容器还要在同一个监控目录并行启动 cgroup-v2 工作集监控：
+
+```bash
+conda run --no-capture-output -n python-torch \
+  python -u tools/monitor_cgroup_memory.py \
+  --log-dir runs/resource_monitor/<本次独占目录> \
+  --interval 3 \
+  --min-effective-available-gb 4
+```
+
+`memory.current` 包含冷 replay 和 checkpoint 写入产生的文件页缓存，不能直接把
+`memory.max - memory.current` 当作真实不可回收余量。cgroup 监控同时保存原始余量，
+并用 `memory.current - inactive_file` 计算工作集；阶段门禁要求工作集有效余量至少
+4 GiB，且 `memory.events` 的 `low/high/max/oom/oom_kill` 增量全部为 0。
+
 监控输出默认位于 `runs/resource_monitor/<时间戳>/`。它与训练进程隔离，即使训练被
 OOM killer 终止，也能留下崩溃前的 CPU、内存、GPU 和进程日志。
 
@@ -231,6 +246,9 @@ OOM killer 终止，也能留下崩溃前的 CPU、内存、GPU 和进程日志�
 - `process_metrics.csv` 至少包含一条目标训练进程记录；
 - `summary.json` 的 `samples > 0`、`min_mem_available_mb >= 4096`、
   `peak_swap_used_mb <= 1024`、`peak_target_rss_mb <= 16384`；
+- `cgroup_summary.json` 的 `healthy=true`、
+  `min_memory_effective_available_bytes >= 4 GiB`，并人工核对
+  `min_memory_raw_available_bytes` 与页缓存峰值；
 - `gpu_metrics.csv` 存在有效 GPU 样本，显存没有连续 3 次超过总量 95%；
 - `events.jsonl` 没有在结束时仍未恢复的 `low_system_memory`、
   `swap_usage_high`、`target_rss_high`、`gpu_memory_high` 或
@@ -271,10 +289,13 @@ runs/dqn_causal_smoke_5k/
 - 规则因果 replay 同时出现正、负样本；
 - 物理反事实存在可复现且可生成标签的结果；
 - 预算始终不超过 10% 硬上限；
+- 普通反事实最多占 9%，保留的 1% 能让已选中 Shapley 最终获得共享预算；
 - checkpoint、CSV、曲线和 shutdown sidecar 能完整落盘。
 
 模型分数在 5k 时没有否决权。局部 Shapley 的累计上限只有 0.05%，5k 中没有选中
-任务也不自动判失败；其物理实现先由 preflight 保证，真实选择率在 10k/25k 校准。
+任务也不自动判失败；但一旦 selected 大于零，就必须产生完成结果并进入因果优化，
+不能在关闭时用 terminal drop 把预算饥饿伪装为通过。其物理实现先由 preflight
+保证，真实选择率在 10k/25k 校准。
 
 ## 9. 10k 校准与可选独立 25k 校准
 
@@ -371,8 +392,8 @@ failure_latest.json                 # 仅异常时出现
 | 因果 replay | 正/负、rule/cf/Shapley 数量和 cause type | 不被单一类别永久饿死 |
 | 状态分析 | degraded rate、shaping p95、cache hit | 降级稀少，shaping 不压过任务效用 |
 | 反事实 | admitted/completed/failed、reproduction、samples | 失败被丢弃，不产生伪标签 |
-| 预算 | actual/projected token ratio、hard budget respected | 共享硬预算始终成立 |
-| Shapley | observed/selected/completed/reproduced/samples | 极稀疏、可复现、效率门通过 |
+| 预算 | actual/projected token ratio、ordinary hard、external reserve、hard budget respected | 普通任务不侵占 1% 保留份额，共享 10% 硬预算始终成立 |
+| Shapley | observed/selected/submitted/completed/terminal dropped/reproduced/samples | 极稀疏、无预算饥饿、可复现、效率门通过 |
 | 性能 | updates/s、env steps/s、各阶段 seconds | 无持续退化或队列死锁 |
 | 游戏表现 | episode score、terminated/truncated | 以真实 score 解释，不比较旧 shaped reward |
 
@@ -402,6 +423,9 @@ p95 不超过其 25%，即约 `0.707`。
 - 至少 50 局后 truncated 比例大于 `2%`；
 - `abs(mean_q)`、`abs(mean_target)` 或 mean absolute TD error 大于 `100`；
 - 反事实累计完成至少 100 个任务后，原动作复现失败率大于 `1%`；
+- 任何反事实失败没有可归类的 `failure_reason`，或出现 executor/runner 异常、
+  pending 无结果、孤儿/重复结果、标签转换或 replay 写入失败；这类基础设施错误
+  不受上面的 1% 物理复现率豁免；
 - `counterfactual_circuit_open=1`，或 snapshot failure 非零且持续增加；
 - counterfactual pending 达到队列上限并持续 10 分钟没有完成结果；
 - pending 归因事件持续增长，同时至少 5 个窗口没有确认或取消事件；

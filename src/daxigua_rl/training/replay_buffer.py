@@ -22,6 +22,7 @@ import random
 from collections import deque
 from pathlib import Path
 
+from .checkpointing import atomic_torch_save
 from .tensor_transition import TensorTransition
 
 
@@ -549,12 +550,12 @@ class ReplayBuffer:
             return
 
         path = self.cold_dir / f'segment_{self._next_segment_index:08d}.pt'
-        self._next_segment_index += 1
 
         payload = self._pack_segment(transitions)
-        import torch
-
-        torch.save(payload, path)
+        # 与模型 checkpoint 共用原子落盘和 Linux 页缓存回收提示。训练被中断时
+        # 不会留下一个看似合法、实际只写了一半的 cold segment。
+        atomic_torch_save(payload, path)
+        self._next_segment_index += 1
         self._segments.append({'path': str(path), 'count': len(transitions)})
         self._segment_item_count += len(transitions)
         self._pending_cold.clear()

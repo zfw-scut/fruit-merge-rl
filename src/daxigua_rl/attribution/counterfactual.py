@@ -549,6 +549,7 @@ class CounterfactualConfig:
     horizon_max: int = 12
     cost_ratio: float = 0.08
     cost_hard_limit: float = 0.10
+    external_token_reserve_ratio: float = 0.0
     min_real_steps: int = 256
     cpu_core_ratio: float = 0.25
     queue_capacity: int = 256
@@ -601,6 +602,7 @@ class CounterfactualConfig:
         for field_name in (
                 'cost_ratio',
                 'cost_hard_limit',
+                'external_token_reserve_ratio',
                 'cpu_core_ratio'):
             object.__setattr__(
                 self,
@@ -617,6 +619,13 @@ class CounterfactualConfig:
         if self.cost_hard_limit < self.cost_ratio:
             raise ValueError(
                 'cost_hard_limit must be >= cost_ratio'
+            )
+        if (
+                self.external_token_reserve_ratio
+                > self.cost_hard_limit - self.cost_ratio):
+            raise ValueError(
+                'external_token_reserve_ratio must leave the ordinary '
+                'counterfactual soft budget available'
             )
         if self.cpu_core_ratio <= 0.0:
             raise ValueError('cpu_core_ratio must be > 0')
@@ -1640,7 +1649,9 @@ class CounterfactualSchedulerStats:
     tokens_refunded: int
     token_overrun: int
     soft_token_limit: float
+    ordinary_hard_token_limit: float
     hard_token_limit: float
+    external_token_reserve: float
     soft_budget_borrows: int
     consecutive_failures: int
     circuit_open: bool
@@ -1820,7 +1831,11 @@ class BudgetedCounterfactualScheduler:
                 tokens_refunded=self._tokens_refunded,
                 token_overrun=self._token_overrun,
                 soft_token_limit=self._soft_limit,
+                ordinary_hard_token_limit=(
+                    self._ordinary_hard_limit
+                ),
                 hard_token_limit=self._hard_limit,
+                external_token_reserve=self._external_token_reserve,
                 soft_budget_borrows=self._soft_budget_borrows,
                 consecutive_failures=self._consecutive_failures,
                 circuit_open=self._circuit_open,
@@ -1856,6 +1871,20 @@ class BudgetedCounterfactualScheduler:
     @property
     def _hard_limit(self):
         return self._real_steps * self.config.cost_hard_limit
+
+    @property
+    def _external_token_reserve(self):
+        return (
+            self._real_steps
+            * self.config.external_token_reserve_ratio
+        )
+
+    @property
+    def _ordinary_hard_limit(self):
+        return max(
+            self._soft_limit,
+            self._hard_limit - self._external_token_reserve,
+        )
 
     def record_real_steps(self, step_count):
         """增加真实 rollout 步数并尝试派发已排队任务。"""
@@ -2129,15 +2158,19 @@ class BudgetedCounterfactualScheduler:
             )
             allowed_limit = self._soft_limit
             borrowed = False
-            if (
-                    task.priority
-                    >= self.config.soft_budget_borrow_priority):
-                allowed_limit = self._hard_limit
+            borrow_eligible = (
+                task.priority
+                >= self.config.soft_budget_borrow_priority
+            )
+            if borrow_eligible:
+                # 为极稀疏 Shapley 保留显式份额；普通反事实仍可越过
+                # soft budget，但不能提前耗尽整个共享 hard budget。
+                allowed_limit = self._ordinary_hard_limit
                 borrowed = projected_tokens > self._soft_limit
             if projected_tokens > allowed_limit:
                 reason = (
                     'hard_token_budget'
-                    if allowed_limit == self._hard_limit
+                    if borrow_eligible
                     else 'soft_token_budget'
                 )
                 return self._reject_locked(task, reason)

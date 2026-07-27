@@ -202,6 +202,8 @@ class LocalShapleyActivityStats:
     proposals_selected: int
     selector_quota_rejected: int
     tasks_reserved: int
+    tasks_submitted: int
+    selected_terminal_dropped: int
     reserved_tokens_total: int
     consumed_tokens_total: int
     refunded_tokens_total: int
@@ -256,6 +258,8 @@ class _Accumulator:
         'proposals_selected',
         'selector_quota_rejected',
         'tasks_reserved',
+        'tasks_submitted',
+        'selected_terminal_dropped',
         'reserved_tokens_total',
         'consumed_tokens_total',
         'refunded_tokens_total',
@@ -512,6 +516,7 @@ class LocalShapleyCoordinator:
                     created_real_step=created_real_step,
                 )
             except Exception:
+                self._increment('selected_terminal_dropped')
                 self._drop('task_creation_failure')
                 return LocalShapleySubmission(
                     proposal_id=proposal.proposal_id,
@@ -605,10 +610,12 @@ class LocalShapleyCoordinator:
                 -lowest.task.created_real_step,
                 lowest.task.task_id,
         ):
+            self._increment('selected_terminal_dropped')
             self._drop('pending_capacity')
             return False
         del self._pending[lowest.task.task_id]
         self._increment('pending_evicted')
+        self._increment('selected_terminal_dropped')
         self._drop('pending_priority_evicted')
         self._pending[task.task_id] = _PendingTask(
             task=task,
@@ -640,6 +647,7 @@ class LocalShapleyCoordinator:
                 )
             except Exception:
                 del self._pending[task.task_id]
+                self._increment('selected_terminal_dropped')
                 self._drop('external_reservation_exception')
                 continue
             if not decision.accepted:
@@ -653,6 +661,7 @@ class LocalShapleyCoordinator:
                     self._drop(reason)
                     return
                 del self._pending[task.task_id]
+                self._increment('selected_terminal_dropped')
                 self._drop(reason)
                 continue
 
@@ -669,6 +678,7 @@ class LocalShapleyCoordinator:
                 )
             except BaseException:
                 self._increment('executor_submit_failures')
+                self._increment('selected_terminal_dropped')
                 self._drop('executor_submit_failure')
                 try:
                     refunded = (
@@ -685,6 +695,7 @@ class LocalShapleyCoordinator:
                 except Exception:
                     self._drop('external_refund_exception')
                 continue
+            self._increment('tasks_submitted')
             self._active = _ActiveTask(
                 task=task,
                 future=future,
@@ -889,6 +900,7 @@ class LocalShapleyCoordinator:
                 return self._close_stats
             self._closed = True
             for pending in tuple(self._pending.values()):
+                self._increment('selected_terminal_dropped')
                 self._drop('coordinator_closed_pending')
             self._pending.clear()
             active = self._active
@@ -932,6 +944,7 @@ class LocalShapleyCoordinator:
                             active.task,
                             active.task.estimated_tokens,
                         )
+                    self._increment('selected_terminal_dropped')
                     self._drop('coordinator_closed_active')
             self._close_stats = self._stats_locked()
             return self._close_stats

@@ -93,14 +93,23 @@ def _completed_coordinator_runner(task):
 
 
 def _unreproduced_coordinator_runner(task):
+    branch = CounterfactualBranchResult(
+        action_offset=task.actual_action_offset,
+        status='failed',
+        objective_return=None,
+        simulated_steps=1,
+        failure_reason='original_reproduction_mismatch',
+        diagnostic_codes=('original_mismatch_state_checksum',),
+    )
     return CounterfactualResult(
         task_id=task.task_id,
         status='failed',
         actual_action_offset=task.actual_action_offset,
         original_reproduced=False,
-        branches=(),
-        simulated_steps=0,
+        branches=(branch,),
+        simulated_steps=1,
         failure_reason='original_reproduction_mismatch',
+        diagnostic_codes=('original_mismatch_state_checksum',),
     )
 
 
@@ -232,7 +241,8 @@ def _coordinator(
         *,
         executor=None,
         config=None,
-        replay=None):
+        replay=None,
+        failure_record_capacity=32):
     return CounterfactualCoordinator(
         causal_replay_buffer=(
             replay
@@ -245,6 +255,7 @@ def _coordinator(
         scheduler_config=config,
         executor=executor or _ImmediateExecutor(),
         runner=runner,
+        failure_record_capacity=failure_record_capacity,
     )
 
 
@@ -365,15 +376,92 @@ class CounterfactualCoordinatorTest(unittest.TestCase):
         try:
             _refresh(unreproduced)
             unreproduced.record_real_steps(400)
-            self.assertTrue(
-                unreproduced.submit(self.proposal).accepted
-            )
+            submission = unreproduced.submit(self.proposal)
+            self.assertTrue(submission.accepted)
             stats = unreproduced.stats
             self.assertEqual(len(replay), 0)
             self.assertEqual(stats.cumulative.results_failed, 1)
             self.assertEqual(stats.cumulative.reproduction_failed, 1)
             self.assertEqual(stats.cumulative.label_ready_results, 0)
             self.assertEqual(stats.cumulative.samples_inserted, 0)
+            self.assertEqual(
+                stats.cumulative.failure_records_created,
+                1,
+            )
+            self.assertEqual(stats.failure_record_count, 1)
+            record = stats.recent_failure_records[0]
+            self.assertEqual(record.task_id, submission.task_id)
+            self.assertEqual(
+                record.proposal_id,
+                self.proposal.proposal_id,
+            )
+            self.assertEqual(
+                (
+                    record.worker_id,
+                    record.episode_id,
+                    record.step_index,
+                ),
+                (
+                    self.proposal.transition_key.worker_id,
+                    self.proposal.transition_key.episode_id,
+                    self.proposal.transition_key.step_index,
+                ),
+            )
+            self.assertEqual(record.created_real_step, 400)
+            self.assertEqual(record.observed_real_step, 400)
+            self.assertEqual(record.result_status, 'failed')
+            self.assertFalse(record.original_reproduced)
+            self.assertEqual(
+                record.failure_reason,
+                'original_reproduction_mismatch',
+            )
+            self.assertEqual(
+                record.diagnostic_codes,
+                ('original_mismatch_state_checksum',),
+            )
+            self.assertEqual(
+                record.trigger_reasons,
+                ('random_rule_audit',),
+            )
+            self.assertEqual(len(record.branches), 1)
+            self.assertEqual(
+                record.branches[0].failure_reason,
+                'original_reproduction_mismatch',
+            )
+            self.assertEqual(
+                dict(stats.cumulative.failure_reason_counts),
+                {'original_reproduction_mismatch': 1},
+            )
+            self.assertEqual(
+                dict(
+                    stats.cumulative
+                    .failure_diagnostic_code_counts
+                ),
+                {'original_mismatch_state_checksum': 1},
+            )
+            self.assertEqual(
+                dict(
+                    stats.cumulative
+                    .failure_trigger_reason_counts
+                ),
+                {'random_rule_audit': 1},
+            )
+
+            shutdown_stats = unreproduced.close()
+            self.assertEqual(shutdown_stats.failure_record_count, 1)
+            checkpoint = unreproduced.checkpoint_state()
+            self.assertEqual(
+                checkpoint['recent_failure_records'][0][
+                    'failure_reason'
+                ],
+                'original_reproduction_mismatch',
+            )
+            encoded = json.dumps(checkpoint, sort_keys=True)
+            self.assertLess(len(encoded), 25_000)
+            self.assertNotIn('state_dict_bytes', encoded)
+            self.assertNotIn('"snapshot"', encoded)
+            self.assertNotIn('"context"', encoded)
+            self.assertNotIn('"model"', encoded)
         finally:
             unreproduced.close()
 
@@ -396,8 +484,80 @@ class CounterfactualCoordinatorTest(unittest.TestCase):
             )
             self.assertEqual(reasons['runner_failure'], 1)
             self.assertEqual(reasons['pending_without_result'], 1)
+            self.assertEqual(
+                stats.cumulative.failure_records_created,
+                0,
+            )
+            self.assertEqual(stats.recent_failure_records, ())
         finally:
             raised.close()
+
+    def test_failure_records_are_bounded_and_window_counts_reset(self):
+        coordinator = _coordinator(
+            _unreproduced_coordinator_runner,
+            failure_record_capacity=1,
+        )
+        first = _proposal(event_index=2)
+        second = _proposal(
+            event_index=3,
+            trigger_reasons=('ambiguous_blocking',),
+        )
+        try:
+            _refresh(coordinator)
+            coordinator.record_real_steps(1_000)
+            self.assertTrue(coordinator.submit(first).accepted)
+            self.assertTrue(coordinator.submit(second).accepted)
+
+            stats = coordinator.snapshot_stats(reset_window=True)
+            self.assertEqual(stats.failure_record_capacity, 1)
+            self.assertEqual(stats.failure_record_count, 1)
+            self.assertEqual(
+                stats.recent_failure_records[0].proposal_id,
+                second.proposal_id,
+            )
+            self.assertEqual(
+                stats.cumulative.failure_records_created,
+                2,
+            )
+            self.assertEqual(
+                stats.cumulative.failure_record_evictions,
+                1,
+            )
+            self.assertEqual(
+                dict(stats.cumulative.failure_reason_counts),
+                {'original_reproduction_mismatch': 2},
+            )
+            self.assertEqual(
+                dict(
+                    stats.cumulative
+                    .failure_trigger_reason_counts
+                ),
+                {
+                    'ambiguous_blocking': 1,
+                    'random_rule_audit': 1,
+                },
+            )
+
+            after_reset = coordinator.stats
+            self.assertEqual(
+                after_reset.window.failure_records_created,
+                0,
+            )
+            self.assertEqual(
+                after_reset.window.failure_record_evictions,
+                0,
+            )
+            self.assertEqual(
+                dict(after_reset.window.failure_reason_counts),
+                {},
+            )
+            self.assertEqual(after_reset.failure_record_count, 1)
+            self.assertEqual(
+                after_reset.cumulative.failure_records_created,
+                2,
+            )
+        finally:
+            coordinator.close()
 
     def test_target_refresh_replaces_frozen_version_and_fingerprint(self):
         coordinator = _coordinator(

@@ -331,6 +331,12 @@ class CounterfactualContractTest(unittest.TestCase):
                 cost_hard_limit=0.10,
             )
         with self.assertRaises(ValueError):
+            CounterfactualConfig(
+                cost_ratio=0.06,
+                cost_hard_limit=0.10,
+                external_token_reserve_ratio=0.05,
+            )
+        with self.assertRaises(ValueError):
             CounterfactualConfig(max_alternatives=4)
         with self.assertRaises(ValueError):
             CounterfactualConfig(max_inflight_per_worker=3)
@@ -730,6 +736,76 @@ class BudgetedSchedulerTest(unittest.TestCase):
             )
         finally:
             borrow_scheduler.close(wait=False)
+
+    def test_external_reserve_cannot_be_consumed_by_ordinary_tasks(self):
+        config = CounterfactualConfig(
+            cost_ratio=0.06,
+            cost_hard_limit=0.10,
+            external_token_reserve_ratio=0.01,
+            min_real_steps=1,
+            soft_budget_borrow_priority=10.0,
+        )
+        scheduler = BudgetedCounterfactualScheduler(
+            worker_count=1,
+            runner=_completed_runner,
+            config=config,
+            executor=_ManualExecutor(),
+        )
+        try:
+            scheduler.record_real_steps(1_000)
+            # 每个任务包含 actual + 两个 alternative，共预留 30 token。
+            for event_index in range(1, 4):
+                decision = scheduler.submit(_task(
+                    event_index=event_index,
+                    config=config,
+                    priority=20.0,
+                    alternatives=(13, 14),
+                ))
+                self.assertTrue(decision.accepted)
+
+            ordinary_overflow = scheduler.submit(_task(
+                event_index=4,
+                config=config,
+                priority=20.0,
+                alternatives=(13, 14),
+            ))
+            self.assertFalse(ordinary_overflow.accepted)
+            self.assertEqual(
+                ordinary_overflow.drop_reason,
+                'hard_token_budget',
+            )
+
+            shapley = scheduler.reserve_external_tokens(
+                'shapley-reserved-share',
+                10,
+                priority=20.0,
+            )
+            self.assertTrue(shapley.accepted)
+            external_overflow = scheduler.reserve_external_tokens(
+                'shapley-overflow',
+                1,
+                priority=20.0,
+            )
+            self.assertFalse(external_overflow.accepted)
+            self.assertEqual(
+                external_overflow.drop_reason,
+                'external_hard_token_budget',
+            )
+
+            stats = scheduler.stats
+            self.assertEqual(stats.soft_token_limit, 60.0)
+            self.assertEqual(
+                stats.ordinary_hard_token_limit,
+                90.0,
+            )
+            self.assertEqual(stats.external_token_reserve, 10.0)
+            self.assertEqual(stats.hard_token_limit, 100.0)
+            self.assertEqual(
+                stats.tokens_consumed + stats.tokens_reserved,
+                100,
+            )
+        finally:
+            scheduler.close(wait=False)
 
     def test_active_and_finished_budget_are_deduplicated(self):
         config = CounterfactualConfig(

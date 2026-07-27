@@ -111,6 +111,7 @@ FORMAL_500K_FLOAT_CONTRACT = {
     'lambda_cf': 0.10,
     'counterfactual_cost_ratio': 0.06,
     'counterfactual_hard_limit': 0.10,
+    'counterfactual_external_token_reserve_ratio': 0.01,
     'counterfactual_cpu_core_ratio': 0.34,
     'counterfactual_proposal_sample_rate': 0.0625,
     'shapley_event_ratio_max': 0.0005,

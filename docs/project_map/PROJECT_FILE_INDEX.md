@@ -83,6 +83,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `tools/cuda_stress_test.py` | 独立 PyTorch CUDA 计算压力测试脚本。只做矩阵乘法和可选显存预留，并采集 GPU、系统内存、进程内存和内核 NVIDIA/Xid 日志。 | 用于判断黑屏/Xid 是否能在脱离游戏和 RL 训练代码后复现；默认输出到 `runs/cuda_stress/<时间戳>/`。 |
 | `tools/export_training_catalog.py` | 训练实验归档工具。扫描本地 `runs/`，识别 Reward V2 task/potential 与历史 Reward V1 指标，并从配置、训练指标和文件信息生成轻量实验目录。 | 不复制 checkpoint、replay 和完整指标 CSV；运行方式见 `docs/training_runs/README.md`。 |
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |
+| `tools/monitor_cgroup_memory.py` | Linux cgroup-v2 内存旁路监控。分别记录原始余量、`inactive_file` 页缓存、可回收工作集余量和 `memory.events`。 | 云容器训练时与通用资源监控并行运行；避免 checkpoint/replay 文件缓存造成假性低内存告警，同时保留真实 OOM/pressure 硬门禁。 |
 | `tools/temporary_rollout_smoke_test.py` | 临时 GNN rollout 验证脚本。用于检查 `DaxiguaEnv -> GraphBuilder -> GNNQNetwork -> step()` 链路是否闭合。 | 不是正式训练入口；验证完成或正式训练脚本落地后可删除或改造。 |
 | `tools/preflight_training.py` | 正式训练前只做短计算、不创建训练 run 的门禁。验证 TOML、Python/Pymunk/Chipmunk、CUDA 前后向、完整因果 optimizer step、局部 Shapley 物理重演、`EngineSnapshot` 多次确定性重演、磁盘和 CPU 余量。 | JSON 写入 `runs/preflight/latest.json`；任一 required check 失败时返回非零。 |
 

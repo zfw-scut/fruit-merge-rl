@@ -234,12 +234,16 @@ METRIC_FIELDS = (
     'counterfactual_hard_budget_respected',
     'counterfactual_circuit_open',
     'counterfactual_drop_reasons',
+    'counterfactual_failure_reasons',
+    'counterfactual_failure_diagnostic_codes',
+    'counterfactual_failure_trigger_reasons',
     'shapley_enabled',
     'shapley_events_observed',
     'shapley_events_selected',
     'shapley_tasks_submitted',
     'shapley_tasks_completed',
     'shapley_tasks_failed',
+    'shapley_terminal_dropped',
     'shapley_reproduction_passed',
     'shapley_reproduction_failed',
     'shapley_samples_inserted',
@@ -401,6 +405,15 @@ def build_arg_parser():
     parser.add_argument('--counterfactual-horizon', type=int, default=10)
     parser.add_argument('--counterfactual-cost-ratio', type=float, default=0.08)
     parser.add_argument('--counterfactual-hard-limit', type=float, default=0.10)
+    parser.add_argument(
+        '--counterfactual-external-token-reserve-ratio',
+        type=float,
+        default=0.0,
+        help=(
+            '从共享硬预算中为局部 Shapley 等外部物理任务保留的比例；'
+            '普通反事实不能借用该份额。'
+        ),
+    )
     parser.add_argument('--counterfactual-min-real-steps', type=int, default=256)
     parser.add_argument('--counterfactual-cpu-core-ratio', type=float, default=0.25)
     parser.add_argument('--counterfactual-queue-capacity', type=int, default=256)
@@ -700,6 +713,9 @@ def build_counterfactual_config(args):
         horizon=args.counterfactual_horizon,
         cost_ratio=args.counterfactual_cost_ratio,
         cost_hard_limit=args.counterfactual_hard_limit,
+        external_token_reserve_ratio=(
+            args.counterfactual_external_token_reserve_ratio
+        ),
         min_real_steps=args.counterfactual_min_real_steps,
         cpu_core_ratio=args.counterfactual_cpu_core_ratio,
         queue_capacity=args.counterfactual_queue_capacity,
@@ -3124,7 +3140,7 @@ def build_metric_row(
             ),
             'tasks_submitted': getattr(
                 shapley_cumulative,
-                'tasks_reserved',
+                'tasks_submitted',
                 0,
             ),
             'tasks_completed': getattr(
@@ -3135,6 +3151,11 @@ def build_metric_row(
             'tasks_failed': getattr(
                 shapley_cumulative,
                 'results_failed',
+                0,
+            ),
+            'terminal_dropped': getattr(
+                shapley_cumulative,
+                'selected_terminal_dropped',
                 0,
             ),
             'reproduction_passed': getattr(
@@ -3720,6 +3741,36 @@ def build_metric_row(
             sort_keys=True,
             separators=(',', ':'),
         ),
+        'counterfactual_failure_reasons': json.dumps(
+            dict(getattr(
+                cf_cumulative,
+                'failure_reason_counts',
+                (),
+            )),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+        ),
+        'counterfactual_failure_diagnostic_codes': json.dumps(
+            dict(getattr(
+                cf_cumulative,
+                'failure_diagnostic_code_counts',
+                (),
+            )),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+        ),
+        'counterfactual_failure_trigger_reasons': json.dumps(
+            dict(getattr(
+                cf_cumulative,
+                'failure_trigger_reason_counts',
+                (),
+            )),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(',', ':'),
+        ),
         'shapley_enabled': int(bool(shapley_stats.get('enabled', False))),
         'shapley_events_observed': int(shapley_stats.get(
             'events_observed',
@@ -3739,6 +3790,10 @@ def build_metric_row(
         )),
         'shapley_tasks_failed': int(shapley_stats.get(
             'tasks_failed',
+            0,
+        )),
+        'shapley_terminal_dropped': int(shapley_stats.get(
+            'terminal_dropped',
             0,
         )),
         'shapley_reproduction_passed': int(shapley_stats.get(
@@ -4261,7 +4316,9 @@ def train(args):
             f'{counterfactual_coordinator.worker_count} '
             f'shapley_workers={shapley_worker_count} '
             f'budget={args.counterfactual_cost_ratio:.3f}/'
-            f'{args.counterfactual_hard_limit:.3f}',
+            f'{args.counterfactual_hard_limit:.3f} '
+            f'external_reserve='
+            f'{args.counterfactual_external_token_reserve_ratio:.3f}',
             flush=True,
         )
     if isinstance(collector, ParallelRolloutCollector) and args.collect_per_update < args.num_envs:
@@ -4676,6 +4733,12 @@ def train(args):
         if counterfactual_coordinator is not None:
             counterfactual_coordinator.close(wait=True)
 
+        # 最后一批不足一个 segment 的冷经验必须先持久化，再构建最终
+        # checkpoint。这样 next_segment_index/storage 统计与磁盘真实状态一致，
+        # finally 中的第二次 flush 会成为无操作。
+        failure_stage = 'replay_flush'
+        replay_buffer.flush()
+        failure_stage = 'checkpoint'
         final_epsilon = scheduled_epsilon(
             args.total_updates,
             env_steps,
@@ -4706,7 +4769,9 @@ def train(args):
             best_eval_score=best_eval_score,
             best_eval_update=best_eval_update,
         )
+        failure_stage = 'plot'
         maybe_plot_metrics(run_dir, metrics.rows, episode_metrics.rows)
+        failure_stage = 'training'
     except BaseException as exc:
         try:
             write_failure_diagnostic(

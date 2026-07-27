@@ -469,7 +469,22 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
                 1,
             )
         finally:
-            coordinator.close()
+            closed = coordinator.close()
+
+        self.assertEqual(closed.pending_task_ids, ())
+        self.assertEqual(closed.cumulative.results_completed, 0)
+        self.assertEqual(closed.cumulative.results_failed, 0)
+        self.assertEqual(
+            closed.selected_event_count,
+            closed.cumulative.selected_terminal_dropped,
+        )
+        self.assertEqual(
+            dict(closed.cumulative.drop_reason_counts).get(
+                'coordinator_closed_pending',
+                0,
+            ),
+            4,
+        )
 
     def test_failed_result_settles_actual_and_runner_crash_is_conservative(self):
         config = LocalShapleyConfig(event_ratio_max=1.0)
@@ -542,6 +557,15 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
             self.assertEqual(
                 coordinator.stats.cumulative
                 .executor_submit_failures,
+                1,
+            )
+            self.assertEqual(
+                coordinator.stats.cumulative.tasks_submitted,
+                0,
+            )
+            self.assertEqual(
+                coordinator.stats.cumulative
+                .selected_terminal_dropped,
                 1,
             )
         finally:

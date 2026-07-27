@@ -104,6 +104,7 @@ KEY_CONFIG_FIELDS = (
     'counterfactual_horizon',
     'counterfactual_cost_ratio',
     'counterfactual_hard_limit',
+    'counterfactual_external_token_reserve_ratio',
     'counterfactual_min_real_steps',
     'counterfactual_snapshot_ring_size',
     'counterfactual_proposal_sample_rate',
@@ -505,6 +506,7 @@ def collect_final_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
         'shapley_tasks_submitted',
         'shapley_tasks_completed',
         'shapley_tasks_failed',
+        'shapley_terminal_dropped',
         'shapley_reproduction_passed',
         'shapley_reproduction_failed',
         'shapley_samples_inserted',
@@ -530,6 +532,9 @@ def collect_final_metrics(rows: list[dict[str, str]]) -> dict[str, Any]:
             'collect_merge_level_counts',
             'causal_replay_cause_type_counts',
             'counterfactual_drop_reasons',
+            'counterfactual_failure_reasons',
+            'counterfactual_failure_diagnostic_codes',
+            'counterfactual_failure_trigger_reasons',
             'shapley_drop_reasons'):
         result[field] = json_value(final_row.get(field))
 

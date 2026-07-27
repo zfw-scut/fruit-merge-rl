@@ -71,6 +71,9 @@ METRIC_TEXT_FIELDS = frozenset(
         'collect_merge_level_counts',
         'collect_counterfactual_proposal_skip_reasons',
         'counterfactual_drop_reasons',
+        'counterfactual_failure_reasons',
+        'counterfactual_failure_diagnostic_codes',
+        'counterfactual_failure_trigger_reasons',
         'shapley_drop_reasons',
         'causal_replay_cause_type_counts',
         'checkpoint_step_materialization',
@@ -123,11 +126,15 @@ REQUIRED_METRIC_FIELDS = frozenset(
         'counterfactual_projected_token_ratio',
         'counterfactual_hard_budget_respected',
         'counterfactual_drop_reasons',
+        'counterfactual_failure_reasons',
+        'counterfactual_failure_diagnostic_codes',
+        'counterfactual_failure_trigger_reasons',
         'shapley_enabled',
         'shapley_events_observed',
         'shapley_events_selected',
         'shapley_tasks_completed',
         'shapley_tasks_failed',
+        'shapley_terminal_dropped',
         'shapley_reproduction_passed',
         'shapley_reproduction_failed',
         'shapley_samples_inserted',
@@ -471,6 +478,27 @@ def _series(rows, field):
         for row in rows
         if (number := _number(row, field)) is not None
     )
+
+
+def _metric_counter(row, field):
+    """解析一格 JSON 累计计数；任何非法键值都返回 ``None``。"""
+
+    raw = row.get(field)
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    normalized = Counter()
+    for key, value in payload.items():
+        count = _nonnegative_count(value)
+        if not isinstance(key, str) or not key or count is None:
+            return None
+        normalized[key] = count
+    return normalized
 
 
 def _max_number(rows, field, *, default=0.0):
@@ -1817,7 +1845,6 @@ def _counterfactual_shutdown_audit(payload, ratio_limit):
         'candidate_pool_count': payload.get('candidate_pool_count'),
         'scheduler.queued': scheduler.get('queued'),
         'scheduler.inflight': scheduler.get('inflight'),
-        'scheduler.failed': scheduler.get('failed'),
         'scheduler.tokens_reserved': scheduler.get('tokens_reserved'),
         'scheduler.external_active_reservations': scheduler.get(
             'external_active_reservations'
@@ -1857,6 +1884,43 @@ def _counterfactual_shutdown_audit(payload, ratio_limit):
         'errors': errors,
         'active_task_ids': active_ids,
         **zero_fields,
+        'scheduler_failed': scheduler.get('failed'),
+        'failure_record_count': payload.get(
+            'failure_record_count',
+            0,
+        ),
+        'failure_records_created': (
+            payload.get('cumulative', {}).get(
+                'failure_records_created',
+                0,
+            )
+            if isinstance(payload.get('cumulative'), Mapping)
+            else None
+        ),
+        'failure_reason_counts': (
+            payload.get('cumulative', {}).get(
+                'failure_reason_counts',
+                {},
+            )
+            if isinstance(payload.get('cumulative'), Mapping)
+            else {}
+        ),
+        'failure_diagnostic_code_counts': (
+            payload.get('cumulative', {}).get(
+                'failure_diagnostic_code_counts',
+                {},
+            )
+            if isinstance(payload.get('cumulative'), Mapping)
+            else {}
+        ),
+        'failure_trigger_reason_counts': (
+            payload.get('cumulative', {}).get(
+                'failure_trigger_reason_counts',
+                {},
+            )
+            if isinstance(payload.get('cumulative'), Mapping)
+            else {}
+        ),
         'actual_token_ratio': payload.get('actual_token_ratio'),
         'projected_token_ratio': payload.get(
             'projected_token_ratio'
@@ -1909,6 +1973,10 @@ def _shapley_audit(
             'results_failed',
             0,
         ),
+        'terminal_dropped': cumulative.get(
+            'selected_terminal_dropped',
+            0,
+        ),
         'reproduction_passed': cumulative.get(
             'reproduction_passed',
             0,
@@ -1936,6 +2004,7 @@ def _shapley_audit(
         'selected': 'shapley_events_selected',
         'completed': 'shapley_tasks_completed',
         'failed': 'shapley_tasks_failed',
+        'terminal_dropped': 'shapley_terminal_dropped',
         'reproduction_passed': 'shapley_reproduction_passed',
         'reproduction_failed': 'shapley_reproduction_failed',
         'samples': 'shapley_samples_inserted',
@@ -1952,6 +2021,7 @@ def _shapley_audit(
     selected = aggregated_counts['selected']
     completed = aggregated_counts['completed']
     failed = aggregated_counts['failed']
+    terminal_dropped = aggregated_counts['terminal_dropped']
     reproduction_passed = aggregated_counts[
         'reproduction_passed'
     ]
@@ -1959,8 +2029,14 @@ def _shapley_audit(
         'reproduction_failed'
     ]
     samples = aggregated_counts['samples']
+    # “runner 结果闭环”和“所有 selected 终态闭环”必须分开表达。
+    # terminal_dropped 能解释任务去了哪里，但绝不能冒充有效物理结果，
+    # 否则一次全部被预算饿死的运行会被错误放行。
     selected_result_accounting_closed = (
         selected == completed + failed
+    )
+    selected_terminal_accounting_closed = (
+        selected == completed + failed + terminal_dropped
     )
     optimizer_consumed = any(
         _number(row, 'causal_update_applied') == 1.0
@@ -1999,18 +2075,22 @@ def _shapley_audit(
             signal_passed = False
     else:
         interpretation = (
-            'selected Shapley work must complete, reproduce, pass its '
-            'efficiency gate, insert a sample and enter an optimizer batch'
+            'every selected Shapley task must produce a runner result; '
+            'completed work must reproduce, pass its efficiency gate, '
+            'insert a sample and enter an optimizer batch'
         )
         signal_passed = (
             completed > 0
             and selected_result_accounting_closed
+            and terminal_dropped == 0
             and failed == 0
             and reproduction_passed > 0
             and reproduction_failed == 0
             and samples > 0
             and optimizer_consumed
         )
+        if terminal_dropped > 0:
+            warnings.append('shapley_selected_terminal_drops')
     if require_samples:
         signal_passed = signal_passed and samples > 0
 
@@ -2019,7 +2099,7 @@ def _shapley_audit(
         and metrics_enabled
         and cleanup_complete
         and not invalid_counts
-        and selected_result_accounting_closed
+        and selected_terminal_accounting_closed
         and signal_passed
     )
     return {
@@ -2037,6 +2117,7 @@ def _shapley_audit(
         'selected': selected,
         'completed': completed,
         'failed': failed,
+        'terminal_dropped': terminal_dropped,
         'reproduction_passed': reproduction_passed,
         'reproduction_failed': reproduction_failed,
         'samples_inserted': samples,
@@ -2045,6 +2126,12 @@ def _shapley_audit(
         ),
         'selected_result_accounting_delta': (
             selected - completed - failed
+        ),
+        'selected_terminal_accounting_closed': (
+            selected_terminal_accounting_closed
+        ),
+        'selected_terminal_accounting_delta': (
+            selected - completed - failed - terminal_dropped
         ),
         'optimizer_consumed': optimizer_consumed,
         'max_shapley_batch_size': _max_number(
@@ -3254,35 +3341,217 @@ def audit_training_run(
         metrics_rows,
         'counterfactual_results_failed',
     )
+    metric_failure_reason_counts = tuple(
+        _metric_counter(row, 'counterfactual_failure_reasons')
+        for row in metrics_rows
+    )
+    metric_failure_diagnostic_counts = tuple(
+        _metric_counter(
+            row,
+            'counterfactual_failure_diagnostic_codes',
+        )
+        for row in metrics_rows
+    )
+    metric_failure_trigger_counts = tuple(
+        _metric_counter(
+            row,
+            'counterfactual_failure_trigger_reasons',
+        )
+        for row in metrics_rows
+    )
+    metric_drop_reason_counts = tuple(
+        _metric_counter(row, 'counterfactual_drop_reasons')
+        for row in metrics_rows
+    )
+    unclassified_metric_rows = []
+    for index, (
+            row,
+            reason_counts,
+    ) in enumerate(zip(metrics_rows, metric_failure_reason_counts)):
+        failed_count = _number(
+            row,
+            'counterfactual_results_failed',
+        )
+        if (
+                failed_count is None
+                or reason_counts is None
+                or failed_count > sum(reason_counts.values())):
+            unclassified_metric_rows.append(index)
+
+    shutdown_failure_reasons = (
+        cumulative.get('failure_reason_counts')
+        if isinstance(
+            cumulative.get('failure_reason_counts'),
+            Mapping,
+        )
+        else {}
+    )
+    normalized_shutdown_failure_reasons = {}
+    shutdown_failure_reason_counts_valid = True
+    for reason, value in shutdown_failure_reasons.items():
+        count = _nonnegative_count(value)
+        if (
+                not isinstance(reason, str)
+                or not reason
+                or count is None):
+            shutdown_failure_reason_counts_valid = False
+            break
+        normalized_shutdown_failure_reasons[reason] = count
+
+    shutdown_drop_reasons = (
+        cumulative.get('drop_reason_counts')
+        if isinstance(cumulative.get('drop_reason_counts'), Mapping)
+        else {}
+    )
+    normalized_shutdown_drop_reasons = {}
+    shutdown_drop_reason_counts_valid = True
+    for reason, value in shutdown_drop_reasons.items():
+        count = _nonnegative_count(value)
+        if (
+                not isinstance(reason, str)
+                or not reason
+                or count is None):
+            shutdown_drop_reason_counts_valid = False
+            break
+        normalized_shutdown_drop_reasons[reason] = count
+    infrastructure_reason_names = frozenset(
+        {
+            'executor_submit_failure',
+            'runner_failure',
+            'pending_without_result',
+            'close_pending_without_result',
+            'orphan_result',
+            'duplicate_result',
+            'label_conversion_failure',
+            'causal_replay_push_failure',
+        }
+    )
+    infrastructure_failure_counts = {}
+    for reason in sorted(infrastructure_reason_names):
+        observed = []
+        for reason_counts in metric_drop_reason_counts:
+            if reason_counts is not None:
+                observed.append(reason_counts.get(reason, 0))
+        shutdown_count = _nonnegative_count(
+            normalized_shutdown_drop_reasons.get(reason, 0)
+        )
+        if shutdown_count is not None:
+            observed.append(shutdown_count)
+        infrastructure_failure_counts[reason] = max(
+            observed,
+            default=0,
+        )
+
+    shutdown_scheduler_failed = _nonnegative_count(
+        cf_shutdown.get('scheduler', {}).get('failed')
+        if isinstance(cf_shutdown.get('scheduler'), Mapping)
+        else None
+    )
+    shutdown_result_failed = cf_count_values['results_failed']
+    expected_shutdown_scheduler_failed = None
+    if shutdown_result_failed is not None:
+        expected_shutdown_scheduler_failed = (
+            shutdown_result_failed
+            + (
+                _nonnegative_count(
+                    normalized_shutdown_drop_reasons.get(
+                        'executor_submit_failure',
+                        0,
+                    )
+                )
+                or 0
+            )
+            + (
+                _nonnegative_count(
+                    normalized_shutdown_drop_reasons.get(
+                        'runner_failure',
+                        0,
+                    )
+                )
+                or 0
+            )
+        )
+    shutdown_failed_results_classified = (
+        shutdown_result_failed is not None
+        and shutdown_failure_reason_counts_valid
+        and shutdown_result_failed
+        <= sum(normalized_shutdown_failure_reasons.values())
+    )
     _add_check(
         checks,
-        'counterfactual_runner_results_have_no_failures',
+        'counterfactual_failures_classified_and_infrastructure_clean',
         (
             len(metric_cf_failures) == len(metrics_rows)
-            and max(metric_cf_failures, default=0.0) == 0.0
-            and cf_results_failed == 0
+            and all(
+                counts is not None
+                for counts in metric_failure_reason_counts
+            )
+            and all(
+                counts is not None
+                for counts in metric_failure_diagnostic_counts
+            )
+            and all(
+                counts is not None
+                for counts in metric_failure_trigger_counts
+            )
+            and all(
+                counts is not None
+                for counts in metric_drop_reason_counts
+            )
+            and shutdown_drop_reason_counts_valid
+            and not unclassified_metric_rows
+            and shutdown_failed_results_classified
+            and shutdown_scheduler_failed
+            == expected_shutdown_scheduler_failed
+            and not any(infrastructure_failure_counts.values())
         ),
         metrics_max_results_failed=max(
             metric_cf_failures,
             default=0.0,
         ),
         shutdown_results_failed=cf_results_failed,
-        shutdown_scheduler_failed=(
-            cf_shutdown.get('scheduler', {}).get('failed')
-            if isinstance(cf_shutdown.get('scheduler'), Mapping)
-            else None
-        ),
-        drop_reason_counts=(
-            cumulative.get('drop_reason_counts')
-            if isinstance(
-                cumulative.get('drop_reason_counts'),
-                Mapping,
+        unclassified_metric_row_indices=unclassified_metric_rows,
+        invalid_failure_reason_metric_rows=[
+            index
+            for index, counts in enumerate(
+                metric_failure_reason_counts
             )
-            else {}
+            if counts is None
+        ],
+        invalid_failure_diagnostic_metric_rows=[
+            index
+            for index, counts in enumerate(
+                metric_failure_diagnostic_counts
+            )
+            if counts is None
+        ],
+        invalid_failure_trigger_metric_rows=[
+            index
+            for index, counts in enumerate(
+                metric_failure_trigger_counts
+            )
+            if counts is None
+        ],
+        shutdown_failure_reason_counts=(
+            normalized_shutdown_failure_reasons
         ),
+        shutdown_failed_results_classified=(
+            shutdown_failed_results_classified
+        ),
+        shutdown_scheduler_failed=shutdown_scheduler_failed,
+        expected_shutdown_scheduler_failed=(
+            expected_shutdown_scheduler_failed
+        ),
+        infrastructure_failure_counts=(
+            infrastructure_failure_counts
+        ),
+        drop_reason_counts=normalized_shutdown_drop_reasons,
         interpretation=(
-            'budget rejections remain normal drop reasons, but an admitted '
-            'runner/result failure blocks first-run scale-up'
+            'a physics result rejected by the original-action gate is safe '
+            'only when its reason is classified and its aggregate '
+            'reproduction failure rate remains within the separate limit; '
+            'executor, transport, accounting, conversion and replay '
+            'failures always block scale-up'
         ),
     )
 

@@ -700,6 +700,7 @@ def atomic_torch_save(value, path):
             torch.save(value, file)
             file.flush()
             os.fsync(file.fileno())
+            _drop_written_file_cache(file.fileno())
         os.replace(temporary_path, destination)
     except BaseException:
         try:
@@ -708,6 +709,31 @@ def atomic_torch_save(value, path):
             pass
         raise
     return destination
+
+
+def _drop_written_file_cache(file_descriptor):
+    """在 Linux 上提示内核回收已持久化大文件的写缓存。
+
+    云容器把 checkpoint/replay 的文件页缓存计入 cgroup ``memory.current``。
+    数据已经 ``fsync`` 后，这些刚写入的页不必长期挤占训练工作集。该提示只影响
+    缓存保留策略，不删除文件；Windows 或不支持 ``posix_fadvise`` 的平台静默跳过。
+    """
+
+    fadvise = getattr(os, 'posix_fadvise', None)
+    dontneed = getattr(os, 'POSIX_FADV_DONTNEED', None)
+    if not callable(fadvise) or dontneed is None:
+        return False
+    try:
+        fadvise(
+            int(file_descriptor),
+            0,
+            0,
+            dontneed,
+        )
+    except (OSError, ValueError):
+        # cache hint 失败不能让已经成功持久化的 checkpoint 变成训练失败。
+        return False
+    return True
 
 
 def atomic_clone_file(source, destination):
@@ -751,6 +777,10 @@ def atomic_clone_file(source, destination):
                 )
                 destination_file.flush()
                 os.fsync(destination_file.fileno())
+                _drop_written_file_cache(source_file.fileno())
+                _drop_written_file_cache(
+                    destination_file.fileno()
+                )
             method = 'copy'
         os.replace(temporary_path, destination)
     except BaseException:

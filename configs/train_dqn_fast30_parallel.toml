@@ -96,6 +96,9 @@ counterfactual_workers = 2
 counterfactual_horizon = 10
 counterfactual_cost_ratio = 0.06
 counterfactual_hard_limit = 0.10
+# 普通反事实最多借用到 9%；最后 1% 只供已选中的局部 Shapley 使用，
+# 两者合计仍严格不超过 10% 共享硬上限。
+counterfactual_external_token_reserve_ratio = 0.01
 counterfactual_min_real_steps = 256
 counterfactual_cpu_core_ratio = 0.34
 counterfactual_queue_capacity = 256

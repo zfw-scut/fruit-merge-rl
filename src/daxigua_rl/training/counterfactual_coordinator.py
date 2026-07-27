@@ -15,7 +15,7 @@ import math
 import os
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import asdict, dataclass
 from operator import index
 from pathlib import Path
@@ -45,6 +45,7 @@ from daxigua_rl.attribution.counterfactual_runner import (
 
 
 COUNTERFACTUAL_COORDINATOR_CHECKPOINT_VERSION = 1
+DEFAULT_COUNTERFACTUAL_FAILURE_RECORD_CAPACITY = 32
 _TRANSIENT_CANDIDATE_REJECTIONS = {
     'real_step_gate',
     'soft_token_budget',
@@ -273,6 +274,87 @@ class CounterfactualCoordinatorSubmission:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class CounterfactualFailureBranchRecord:
+    """失败结果里单个物理分支的轻量诊断摘要。"""
+
+    action_offset: int
+    status: str
+    simulated_steps: int
+    failure_reason: str | None
+    diagnostic_codes: tuple[str, ...]
+
+    def to_dict(self):
+        return {
+            'action_offset': self.action_offset,
+            'status': self.status,
+            'simulated_steps': self.simulated_steps,
+            'failure_reason': self.failure_reason,
+            'diagnostic_codes': list(self.diagnostic_codes),
+        }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CounterfactualFailureRecord:
+    """runner 正常返回但结果不可用时保留的有界、无载荷诊断记录。"""
+
+    task_id: str
+    proposal_id: str
+    worker_id: int
+    episode_id: int
+    step_index: int
+    created_real_step: int
+    observed_real_step: int
+    result_status: str
+    original_reproduced: bool
+    failure_reason: str
+    diagnostic_codes: tuple[str, ...]
+    trigger_reasons: tuple[str, ...]
+    actual_action_offset: int
+    alternative_action_offsets: tuple[int, ...]
+    simulated_steps: int
+    result_wall_seconds: float
+    engine_state_checksum: str
+    factual_outcome_fingerprint: str
+    target_policy_version: str
+    target_policy_fingerprint: str
+    branches: tuple[CounterfactualFailureBranchRecord, ...]
+
+    def to_dict(self):
+        return {
+            'task_id': self.task_id,
+            'proposal_id': self.proposal_id,
+            'worker_id': self.worker_id,
+            'episode_id': self.episode_id,
+            'step_index': self.step_index,
+            'created_real_step': self.created_real_step,
+            'observed_real_step': self.observed_real_step,
+            'result_status': self.result_status,
+            'original_reproduced': self.original_reproduced,
+            'failure_reason': self.failure_reason,
+            'diagnostic_codes': list(self.diagnostic_codes),
+            'trigger_reasons': list(self.trigger_reasons),
+            'actual_action_offset': self.actual_action_offset,
+            'alternative_action_offsets': list(
+                self.alternative_action_offsets
+            ),
+            'simulated_steps': self.simulated_steps,
+            'result_wall_seconds': self.result_wall_seconds,
+            'engine_state_checksum': self.engine_state_checksum,
+            'factual_outcome_fingerprint': (
+                self.factual_outcome_fingerprint
+            ),
+            'target_policy_version': self.target_policy_version,
+            'target_policy_fingerprint': (
+                self.target_policy_fingerprint
+            ),
+            'branches': [
+                branch.to_dict()
+                for branch in self.branches
+            ],
+        }
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class CounterfactualCoordinatorActivityStats:
     """累计或窗口内的协调器事件计数。"""
 
@@ -299,10 +381,15 @@ class CounterfactualCoordinatorActivityStats:
     pending_cleanups_without_result: int
     orphan_or_duplicate_results: int
     target_refreshes: int
+    failure_records_created: int
+    failure_record_evictions: int
     target_refresh_seconds: float
     result_wall_seconds_total: float
     result_wall_seconds_max: float
     drop_reason_counts: tuple[tuple[str, int], ...]
+    failure_reason_counts: tuple[tuple[str, int], ...]
+    failure_diagnostic_code_counts: tuple[tuple[str, int], ...]
+    failure_trigger_reason_counts: tuple[tuple[str, int], ...]
 
     @property
     def mean_result_wall_seconds(self):
@@ -319,6 +406,15 @@ class CounterfactualCoordinatorActivityStats:
         result = asdict(self)
         result['drop_reason_counts'] = dict(
             self.drop_reason_counts
+        )
+        result['failure_reason_counts'] = dict(
+            self.failure_reason_counts
+        )
+        result['failure_diagnostic_code_counts'] = dict(
+            self.failure_diagnostic_code_counts
+        )
+        result['failure_trigger_reason_counts'] = dict(
+            self.failure_trigger_reason_counts
         )
         result['mean_result_wall_seconds'] = (
             self.mean_result_wall_seconds
@@ -341,6 +437,9 @@ class CounterfactualCoordinatorStats:
     pending_task_count: int
     candidate_pool_capacity: int
     candidate_pool_count: int
+    failure_record_capacity: int
+    failure_record_count: int
+    recent_failure_records: tuple[CounterfactualFailureRecord, ...]
     scheduler: CounterfactualSchedulerStats | None
     cumulative: CounterfactualCoordinatorActivityStats
     window: CounterfactualCoordinatorActivityStats
@@ -382,6 +481,12 @@ class CounterfactualCoordinatorStats:
             'pending_task_count': self.pending_task_count,
             'candidate_pool_capacity': self.candidate_pool_capacity,
             'candidate_pool_count': self.candidate_pool_count,
+            'failure_record_capacity': self.failure_record_capacity,
+            'failure_record_count': self.failure_record_count,
+            'recent_failure_records': [
+                record.to_dict()
+                for record in self.recent_failure_records
+            ],
             'scheduler': (
                 asdict(self.scheduler)
                 if self.scheduler is not None
@@ -469,6 +574,8 @@ class _ActivityAccumulator:
         'pending_cleanups_without_result',
         'orphan_or_duplicate_results',
         'target_refreshes',
+        'failure_records_created',
+        'failure_record_evictions',
     )
 
     def __init__(self):
@@ -478,6 +585,9 @@ class _ActivityAccumulator:
         self.result_wall_seconds_total = 0.0
         self.result_wall_seconds_max = 0.0
         self.drop_reason_counts = Counter()
+        self.failure_reason_counts = Counter()
+        self.failure_diagnostic_code_counts = Counter()
+        self.failure_trigger_reason_counts = Counter()
 
     def increment(self, field_name, amount=1):
         setattr(
@@ -488,6 +598,20 @@ class _ActivityAccumulator:
 
     def add_drop_reason(self, reason, count=1):
         self.drop_reason_counts[str(reason)] += int(count)
+
+    def add_failure_dimensions(
+            self,
+            *,
+            failure_reason,
+            diagnostic_codes,
+            trigger_reasons):
+        self.failure_reason_counts[str(failure_reason)] += 1
+        self.failure_diagnostic_code_counts.update(
+            str(code) for code in diagnostic_codes
+        )
+        self.failure_trigger_reason_counts.update(
+            str(reason) for reason in trigger_reasons
+        )
 
     def add_result_wall_seconds(self, value):
         value = max(0.0, float(value))
@@ -515,6 +639,15 @@ class _ActivityAccumulator:
             drop_reason_counts=tuple(sorted(
                 self.drop_reason_counts.items()
             )),
+            failure_reason_counts=tuple(sorted(
+                self.failure_reason_counts.items()
+            )),
+            failure_diagnostic_code_counts=tuple(sorted(
+                self.failure_diagnostic_code_counts.items()
+            )),
+            failure_trigger_reason_counts=tuple(sorted(
+                self.failure_trigger_reason_counts.items()
+            )),
         )
 
 
@@ -530,7 +663,10 @@ class CounterfactualCoordinator:
             worker_count=None,
             scheduler_config=None,
             executor=None,
-            runner=run_counterfactual_task):
+            runner=run_counterfactual_task,
+            failure_record_capacity=(
+                DEFAULT_COUNTERFACTUAL_FAILURE_RECORD_CAPACITY
+            )):
         if not isinstance(
                 causal_replay_buffer,
                 CausalReplayBuffer):
@@ -583,6 +719,14 @@ class CounterfactualCoordinator:
         self._window = _ActivityAccumulator()
         self._last_scheduler_drop_reasons = Counter()
         self._disabled_real_steps = 0
+        self.failure_record_capacity = _strict_int(
+            'failure_record_capacity',
+            failure_record_capacity,
+            minimum=1,
+        )
+        self._recent_failure_records = deque(
+            maxlen=self.failure_record_capacity
+        )
 
         self._scheduler = None
         if self.worker_count > 0:
@@ -627,6 +771,101 @@ class CounterfactualCoordinator:
     def _add_result_wall_seconds(self, value):
         self._cumulative.add_result_wall_seconds(value)
         self._window.add_result_wall_seconds(value)
+
+    def _add_failure_dimensions(
+            self,
+            *,
+            failure_reason,
+            diagnostic_codes,
+            trigger_reasons):
+        for activity in (self._cumulative, self._window):
+            activity.add_failure_dimensions(
+                failure_reason=failure_reason,
+                diagnostic_codes=diagnostic_codes,
+                trigger_reasons=trigger_reasons,
+            )
+
+    def _record_failure_result_locked(
+            self,
+            *,
+            pending,
+            result,
+            result_wall_seconds):
+        """记录 runner 返回的不可用结果，不保留 task/context 中的大对象。"""
+
+        task = pending.task
+        failure_reason = result.failure_reason
+        if failure_reason is None:
+            failure_reason = (
+                'original_not_reproduced_without_failure_reason'
+                if not result.original_reproduced
+                else 'failed_without_failure_reason'
+            )
+        diagnostic_codes = tuple(dict.fromkeys((
+            *result.diagnostic_codes,
+            *(
+                code
+                for branch in result.branches
+                for code in branch.diagnostic_codes
+            ),
+        )))
+        branches = tuple(
+            CounterfactualFailureBranchRecord(
+                action_offset=branch.action_offset,
+                status=branch.status,
+                simulated_steps=branch.simulated_steps,
+                failure_reason=branch.failure_reason,
+                diagnostic_codes=branch.diagnostic_codes,
+            )
+            for branch in result.branches
+        )
+        observed_real_step = (
+            self._scheduler.stats.real_steps
+            if self.enabled
+            else self._disabled_real_steps
+        )
+        record = CounterfactualFailureRecord(
+            task_id=result.task_id,
+            proposal_id=pending.proposal_id,
+            worker_id=task.transition_key.worker_id,
+            episode_id=task.transition_key.episode_id,
+            step_index=task.transition_key.step_index,
+            created_real_step=task.created_real_step,
+            observed_real_step=observed_real_step,
+            result_status=result.status,
+            original_reproduced=result.original_reproduced,
+            failure_reason=failure_reason,
+            diagnostic_codes=diagnostic_codes,
+            trigger_reasons=task.trigger_reasons,
+            actual_action_offset=task.actual_action_offset,
+            alternative_action_offsets=(
+                task.alternative_action_offsets
+            ),
+            simulated_steps=result.simulated_steps,
+            result_wall_seconds=result_wall_seconds,
+            engine_state_checksum=task.snapshot.checksum,
+            factual_outcome_fingerprint=(
+                task.factual_outcome_fingerprint
+            ),
+            target_policy_version=(
+                task.target_policy.policy_version
+            ),
+            target_policy_fingerprint=(
+                task.target_policy.fingerprint
+            ),
+            branches=branches,
+        )
+        if (
+                len(self._recent_failure_records)
+                == self.failure_record_capacity):
+            self._increment('failure_record_evictions')
+        self._recent_failure_records.append(record)
+        self._increment('failure_records_created')
+        self._add_failure_dimensions(
+            failure_reason=failure_reason,
+            diagnostic_codes=diagnostic_codes,
+            trigger_reasons=task.trigger_reasons,
+        )
 
     def refresh_target_policy(
             self,
@@ -1165,9 +1404,11 @@ class CounterfactualCoordinator:
             self._add_drop_reason('orphan_result')
             return ()
         self._processed_task_ids.add(result.task_id)
-        self._add_result_wall_seconds(
-            time.perf_counter() - pending.submitted_at
+        result_wall_seconds = max(
+            0.0,
+            time.perf_counter() - pending.submitted_at,
         )
+        self._add_result_wall_seconds(result_wall_seconds)
 
         self._increment(f'results_{result.status}')
         if result.original_reproduced:
@@ -1176,6 +1417,12 @@ class CounterfactualCoordinator:
             self._increment('reproduction_failed')
         for branch in result.branches:
             self._increment(f'branches_{branch.status}')
+        if result.status == 'failed' or not result.original_reproduced:
+            self._record_failure_result_locked(
+                pending=pending,
+                result=result,
+                result_wall_seconds=result_wall_seconds,
+            )
 
         if not result.label_ready:
             return ()
@@ -1367,6 +1614,15 @@ class CounterfactualCoordinator:
                 candidate_pool_count=len(
                     self._candidate_pool
                 ),
+                failure_record_capacity=(
+                    self.failure_record_capacity
+                ),
+                failure_record_count=len(
+                    self._recent_failure_records
+                ),
+                recent_failure_records=tuple(
+                    self._recent_failure_records
+                ),
                 scheduler=scheduler_stats,
                 cumulative=cumulative,
                 window=window,
@@ -1425,6 +1681,16 @@ class CounterfactualCoordinator:
                 stats.candidate_pool_capacity
             ),
             'candidate_pool_count': stats.candidate_pool_count,
+            'failure_record_capacity': (
+                stats.failure_record_capacity
+            ),
+            'failure_record_count': stats.failure_record_count,
+            'failure_records_created': (
+                stats.cumulative.failure_records_created
+            ),
+            'failure_record_evictions': (
+                stats.cumulative.failure_record_evictions
+            ),
             'candidate_offers': (
                 stats.cumulative.candidate_offers
             ),
@@ -1463,6 +1729,15 @@ class CounterfactualCoordinator:
                 stats.hard_budget_respected
             ),
             'circuit_open': stats.circuit_open,
+            'failure_reason_counts': dict(
+                stats.cumulative.failure_reason_counts
+            ),
+            'failure_diagnostic_code_counts': dict(
+                stats.cumulative.failure_diagnostic_code_counts
+            ),
+            'failure_trigger_reason_counts': dict(
+                stats.cumulative.failure_trigger_reason_counts
+            ),
             'drop_reason_counts': dict(
                 stats.cumulative.drop_reason_counts
             ),
@@ -1471,8 +1746,11 @@ class CounterfactualCoordinator:
 
 __all__ = [
     'COUNTERFACTUAL_COORDINATOR_CHECKPOINT_VERSION',
+    'DEFAULT_COUNTERFACTUAL_FAILURE_RECORD_CAPACITY',
     'CounterfactualCoordinator',
     'CounterfactualCoordinatorActivityStats',
+    'CounterfactualFailureBranchRecord',
+    'CounterfactualFailureRecord',
     'CounterfactualCoordinatorPoll',
     'CounterfactualCoordinatorStats',
     'CounterfactualCoordinatorSubmission',

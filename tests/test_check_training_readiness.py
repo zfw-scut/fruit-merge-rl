@@ -73,11 +73,15 @@ METRIC_FIELDS = (
     'counterfactual_projected_token_ratio',
     'counterfactual_hard_budget_respected',
     'counterfactual_drop_reasons',
+    'counterfactual_failure_reasons',
+    'counterfactual_failure_diagnostic_codes',
+    'counterfactual_failure_trigger_reasons',
     'shapley_enabled',
     'shapley_events_observed',
     'shapley_events_selected',
     'shapley_tasks_completed',
     'shapley_tasks_failed',
+    'shapley_terminal_dropped',
     'shapley_reproduction_passed',
     'shapley_reproduction_failed',
     'shapley_samples_inserted',
@@ -329,11 +333,15 @@ class SyntheticTrainingRun:
                     'counterfactual_projected_token_ratio': 0.06,
                     'counterfactual_hard_budget_respected': 1,
                     'counterfactual_drop_reasons': '{}',
+                    'counterfactual_failure_reasons': '{}',
+                    'counterfactual_failure_diagnostic_codes': '{}',
+                    'counterfactual_failure_trigger_reasons': '{}',
                     'shapley_enabled': 1,
                     'shapley_events_observed': 100 * (index + 1),
                     'shapley_events_selected': 0,
                     'shapley_tasks_completed': 0,
                     'shapley_tasks_failed': 0,
+                    'shapley_terminal_dropped': 0,
                     'shapley_reproduction_passed': 0,
                     'shapley_reproduction_failed': 0,
                     'shapley_samples_inserted': 0,
@@ -486,6 +494,7 @@ class SyntheticTrainingRun:
             'cumulative': {
                 'results_completed': 0,
                 'results_failed': 0,
+                'selected_terminal_dropped': 0,
                 'reproduction_passed': 0,
                 'reproduction_failed': 0,
                 'samples_inserted': 0,
@@ -752,6 +761,100 @@ class CheckTrainingReadinessTest(unittest.TestCase):
             for error in check['details']['errors']
         ))
 
+    def test_classified_physics_failure_uses_rate_gate_not_infra_gate(self):
+        rows = self.fixture.read_metrics()
+        rows[-1]['counterfactual_results_failed'] = '1'
+        rows[-1]['counterfactual_reproduction_failed'] = '1'
+        rows[-1]['counterfactual_failure_reasons'] = json.dumps(
+            {'original_reproduction_mismatch': 1}
+        )
+        rows[-1][
+            'counterfactual_failure_diagnostic_codes'
+        ] = json.dumps({'original_mismatch_state_checksum': 1})
+        rows[-1][
+            'counterfactual_failure_trigger_reasons'
+        ] = json.dumps({'random_rule_audit': 1})
+        self.fixture.write_metrics(rows)
+
+        shutdown = self.fixture.read_counterfactual_shutdown()
+        shutdown['scheduler']['failed'] = 1
+        shutdown['cumulative'].update(
+            {
+                'results_failed': 1,
+                'reproduction_failed': 1,
+                'failure_records_created': 1,
+                'failure_reason_counts': {
+                    'original_reproduction_mismatch': 1,
+                },
+                'failure_diagnostic_code_counts': {
+                    'original_mismatch_state_checksum': 1,
+                },
+                'failure_trigger_reason_counts': {
+                    'random_rule_audit': 1,
+                },
+            }
+        )
+        self.fixture.write_counterfactual_shutdown(shutdown)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertTrue(payload['ready'])
+        gate = self._check(
+            payload,
+            'counterfactual_failures_classified_and_infrastructure_clean',
+        )
+        self.assertTrue(gate['passed'])
+        self.assertIn(
+            'counterfactual_reproduction_failure_rate_sample_size',
+            payload['warnings'],
+        )
+
+        rows[-1]['counterfactual_failure_reasons'] = '{}'
+        self.fixture.write_metrics(rows)
+        unclassified = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+        self.assertFalse(unclassified['ready'])
+        self.assertIn(
+            'counterfactual_failures_classified_and_infrastructure_clean',
+            unclassified['required_failures'],
+        )
+
+    def test_counterfactual_runner_exception_is_infrastructure_failure(self):
+        rows = self.fixture.read_metrics()
+        rows[-1]['counterfactual_drop_reasons'] = json.dumps(
+            {'runner_failure': 1}
+        )
+        self.fixture.write_metrics(rows)
+        shutdown = self.fixture.read_counterfactual_shutdown()
+        shutdown['scheduler']['failed'] = 1
+        shutdown['cumulative']['drop_reason_counts'] = {
+            'runner_failure': 1,
+        }
+        self.fixture.write_counterfactual_shutdown(shutdown)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        gate = self._check(
+            payload,
+            'counterfactual_failures_classified_and_infrastructure_clean',
+        )
+        self.assertFalse(gate['passed'])
+        self.assertEqual(
+            gate['details']['infrastructure_failure_counts'][
+                'runner_failure'
+            ],
+            1,
+        )
+
     def test_rule_sign_gate_uses_exact_checkpoint_cross_tab(self):
         self.fixture.write_causal_checkpoint(
             (
@@ -1006,6 +1109,48 @@ class CheckTrainingReadinessTest(unittest.TestCase):
             failed['shapley'][
                 'selected_result_accounting_closed'
             ]
+        )
+
+    def test_shapley_terminal_drop_closes_audit_but_blocks_stage(self):
+        rows = self.fixture.read_metrics()
+        rows[-1]['shapley_events_selected'] = '1'
+        rows[-1]['shapley_terminal_dropped'] = '1'
+        self.fixture.write_metrics(rows)
+        state = self.fixture._default_shapley_state()
+        state.update(
+            {
+                'selected_event_count': 1,
+                'selected_ratio': 1 / 300,
+            }
+        )
+        state['cumulative']['selected_terminal_dropped'] = 1
+        self.fixture.write_shapley_checkpoint(state)
+
+        payload = audit_training_run(
+            self.fixture.run_dir,
+            stage='5k',
+        )
+
+        self.assertFalse(payload['ready'])
+        self.assertFalse(
+            payload['shapley'][
+                'selected_result_accounting_closed'
+            ]
+        )
+        self.assertTrue(
+            payload['shapley'][
+                'selected_terminal_accounting_closed'
+            ]
+        )
+        self.assertEqual(
+            payload['shapley'][
+                'selected_result_accounting_delta'
+            ],
+            1,
+        )
+        self.assertIn(
+            'shapley_stage_evidence_and_shutdown',
+            payload['required_failures'],
         )
 
     def test_checkpoint_replay_manifests_must_match_config(self):

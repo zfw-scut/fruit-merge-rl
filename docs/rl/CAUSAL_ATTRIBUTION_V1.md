@@ -1023,6 +1023,7 @@ counterfactual_horizon_max = 12
 ```text
 counterfactual_cost_ratio = 0.06
 counterfactual_cost_hard_limit = 0.10
+counterfactual_external_token_reserve_ratio = 0.01
 counterfactual_min_real_steps = 256
 counterfactual_cpu_core_ratio = 0.34
 counterfactual_queue_capacity = 256
@@ -1034,7 +1035,10 @@ counterfactual_workers = 2
 
 解释：
 
-- 普通反事实等价物理步以 6% 为软预算，普通反事实与局部 Shapley 合计不得超过 10%；
+- 普通反事实等价物理步以 6% 为软预算，高优先级普通任务最多借用到 9%；
+- 最后 1% 专供已经被 selector 选中的局部 Shapley。外部任务仍需等真实步数累积出
+  足够额度，普通任务不能提前耗尽该份额；
+- 普通反事实与局部 Shapley 合计不得超过 10%；
 - 任何情况下不得超过 10%；
 - 每 256 个真实投放最多创建一个任务；
 - 首轮云容器的 6 个 cgroup 有效核配置使用 3 个 rollout 与 2 个物理归因进程，
@@ -1060,6 +1064,10 @@ shapley_paired_permutations = 4
 即最多选择约 0.05% 的事件，候选历史动作不超过 3 个，使用少量正反排列估计共享贡献。
 未选中的普通观察身份保存在有界 LRU；真正被 selector 选中的身份永久去重，避免长训中
 无界保存所有 proposal，又不会让已消耗 Shapley 配额的事件在 LRU 淘汰后重复进入。
+关闭时还必须满足 `selected = completed + failed + terminal_dropped`。其中
+`terminal_dropped` 只解释未执行任务的最终去向，不能冒充物理结果；只要 selected
+大于零，阶段门禁仍要求没有 terminal drop，并至少有一个通过复现、样本写入和 optimizer
+消费的完成结果。
 
 ## 14. 完整物理快照
 

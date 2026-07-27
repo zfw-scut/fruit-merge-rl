@@ -6,6 +6,7 @@ import random
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import torch
 
@@ -265,6 +266,96 @@ class GraphBatchTrainingTest(unittest.TestCase):
             )
             stats = trainer.train_step()
             self.assertTrue(torch.isfinite(torch.tensor(stats.loss)))
+
+    def test_failed_cold_segment_write_preserves_pending_and_index(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            replay_buffer = ReplayBuffer(
+                capacity=8,
+                seed=7,
+                hot_capacity=2,
+                cold_dir=Path(tmp_dir) / 'cold',
+                segment_size=8,
+                cold_cache_size=0,
+            )
+            graph = self._make_graph_tensors(1)[0]
+            for index in range(3):
+                replay_buffer.push(TensorTransition(
+                    graph=graph,
+                    action_offset=index % 2,
+                    reward=float(index),
+                    next_graph=graph,
+                    terminated=False,
+                    truncated=False,
+                ))
+
+            with mock.patch(
+                    'daxigua_rl.training.replay_buffer.atomic_torch_save',
+                    side_effect=OSError('disk full')):
+                with self.assertRaisesRegex(OSError, 'disk full'):
+                    replay_buffer.flush()
+
+            state = replay_buffer.checkpoint_state_dict()
+            self.assertEqual(state['next_segment_index'], 0)
+            self.assertEqual(
+                replay_buffer.storage_stats['pending_cold_count'],
+                1,
+            )
+            self.assertEqual(
+                list((Path(tmp_dir) / 'cold').iterdir()),
+                [],
+            )
+
+    def test_final_flush_precedes_checkpoint_replay_state(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cold_dir = Path(tmp_dir) / 'cold'
+            replay_buffer = ReplayBuffer(
+                capacity=8,
+                seed=7,
+                hot_capacity=2,
+                cold_dir=cold_dir,
+                segment_size=8,
+                cold_cache_size=0,
+            )
+            graph = self._make_graph_tensors(1)[0]
+            for index in range(3):
+                replay_buffer.push(TensorTransition(
+                    graph=graph,
+                    action_offset=index % 2,
+                    reward=float(index),
+                    next_graph=graph,
+                    terminated=False,
+                    truncated=False,
+                ))
+
+            self.assertEqual(
+                replay_buffer.storage_stats['pending_cold_count'],
+                1,
+            )
+            replay_buffer.flush()
+            checkpoint_state = replay_buffer.checkpoint_state_dict()
+            segments_before = tuple(
+                sorted(cold_dir.glob('segment_*.pt'))
+            )
+
+            self.assertEqual(
+                replay_buffer.storage_stats['pending_cold_count'],
+                0,
+            )
+            self.assertEqual(len(segments_before), 1)
+            maximum_index = max(
+                int(path.stem.rsplit('_', 1)[1])
+                for path in segments_before
+            )
+            self.assertLess(
+                maximum_index,
+                checkpoint_state['next_segment_index'],
+            )
+
+            replay_buffer.flush()
+            self.assertEqual(
+                tuple(sorted(cold_dir.glob('segment_*.pt'))),
+                segments_before,
+            )
 
     def test_parallel_collector_async_handle_collects_transitions(self):
         """ParallelRolloutCollector 应能通过异步 handle 从多个 worker 回收经验。"""

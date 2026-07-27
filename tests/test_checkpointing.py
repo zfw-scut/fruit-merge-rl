@@ -291,6 +291,30 @@ class CheckpointingTest(unittest.TestCase):
                 [],
             )
 
+    def test_atomic_save_file_cache_hint_is_best_effort(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / 'checkpoint.pt'
+            with (
+                    mock.patch.object(
+                        checkpointing.os,
+                        'POSIX_FADV_DONTNEED',
+                        4,
+                        create=True,
+                    ),
+                    mock.patch.object(
+                        checkpointing.os,
+                        'posix_fadvise',
+                        side_effect=OSError('unsupported'),
+                        create=True,
+                    ) as fadvise):
+                checkpointing.atomic_torch_save(
+                    {'value': torch.tensor([1])},
+                    destination,
+                )
+
+            self.assertTrue(destination.is_file())
+            fadvise.assert_called_once()
+
     def test_atomic_save_cleans_temporary_file_when_serialization_fails(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
