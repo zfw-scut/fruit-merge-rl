@@ -102,15 +102,16 @@ Run the preflight gate from the project root before a long run:
 
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
-  tools/preflight_training.py --config configs/train_dqn_causal_500k.toml
+  tools/preflight_training.py --config configs/train_dqn_causal_250k.toml
 ```
 
-The three launch configurations inherit one frozen algorithm/environment
-structure-aware V2 baseline:
+The three formal-stage launch configurations and one optional extension inherit
+one frozen algorithm/environment structure-aware V2 baseline:
 
 - `train_dqn_causal_smoke_5k.toml`: integration smoke run;
 - `train_dqn_causal_calibration_10k.toml`: scale calibration run;
-- `train_dqn_causal_500k.toml`: first formal large run.
+- `train_dqn_causal_250k.toml`: first formal 250000-update large run;
+- `train_dqn_causal_500k.toml`: optional future extension, not the current formal target.
 
 Run training from the project root, for example:
 
@@ -133,7 +134,7 @@ Resume an interrupted run from a trusted checkpoint of that same V2 run:
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
   -m daxigua_rl.scripts.train_dqn \
-  --config configs/train_dqn_causal_500k.toml \
+  --config configs/train_dqn_causal_250k.toml \
   --resume runs/<run>/checkpoints/latest.pt
 ```
 

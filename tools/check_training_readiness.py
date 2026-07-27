@@ -39,7 +39,7 @@ if str(SRC_DIR) not in sys.path:
 READINESS_SCHEMA_VERSION = 3
 DEFAULT_SHAPING_P95_LIMIT = (2.0 ** 1.5) * 0.25
 DEFAULT_BASELINE_CONFIG = (
-    PROJECT_ROOT / 'configs' / 'train_dqn_causal_500k.toml'
+    PROJECT_ROOT / 'configs' / 'train_dqn_causal_250k.toml'
 )
 BASELINE_STAGE_FIELDS = frozenset(
     {

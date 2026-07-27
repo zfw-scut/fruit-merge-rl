@@ -6,7 +6,7 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}"
 
 if [[ "${1:-}" == --* || "$#" -eq 0 ]]; then
-  CONFIG_PATH="configs/train_dqn_fast30_parallel.toml"
+  CONFIG_PATH="configs/train_dqn_causal_250k.toml"
 else
   CONFIG_PATH="$1"
   shift

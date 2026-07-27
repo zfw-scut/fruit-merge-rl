@@ -5,14 +5,14 @@
 
 [runtime]
 # 输出目录：保存 metrics、episode_metrics、checkpoint、plots 等训练产物。
-run_dir = "runs/dqn_causal_structure_h256_l4_n3_500k"
+run_dir = "runs/dqn_causal_structure_h256_l4_n3_250k"
 
 # 训练设备：模型参数更新使用的 PyTorch 设备，可选 "cuda"、"cuda:0" 或 "cpu"。
 device = "cuda"
 
 [training]
 # 更新次数：DQN 参数更新总次数；一次 update 是一次 batch 训练，不是一局游戏。
-total_updates = 500000
+total_updates = 250000
 
 # 预热经验：正式训练前随机采集多少条经验，用于填充 ReplayBuffer。
 warmup_steps = 5000

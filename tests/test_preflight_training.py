@@ -11,11 +11,12 @@ from tools.preflight_training import (
     PROJECT_ROOT,
     _centralized_actor_rollout_audit,
     _cgroup_memory_status,
-    _formal_500k_config_audit,
+    _formal_config_audit,
     _require_full_structural_optimizer_stats,
     _require_full_structural_target,
     parse_training_args,
 )
+from daxigua_rl.scripts.train_dqn import scheduled_epsilon
 from daxigua_rl.training.structural_targets import (
     STRUCTURAL_TARGET_FULL_VALID_MASK,
     StructuralTarget,
@@ -29,16 +30,20 @@ class PreflightTrainingTest(unittest.TestCase):
             str(PROJECT_ROOT / 'configs' / name),
         ))
 
-    def test_formal_500k_config_satisfies_frozen_contract(self):
-        audit = _formal_500k_config_audit(
-            self._config_args('train_dqn_causal_500k.toml')
+    def test_formal_250k_config_satisfies_frozen_contract(self):
+        audit = _formal_config_audit(
+            self._config_args('train_dqn_causal_250k.toml')
         )
 
         self.assertTrue(audit['passed'], audit['mismatches'])
         self.assertEqual(audit['mismatches'], {})
+        self.assertEqual(
+            audit['value_contract']['run_dir'],
+            'runs/dqn_causal_structure_h256_l4_n3_250k',
+        )
 
     def test_smoke_config_cannot_replace_formal_preflight_target(self):
-        audit = _formal_500k_config_audit(
+        audit = _formal_config_audit(
             self._config_args(
                 'train_dqn_causal_smoke_5k.toml'
             )
@@ -49,13 +54,13 @@ class PreflightTrainingTest(unittest.TestCase):
 
     def test_disabled_attribution_fails_formal_contract(self):
         args = self._config_args(
-            'train_dqn_causal_500k.toml'
+            'train_dqn_causal_250k.toml'
         )
         args.counterfactual_enabled = False
         args.shapley_enabled = False
         args.lambda_cf = 0.0
 
-        audit = _formal_500k_config_audit(args)
+        audit = _formal_config_audit(args)
 
         self.assertFalse(audit['passed'])
         self.assertIn(
@@ -64,6 +69,39 @@ class PreflightTrainingTest(unittest.TestCase):
         )
         self.assertIn('shapley_enabled', audit['mismatches'])
         self.assertIn('lambda_cf', audit['mismatches'])
+
+    def test_optional_500k_config_cannot_replace_formal_preflight_target(self):
+        audit = _formal_config_audit(
+            self._config_args('train_dqn_causal_500k.toml')
+        )
+
+        self.assertFalse(audit['passed'])
+        self.assertEqual(
+            audit['mismatches']['total_updates'],
+            {'actual': 500_000, 'expected': 250_000},
+        )
+
+    def test_formal_250k_config_uses_the_frozen_smooth_epsilon_horizon(self):
+        args = self._config_args('train_dqn_causal_250k.toml')
+        anchors = {
+            75_000: 0.50,
+            125_000: 0.20,
+            175_000: 0.07,
+            200_000: 0.05,
+            250_000: 0.05,
+        }
+
+        for update_step, expected in anchors.items():
+            with self.subTest(update_step=update_step):
+                self.assertAlmostEqual(
+                    scheduled_epsilon(
+                        update_step,
+                        env_steps=0,
+                        args=args,
+                        schedule_total_updates=args.total_updates,
+                    ),
+                    expected,
+                )
 
     def test_cgroup_memory_uses_reclaimable_working_set_headroom(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -120,7 +158,7 @@ class PreflightTrainingTest(unittest.TestCase):
 
     def test_actor_preflight_exercises_small_real_async_chain(self):
         args = self._config_args(
-            'train_dqn_causal_500k.toml'
+            'train_dqn_causal_250k.toml'
         )
         # 保留正式配置的 16-worker 目标，只把这个集成单测实际启动的 worker 数量
         # 和模型缩小；生产 preflight 不会传 override。

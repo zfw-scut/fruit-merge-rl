@@ -60,13 +60,14 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。用于测试降低 fps、最大物理帧、稳定帧和 Pymunk 迭代次数后的速度收益与游戏分布偏移。 | `python -m daxigua_rl.scripts.compare_physics_modes --checkpoint ...`；输出 `summary.csv`、`episode_metrics.csv` 和 `plots/physics_mode_comparison.png`。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
-| `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线。 | `train_dqn_causal_smoke_5k.toml`、`train_dqn_causal_calibration_10k.toml`、`train_dqn_causal_500k.toml` |
-| `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：500k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套阶段配置继承它。 | `train_dqn.py --config ...` |
+| `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口。 | `train_dqn_causal_smoke_5k.toml`、`train_dqn_causal_calibration_10k.toml`、`train_dqn_causal_250k.toml`、`train_dqn_causal_500k.toml` |
+| `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：250k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套正式阶段配置继承它。 | `train_dqn.py --config ...` |
 | `configs/train_dqn_causal_smoke_5k.toml` | 第一次完整因果训练的 5000-update 集成烟测配置；算法与物理语义不降级，只覆盖规模和日志频率。 | 运行后才可记录烟测结论。 |
 | `configs/train_dqn_causal_calibration_10k.toml` | 10000-update 规模标定配置；若稀疏事件样本不足，可通过 CLI 覆盖从 update 0 另起独立 25000 校准。 | 不直接改变总步数恢复；用于校准量级，不预先代表已通过。 |
-| `configs/train_dqn_causal_500k.toml` | 第一次 500000-update 大规模训练的稳定启动名，继承完整冻结基线。 | 只在 preflight、烟测和标定门禁完成后启动。 |
+| `configs/train_dqn_causal_250k.toml` | 第一次 250000-update 大规模训练的正式稳定启动名，继承完整冻结基线。 | 最终 preflight 通过后从 update 0 启动。 |
+| `configs/train_dqn_causal_500k.toml` | 可选 500000-update 延长实验；显式覆盖长度与目录，不能通过当前正式契约。 | 不用于第一次 250k 正式训练。 |
 | `scripts/` | 项目级启动脚本目录。放训练和只读观察服务的薄启动器，具体训练参数仍放在 `configs/`。 | `train_dqn.sh`、`training_dashboard.sh` |
-| `scripts/train_dqn.sh` | DQN 训练启动器。默认读取 `configs/train_dqn_fast30_parallel.toml`，设置 `PYTHONPATH`，通过 `python-torch` conda 环境启动训练并 tee 日志。 | `./scripts/train_dqn.sh` |
+| `scripts/train_dqn.sh` | DQN 训练启动器。默认读取 `configs/train_dqn_causal_250k.toml`，设置 `PYTHONPATH`，通过 `python-torch` conda 环境启动训练并 tee 日志。 | `./scripts/train_dqn.sh` |
 | `scripts/training_dashboard.sh` | 云端训练面板生命周期入口。通过 `setsid` 后台运行服务，并以 PID、Linux 启动时刻、命令行和工作目录共同校验进程身份，避免 stop/restart 误伤训练。 | `start`、`stop`、`status`、`restart`；默认 `127.0.0.1:8765`。 |
 | `scripts/windows/install_training_dashboard_shortcut.ps1` | Windows 桌面入口安装器。编译原生 ASKPASS 辅助程序、以当前用户 DPAPI 加密凭据、收紧凭据 ACL，并创建带自定义图标的桌面快捷方式。 | 默认安装到 `%LOCALAPPDATA%\FruitMergeRL\TrainingDashboard`；支持 `-UpdateCredential` 和 `-Uninstall`，不接受明文密码参数。 |
 | `scripts/windows/open_training_dashboard.ps1` | Windows 面板启动器。核对本项目 health API 和状态中绑定的 SSH 目标、复用自有隧道、保护端口占用、隐藏启动 OpenSSH 并在成功后打开浏览器。 | named mutex 防重复双击；候选本地端口为 8765/18765/28765；不复用未知面板，失败只清理本次创建的 SSH 进程。 |
@@ -145,11 +146,11 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
 | `docs/rl/STRUCTURE_AWARE_GNN_V2.md` | 当前结构感知 GNN 与首次新架构长训的主规格。 | 记录关系图、连锁 motif、关系 GNN、六维辅助监督、集中式 actor、无泄漏/非奖励边界、启用参数、指标以及旧 checkpoint/replay 不兼容范围。 |
 | `docs/rl/CAUSAL_ATTRIBUTION_V1.md` | 第一次大规模训练的完整状态归因 V1 规格。 | 固定 Reward V2、状态分析、归因事件、因果 Q 排序、反事实预算、局部 Shapley、测试和长训流程；实现步骤 1～11 已落地，烟测/标定/正式长训结果仍须按实际运行记录。 |
-| `docs/rl/FIRST_500K_RUNBOOK.md` | 第一次 500k 完整因果训练的执行手册。 | 固定 Ubuntu/CUDA 安装、全量测试、preflight、三阶段命令、监控/停止阈值、恢复语义和归档顺序。 |
+| `docs/rl/FIRST_250K_RUNBOOK.md` | 第一次 250k 完整因果训练的执行手册。 | 固定 Ubuntu/CUDA 安装、全量测试、preflight、三阶段命令、监控/停止阈值、恢复语义和归档顺序。 |
 | `docs/rl/gnn_daxigua_design_reference.md` | 最初 GNN 几何状态图的背景参考。 | 当前可执行结构图与训练契约已由 `STRUCTURE_AWARE_GNN_V2.md` 接续；`radius` 仍表示真实碰撞半径。 |
 | `docs/rl/INTERFACE_V0.md` | RL v0 接口说明。 | 记录 `HeadlessGame`、`DaxiguaEnv`、状态数据和边界规则。 |
 | `docs/rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md` | 训练速度优化计划。 | 记录 profiling、next_graph 缓存、并行采样、fast physics、图构建优化和日志频率等优化顺序。 |
-| `docs/training_runs/FIRST_500K_READINESS.md` | 第一次 500k 的阶段证据与批准清单。 | 只填写实际测试/preflight/run 产物；明确区分已通过、运行中、待运行和未获准。 |
+| `docs/training_runs/FIRST_250K_READINESS.md` | 第一次 250k 的阶段证据、批准例外与启动清单。 | 只填写实际测试/preflight/run 产物；明确区分已通过、待运行和实际启动证据。 |
 
 ## 学习练习目录
 
@@ -236,7 +237,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `configs/train_dqn_fast30_parallel.toml`：Reward V2、Double DQN 3-step、
   CausalReplay、预算反事实、局部 Shapley 和运行资源的完整冻结基线。
 - `configs/train_dqn_causal_smoke_5k.toml` /
-  `train_dqn_causal_calibration_10k.toml` / `train_dqn_causal_500k.toml`：
+  `train_dqn_causal_calibration_10k.toml` / `train_dqn_causal_250k.toml`：
   依次承载烟测、标定和第一次正式大规模训练，不在阶段之间静默改变算法语义。
 - `tools/preflight_training.py`：正式启动前重复运行的短门禁；其 JSON 结果是运行证据，
   配置文件存在本身不代表门禁、烟测或标定已通过。
@@ -262,7 +263,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
   hybrid TD replay 是明确的 hot-resume，冷段不被悄悄声明为已经精确恢复。
 - 普通反事实与局部 Shapley 共用 token 硬账本。队列满、预算不足、factual 重演失败或
   Shapley 效率检查失败时，正确行为是丢弃任务并记指标，不能伪造标签或阻塞 rollout。
-- 三套因果训练 TOML 已经就位，但其存在不代表 5k 烟测、10k/25k 标定或 500k 正式
+- 三套因果训练 TOML 已经就位，但其存在不代表 5k 烟测、10k/25k 标定或 250k 正式
   训练已经完成；训练结论只以实际 run 产物和 `docs/training_runs/` 归档为准。
 - `tools/temporary_rollout_smoke_test.py` 依赖 PyTorch，建议在 `python-torch` conda 环境中运行；它只做临时链路验证，不训练模型。
 - 当前 `src/daxigua/core/board.py` 已为 `pymunk 7.3.0` 做兼容处理。

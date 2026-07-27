@@ -1,3 +1,9 @@
-# 正式第一次 500k 完整因果训练入口。
-# 具体冻结参数保留在已有详注配置中；本文件提供稳定、语义清晰的启动名称。
+# 可选的 500k 延长实验入口；它不是当前第一次正式长训配置。
+# 显式覆盖长度和目录，避免基线冻结为 250k 后名称与实际语义不一致。
 extends = "train_dqn_fast30_parallel.toml"
+
+[runtime]
+run_dir = "runs/dqn_causal_structure_h256_l4_n3_500k"
+
+[training]
+total_updates = 500000

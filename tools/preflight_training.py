@@ -98,8 +98,10 @@ PINNED_CHIPMUNK_VERSION = (
 PINNED_TORCH_VERSION = '2.12.1+cu130'
 PINNED_CUDA_RUNTIME = '13.0'
 
-FORMAL_500K_CONFIG_CONTRACT = {
-    'total_updates': 500_000,
+FORMAL_CONFIG_CONTRACT = {
+    'run_dir': 'runs/dqn_causal_structure_h256_l4_n3_250k',
+    'total_updates': 250_000,
+    'epsilon_schedule': 'smooth',
     'warmup_steps': 5_000,
     'collect_per_update': 16,
     'batch_size': 128,
@@ -119,7 +121,9 @@ FORMAL_500K_CONFIG_CONTRACT = {
     'worker_sync_interval': 100,
     'actor_batch_size': 16,
 }
-FORMAL_500K_FLOAT_CONTRACT = {
+FORMAL_FLOAT_CONTRACT = {
+    'epsilon_start': 1.0,
+    'epsilon_end': 0.05,
     'lambda_rule': 0.15,
     'lambda_cf': 0.10,
     'lambda_structural': 0.15,
@@ -140,7 +144,7 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         '--config',
-        default='configs/train_dqn_fast30_parallel.toml',
+        default='configs/train_dqn_causal_250k.toml',
         help='待验证的正式训练 TOML。',
     )
     parser.add_argument(
@@ -175,18 +179,18 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _formal_500k_config_audit(training_args):
+def _formal_config_audit(training_args):
     """核对首轮正式训练不可被 smoke 配置或关闭归因的配置替代。"""
 
     mismatches = {}
-    for field_name, expected in FORMAL_500K_CONFIG_CONTRACT.items():
+    for field_name, expected in FORMAL_CONFIG_CONTRACT.items():
         actual = getattr(training_args, field_name, None)
         if actual != expected:
             mismatches[field_name] = {
                 'actual': actual,
                 'expected': expected,
             }
-    for field_name, expected in FORMAL_500K_FLOAT_CONTRACT.items():
+    for field_name, expected in FORMAL_FLOAT_CONTRACT.items():
         actual = getattr(training_args, field_name, None)
         if (
                 not isinstance(actual, (int, float))
@@ -223,8 +227,8 @@ def _formal_500k_config_audit(training_args):
     return {
         'passed': not mismatches,
         'mismatches': mismatches,
-        'integer_contract': dict(FORMAL_500K_CONFIG_CONTRACT),
-        'float_contract': dict(FORMAL_500K_FLOAT_CONTRACT),
+        'value_contract': dict(FORMAL_CONFIG_CONTRACT),
+        'float_contract': dict(FORMAL_FLOAT_CONTRACT),
         'required_flags': required_flags,
     }
 
@@ -612,7 +616,7 @@ def _centralized_actor_rollout_audit(
     """
 
     configured_worker_count = int(training_args.num_envs)
-    formal_worker_count = FORMAL_500K_CONFIG_CONTRACT['num_envs']
+    formal_worker_count = FORMAL_CONFIG_CONTRACT['num_envs']
     if configured_worker_count != formal_worker_count:
         raise RuntimeError(
             'centralized actor preflight requires the formal '
@@ -1416,11 +1420,11 @@ def run_preflight(args):
             num_envs=training_args.num_envs,
             device=training_args.device,
         ))
-        formal_contract = _formal_500k_config_audit(
+        formal_contract = _formal_config_audit(
             training_args
         )
         checks.append(_check(
-            'formal_500k_config_contract',
+            'formal_training_config_contract',
             formal_contract.pop('passed'),
             **formal_contract,
         ))

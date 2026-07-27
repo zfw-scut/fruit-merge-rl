@@ -235,7 +235,7 @@ class SyntheticTrainingRun:
         extends_path = (
             project_root
             / 'configs'
-            / 'train_dqn_causal_500k.toml'
+            / 'train_dqn_causal_250k.toml'
         ).as_posix()
         self.baseline_config.write_text(
             '\n'.join(
@@ -1836,7 +1836,7 @@ class CheckTrainingReadinessTest(unittest.TestCase):
         fixture = SyntheticTrainingRun(
             self.root,
             name='synthetic_formal',
-            total_updates=500_000,
+            total_updates=250_000,
         )
         payload = audit_training_run(
             fixture.run_dir,

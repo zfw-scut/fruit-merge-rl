@@ -21,12 +21,12 @@
   训练重置以 V2 文档为准。
 - `rl/INTERFACE_V0.md`: 当前已经实现的 RL 环境、状态、快照、经验、因果训练、
   checkpoint 与恢复接口。
-- `rl/FIRST_500K_RUNBOOK.md`: 云端安装、全量测试、preflight、5k/10k/500k
+- `rl/FIRST_250K_RUNBOOK.md`: 云端安装、全量测试、preflight、5k/10k/250k
   阶段门禁、监控、停止和 checkpoint 恢复手册。
 - `rl/TRAINING_SPEED_OPTIMIZATION_PLAN.md`: 当前训练吞吐优化和 fast 物理模式说明。
 - `operations/TRAINING_DASHBOARD.md`: 只读云端训练面板的启动、SSH 隧道访问、
   生命周期管理、安全边界与故障排查手册。
-- `training_runs/FIRST_500K_READINESS.md`: 第一次 500k 的唯一就绪证据表；区分
+- `training_runs/FIRST_250K_READINESS.md`: 第一次 250k 的唯一就绪证据表；区分
   已完成检查、运行中阶段和待运行阶段，不能用配置存在或中间 CSV 替代结论。
 
 结构感知训练代码已经把完整状态分析投影到主模型图：水果获得可达、伙伴、支撑、
@@ -56,19 +56,22 @@ hybrid 主 replay 恢复时只恢复有界热层，并在 sidecar 中明确记�
 2. `configs/train_dqn_causal_calibration_10k.toml`：10000 更新标定，必要时从
    update 0 另起独立 25000 更新校准；连续延长虽可保持冻结的 epsilon horizon，
    但必须作为不同证据单独标记；
-3. `configs/train_dqn_causal_500k.toml`：500000 更新正式配置。
+3. `configs/train_dqn_causal_250k.toml`：250000 更新正式配置。
+
+`configs/train_dqn_causal_500k.toml` 仅保留为未来可选延长实验，不属于当前正式门禁。
 
 `tools/preflight_training.py` 是启动前门禁，覆盖结构感知正式配置、CUDA、依赖版本、
 六维结构与完整因果 optimizer step、`EngineSnapshot` 重演、局部 Shapley 物理链路、
 磁盘和 CPU 余量。配置和门禁已经存在不等于对应烟测/标定已经完成；实际结果应在
 运行后写入 `training_runs/`，本文不预先声明结果。旧 V1 的 5k/10k 是历史证据，
-不能批准结构感知 V2 的 500k。
+不能批准结构感知 V2 的正式长训。本次用户已明确批准由独立完成的 V2 10k 替代
+缺失的 V2 5k 顺序证据，具体边界见 250k readiness。
 
 ## 建议阅读顺序
 
 1. 先读 `project_map/PROJECT_FILE_INDEX.md`，了解项目有哪些文件、各自负责什么。
 2. 再读 `rl/STRUCTURE_AWARE_GNN_V2.md`，确认当前模型、训练开关和兼容边界。
-3. 需要继续训练或分析模型时，读 `training_runs/FIRST_500K_READINESS.md`、
+3. 需要继续训练或分析模型时，读 `training_runs/FIRST_250K_READINESS.md`、
    `training_runs/INDEX.md` 和目标实验的 `summary.md`。
 4. 需要实时观察云端训练时，读 `operations/TRAINING_DASHBOARD.md`。
 5. 再读 `CODING_STYLE.md`，了解源码注释和后续修改风格。

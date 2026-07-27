@@ -8,7 +8,8 @@
 > 架构边界：本页当前列出的模型均早于 2026-07-28 的结构感知 V2。旧 H128/L3
 > checkpoint、hot/cold replay 和 causal replay 不能续训 V2；旧分数只作历史对照。
 > V2 的正式阶段状态以
-> [`FIRST_500K_READINESS.md`](FIRST_500K_READINESS.md) 为准。
+> [`FIRST_250K_READINESS.md`](FIRST_250K_READINESS.md) 为准。旧
+> `FIRST_500K_READINESS.md` 只保留为目标冻结前的历史记录。
 
 ## 训练实验
 

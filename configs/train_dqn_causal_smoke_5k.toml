@@ -1,5 +1,5 @@
 # 第一次完整因果训练的 5k 冒烟门禁。
-# 未覆盖字段全部继承正式 500k 配置，保证模型、Reward、归因与物理语义一致。
+# 未覆盖字段全部继承正式 250k 配置，保证模型、Reward、归因与物理语义一致。
 extends = "train_dqn_fast30_parallel.toml"
 
 [runtime]

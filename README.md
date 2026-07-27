@@ -60,21 +60,22 @@ optimizer step、局部 Shapley 物理链路、磁盘与 CPU 余量，并真实�
 
 ```bash
 python tools/preflight_training.py \
-  --config configs/train_dqn_causal_500k.toml \
+  --config configs/train_dqn_causal_250k.toml \
   --min-free-gb 80 \
   --min-memory-gb 64 \
   --min-available-memory-gb 16
 ```
 
-当前提供三套同源配置：
+当前提供三套正式阶段配置和一套可选延长配置：
 
 - `configs/train_dqn_causal_smoke_5k.toml`：5000 次更新烟测；
 - `configs/train_dqn_causal_calibration_10k.toml`：10000 次更新标定；样本不足时从
   update 0 另起独立 25000 次更新校准是可比性首选；也可连续延长，但会保持
   checkpoint 冻结的 epsilon horizon，并必须单独标记；
-- `configs/train_dqn_causal_500k.toml`：第一次 500000 次更新正式训练。
+- `configs/train_dqn_causal_250k.toml`：第一次 250000 次更新正式训练；
+- `configs/train_dqn_causal_500k.toml`：仅保留为未来可选延长实验。
 
-当前三套配置属于结构感知 V2：正式基线采用 H256/L4、batch 128、16 个 rollout
+当前三套正式阶段配置属于结构感知 V2：正式基线采用 H256/L4、batch 128、16 个 rollout
 worker、6 个反事实物理 worker 和集中式 GPU actor，并以
 `lambda_structural=0.15` 训练六维一步结构结果。旧 H128/L3 checkpoint、旧 hot/cold
 replay 和旧 causal replay 不能续训新架构；三个 V2 阶段都必须使用空目录从 update 0
@@ -82,8 +83,8 @@ replay 和旧 causal replay 不能续训新架构；三个 V2 阶段都必须使
 `docs/rl/STRUCTURE_AWARE_GNN_V2.md`。
 
 完整安装、阶段门禁、监控、停止阈值和恢复流程见
-`docs/rl/FIRST_500K_RUNBOOK.md`；当前阶段证据只以
-`docs/training_runs/FIRST_500K_READINESS.md` 为准。
+`docs/rl/FIRST_250K_RUNBOOK.md`；当前阶段证据只以
+`docs/training_runs/FIRST_250K_READINESS.md` 为准。
 
 训练入口：
 
@@ -112,7 +113,7 @@ python tools/sync_cloud_training_artifacts.py \
 工具只同步标准配置/指标/归因 JSON 白名单和三张 `plots/*.png`，校验后写入
 `sync_manifest.json`；认证由 OpenSSH 的密钥、agent 或密码提示负责。训练中途同步时
 去掉 `--require-complete`。完整说明见
-`docs/rl/FIRST_500K_RUNBOOK.md` 的“把基础分析数据同步回本地”。
+`docs/rl/FIRST_250K_RUNBOOK.md` 的“把基础分析数据同步回本地”。
 
 ## 实时查看云端训练
 
