@@ -11,7 +11,7 @@
 本地训练前实现已经完成并通过最终全量回归。60-update 性能/闭环探针证明完整因果
 链路能在小规模闭合，但不是正式 5k 证据；正式 5k、10k 和 500k 均未启动。
 
-本机总内存约 15.2 GiB，当前可用内存通常只有约 1–2 GiB，不满足新版 preflight 的
+本机总内存约 15.2 GiB，本轮可用内存实测约 0.5–2 GiB，不满足新版 preflight 的
 32 GiB 总内存与 8 GiB 可用内存硬门禁，因此不得在本机继续正式 5k/10k。下一份有效
 preflight 和两个短跑必须迁移到云服务器执行。云服务器配置入口已经识别，但尚未获得
 用户对 root SSH 只读检查的明确授权，所以当前也没有云端环境证据。
@@ -31,10 +31,11 @@ preflight 和两个短跑必须迁移到云服务器执行。云服务器配置�
 | 项目 | 当前证据 |
 | --- | --- |
 | 分支 | `codex/work-1` |
-| 最终 commit | 待本轮修改提交后填写 |
+| 训练源码冻结 commit | `89d86a2d9a953c0e2b613aba7169909a870b0444` |
 | 全量测试 | 2026-07-27：286/286 通过；测试后只更新本文证据字段 |
 | 正式配置 | `configs/train_dqn_causal_500k.toml` |
-| 正式配置 SHA-256 / 解析指纹 | 待最终提交和云端 preflight 填写 |
+| 正式配置 SHA-256 | `08c35479ddabd1cb383cd2287a94a457ae951b80acef483c3177e64b37ed2541` |
+| 正式配置解析指纹 | `515be7448497ef25f45e74a01e539c65d5fbcbcdad4bc3be6a2f88ce6fcd77a8` |
 
 如果 5k/10k 后修改了任何训练语义，必须更新本节、重新跑全量测试和 32 次 preflight，
 不能沿用旧证据。
@@ -66,8 +67,11 @@ warning。该 run 使用诊断覆盖参数，仍然不替代正式 5k。
 
 | 检查 | 当前结果 | 说明 |
 | --- | --- | --- |
-| 本机总内存 | 失败 | 约 15.2 GiB，低于 32 GiB |
-| 本机可用内存 | 失败 | 约 1–2 GiB，低于 8 GiB |
+| 本机真实门槛 preflight | 失败且符合预期 | commit `89d86a2`，32/32 快照；唯一 required failure 为 `host_physical_memory` |
+| 本机总内存 | 失败 | 15.22 GiB，低于 32 GiB |
+| 本机可用内存 | 失败 | 本次实测 0.69 GiB，低于 8 GiB |
+| 本机磁盘 / 有效 CPU | 通过 | 221.05 GiB 可用；16 个有效 CPU |
+| 本机功能性 preflight | 通过但无启动效力 | 只把内存/磁盘阈值临时置 0；`ready=true`、32/32 快照、无 warning，用于证明其余门禁闭合 |
 | 旧 preflight | 已失效 | `runs/preflight/first_500k_pre_smoke.json` 来自旧 commit 和旧门禁，只作历史诊断 |
 | 云端环境读取 | 未执行 | root SSH 只读检查仍需用户明确授权 |
 | 云端全量 preflight | 待运行 | 必须包含 `formal_500k_config_contract`、CUDA、完整因果 optimizer、Shapley、32/32 快照、CPU/内存/磁盘 |
