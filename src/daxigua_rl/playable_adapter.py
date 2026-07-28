@@ -16,6 +16,59 @@ STABLE_VELOCITY_EPSILON = 35.0
 STABLE_ANGULAR_VELOCITY_EPSILON = 4.0
 
 
+def _body_motion_is_stable(
+        body,
+        velocity_epsilon=STABLE_VELOCITY_EPSILON,
+        angular_velocity_epsilon=STABLE_ANGULAR_VELOCITY_EPSILON):
+    """按 headless 环境的速度阈值判断一个刚体是否稳定。"""
+
+    vx, vy = body.velocity
+    speed = math.hypot(float(vx), float(vy))
+    angular_velocity = float(body.angular_velocity)
+    return (
+        math.isfinite(speed)
+        and math.isfinite(angular_velocity)
+        and speed <= float(velocity_epsilon)
+        and abs(angular_velocity) <= float(angular_velocity_epsilon)
+    )
+
+
+def board_is_stable(
+        board,
+        velocity_epsilon=STABLE_VELOCITY_EPSILON,
+        angular_velocity_epsilon=STABLE_ANGULAR_VELOCITY_EPSILON):
+    """判断 pygame ``Board`` 当前是否处于可供模型决策的稳定边界。"""
+
+    velocity_epsilon = float(velocity_epsilon)
+    angular_velocity_epsilon = float(angular_velocity_epsilon)
+    if (
+            not math.isfinite(velocity_epsilon)
+            or velocity_epsilon < 0):
+        raise ValueError(
+            'velocity_epsilon must be finite and non-negative'
+        )
+    if (
+            not math.isfinite(angular_velocity_epsilon)
+            or angular_velocity_epsilon < 0):
+        raise ValueError(
+            'angular_velocity_epsilon must be finite and non-negative'
+        )
+
+    # 碰撞回调更新水果列表期间不能构图；正常渲染帧会在回调释放锁后再进入观看控制器。
+    if bool(getattr(board, 'lock', False)):
+        return False
+
+    return all(
+        _body_motion_is_stable(
+            ball.body,
+            velocity_epsilon=velocity_epsilon,
+            angular_velocity_epsilon=angular_velocity_epsilon,
+        )
+        for ball in getattr(board, 'balls', ())
+        if ball is not None
+    )
+
+
 def board_action_candidates(board, action_count=15):
     """根据当前 pygame `Board` 生成离散投放动作候选。
 
@@ -106,10 +159,10 @@ def _fruit_state(board, ball, index):
     x, y = ball.body.position
     vx, vy = ball.body.velocity
     angular_velocity = float(ball.body.angular_velocity)
-    speed = math.hypot(float(vx), float(vy))
-    stable = (
-        speed <= STABLE_VELOCITY_EPSILON
-        and abs(angular_velocity) <= STABLE_ANGULAR_VELOCITY_EPSILON
+    stable = _body_motion_is_stable(
+        ball.body,
+        velocity_epsilon=STABLE_VELOCITY_EPSILON,
+        angular_velocity_epsilon=STABLE_ANGULAR_VELOCITY_EPSILON,
     )
 
     wall_width = float(getattr(board, 'wall_width', 20))

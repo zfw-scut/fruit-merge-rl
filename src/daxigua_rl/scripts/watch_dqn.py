@@ -7,15 +7,23 @@
 from __future__ import annotations
 
 import argparse
+import math
 import random
 from pathlib import Path
 
 import torch
 
+from daxigua.config import FPS
 from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT, StateAnalyzer
 from daxigua_rl.graph import GraphBuilder
 from daxigua_rl.models import GNNQNetwork
-from daxigua_rl.playable_adapter import board_action_candidates, board_game_state
+from daxigua_rl.playable_adapter import (
+    STABLE_ANGULAR_VELOCITY_EPSILON,
+    STABLE_VELOCITY_EPSILON,
+    board_action_candidates,
+    board_game_state,
+    board_is_stable,
+)
 from daxigua_rl.training.checkpointing import (
     extract_inference_checkpoint,
 )
@@ -30,7 +38,12 @@ def parse_args():
     parser.add_argument('--device', default='cpu', help='模型运行设备，例如 cpu、cuda 或 cuda:0。')
     parser.add_argument('--action-count', type=int, default=None, help='候选动作数量；默认读取 checkpoint args。')
     parser.add_argument('--seed', type=int, default=None, help='观看时的随机种子；默认读取 checkpoint args。')
-    parser.add_argument('--decision-delay-ms', type=int, default=240, help='模型选定落点后等待多久再投放，方便肉眼观察。')
+    parser.add_argument(
+        '--decision-delay-ms',
+        type=int,
+        default=240,
+        help='局面稳定且模型选定落点后等待多久再投放，方便肉眼观察。',
+    )
     parser.add_argument('--print-actions', action='store_true', help='在终端打印每次模型选择的动作和 Q 值摘要。')
     return parser.parse_args()
 
@@ -68,6 +81,85 @@ def build_model_from_checkpoint(checkpoint, device):
     return model
 
 
+def checkpoint_stable_window_seconds(checkpoint_args):
+    """把训练连续稳定帧换算成等效物理时间。"""
+
+    physics_fps = int(checkpoint_args.get('physics_fps', FPS))
+    stable_frames = int(checkpoint_args.get('stable_frames', 15))
+    if physics_fps <= 0:
+        raise ValueError('checkpoint physics_fps must be positive')
+    if stable_frames <= 0:
+        raise ValueError('checkpoint stable_frames must be positive')
+    return float(stable_frames) / float(physics_fps)
+
+
+class BoardStabilityGate:
+    """要求真实 Board 连续稳定满训练等效物理窗口后才放行。"""
+
+    def __init__(
+            self,
+            stable_window_seconds,
+            velocity_epsilon=STABLE_VELOCITY_EPSILON,
+            angular_velocity_epsilon=(
+                STABLE_ANGULAR_VELOCITY_EPSILON
+            )):
+        stable_window_seconds = float(stable_window_seconds)
+        if (
+                not math.isfinite(stable_window_seconds)
+                or stable_window_seconds <= 0):
+            raise ValueError(
+                'stable_window_seconds must be finite and positive'
+            )
+        self.stable_window_seconds = stable_window_seconds
+        self.velocity_epsilon = float(velocity_epsilon)
+        self.angular_velocity_epsilon = float(
+            angular_velocity_epsilon
+        )
+        self.stable_frame_count = 0
+        self._topology_signature = None
+
+    def reset(self):
+        """清除当前连续稳定窗口。"""
+
+        self.stable_frame_count = 0
+        self._topology_signature = None
+
+    def update(self, board):
+        """消费一个已经完成物理步进的渲染帧并返回是否已放行。"""
+
+        topology_signature = tuple(
+            id(ball)
+            for ball in getattr(board, 'balls', ())
+            if ball is not None
+        )
+        if topology_signature != self._topology_signature:
+            # 投放、合成和清场都会改变物理拓扑；即使新刚体初速度恰好很小，也必须
+            # 从当前拓扑重新累计完整稳定窗口，不能沿用旧局面的稳定帧。
+            self.stable_frame_count = 0
+            self._topology_signature = topology_signature
+
+        if not board_is_stable(
+                board,
+                velocity_epsilon=self.velocity_epsilon,
+                angular_velocity_epsilon=(
+                    self.angular_velocity_epsilon
+                )):
+            self.stable_frame_count = 0
+            return False
+
+        board_fps = float(getattr(board, 'FPS', FPS))
+        if not math.isfinite(board_fps) or board_fps <= 0:
+            raise ValueError('board FPS must be finite and positive')
+        required_frames = max(
+            1,
+            int(math.ceil(
+                self.stable_window_seconds * board_fps - 1e-12
+            )),
+        )
+        self.stable_frame_count += 1
+        return self.stable_frame_count >= required_frames
+
+
 class DQNVisualController:
     """在 pygame `Board` 上执行 DQN 模型决策。"""
 
@@ -77,6 +169,7 @@ class DQNVisualController:
             graph_builder,
             action_count,
             device,
+            stable_window_seconds,
             decision_delay_ms=240,
             print_actions=False):
         self.model = model
@@ -86,14 +179,30 @@ class DQNVisualController:
         self.decision_delay_ms = int(decision_delay_ms)
         self.print_actions = print_actions
         self.state_analyzer = StateAnalyzer()
+        self.stability_gate = BoardStabilityGate(
+            stable_window_seconds=stable_window_seconds,
+        )
 
         # pending 动作让模型先把预览水果移动到目标位置，再短暂停顿后投放。
         self.pending_action = None
         self.pending_drop_at = 0
         self.decision_count = 0
 
+    def reset_episode(self):
+        """清除跨局或手动重开时不能继续沿用的决策状态。"""
+
+        self.pending_action = None
+        self.pending_drop_at = 0
+        self.stability_gate.reset()
+
     def update(self, board):
         """每帧由 `DQNBoard` 调用，必要时选择并投放动作。"""
+
+        # ``Board.next_frame()`` 已在本次调用前推进一帧物理。只有全场水果按训练阈值
+        # 连续稳定满等效物理窗口，才允许把当前状态标记为 stable boundary 并构图。
+        if not self.stability_gate.update(board):
+            self.pending_action = None
+            return
 
         if not board._can_drop():
             self.pending_action = None
@@ -116,6 +225,7 @@ class DQNVisualController:
         board.mouse_x = board.aim_x
         board._drop_current()
         self.pending_action = None
+        self.stability_gate.reset()
 
     def _choose_action(self, board):
         """根据当前原游戏局面选择一个 action candidate。"""
@@ -182,6 +292,12 @@ def create_dqn_board(controller):
             self.ai_controller = controller
             super().__init__()
 
+        def reset(self):
+            """重开或终局清场时同步清除观看控制器的稳定窗口。"""
+
+            super().reset()
+            self.ai_controller.reset_episode()
+
         def pg_time_get_ticks(self):
             """包装 pygame ticks，避免 controller 直接 import pygame。"""
 
@@ -220,6 +336,9 @@ def main():
         graph_builder=GraphBuilder(),
         action_count=action_count,
         device=device,
+        stable_window_seconds=checkpoint_stable_window_seconds(
+            checkpoint_args
+        ),
         decision_delay_ms=args.decision_delay_ms,
         print_actions=args.print_actions,
     )

@@ -925,6 +925,7 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigu
 加载 checkpoint
 -> 重建 GNNQNetwork
 -> 打开原 pygame Board
+-> 按 checkpoint 的稳定帧时长等待真实 Board 连续稳定
 -> playable_adapter 把实时 Board 转成 GameState + ActionCandidate
 -> GraphBuilder.build(...)
 -> GNNQNetwork 输出候选动作 Q 值
@@ -935,6 +936,11 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigu
 当前约定：
 
 - 观看入口复用原游戏画面，适合检查模型最终在真实窗口中的操作效果。
+- 手动游戏的固定投放冷却不等于 RL 动作边界。观看控制器从 checkpoint 读取
+  `physics_fps` 和 `stable_frames`，换算到真实 Board 的物理帧率后，要求所有水果
+  在线速度、角速度阈值内连续稳定完整窗口，才会执行 `StateAnalyzer` 和模型决策。
+- 投放、合成、重开或决策预览期间重新运动都会清空稳定窗口并作废 pending 动作；
+  `--decision-delay-ms` 只控制稳定决策后的落点展示时间，不再代替物理稳定判断。
 - `playable_adapter.py` 和 `watch_dqn.py` 属于 RL 侧代码；游戏本体不 import 它们。
 - 观看入口是可视化检查工具，不替代无渲染训练、评估和数据采集。
 - 观看脚本会打开 pygame 窗口并持续运行，退出方式沿用原游戏窗口关闭逻辑。

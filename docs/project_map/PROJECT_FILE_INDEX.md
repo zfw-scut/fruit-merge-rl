@@ -26,7 +26,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/` | 自动游玩/RL 相关代码。游戏本体不得 import 它。训练主链路通过 `HeadlessGame` 访问游戏；观看脚本可在 RL 侧懒加载真实 `Board`。 | `DaxiguaEnv`、`DaxiguaEnvConfig`、`README.md` 中记录边界规则 |
 | `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 step 表示一次投放和无渲染物理稳定；在 worker 内缓存相邻 `StateAnalysis`、接收 collector 的 `TransitionKey` 并计算 Reward V2；可从兼容 `EngineSnapshot` 创建 live 分支。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step(...)`、`DaxiguaEnv.from_snapshot()` |
 | `src/daxigua_rl/reward.py` | Reward V2 纯计算层。按合成等级计算指数 task utility，并以相邻 `StateAnalysis` 的 C/R/K potential 差完成 shaping。 | `RewardConfig`、`RewardBreakdown`、`merge_utility()`、`compute_state_potential()`、`compute_reward()` |
-| `src/daxigua_rl/playable_adapter.py` | 真实 pygame 游戏窗口到 RL 输入结构的适配层。把正在运行的 `Board` 转成 `GameState` 和 `ActionCandidate`，用于观看模型实际游玩。 | `board_game_state()`、`board_action_candidates()` |
+| `src/daxigua_rl/playable_adapter.py` | 真实 pygame 游戏窗口到 RL 输入结构的适配层。把正在运行的 `Board` 转成 `GameState` 和 `ActionCandidate`，并按训练速度阈值只读判断当前物理边界是否稳定。 | `board_game_state()`、`board_action_candidates()`、`board_is_stable()` |
 | `src/daxigua_rl/attribution/` | 完整状态归因模块。除只读状态/事件契约、静态分析器和历史归因器外，还包含独立因果 replay、反事实 proposal/任务/执行器与局部 Shapley。完整分析对象不进入主 TD replay。 | `StateAnalyzer`、`AttributionTracker`、`CausalReplayBuffer`、`CounterfactualProposalBuilder` |
 | `src/daxigua_rl/attribution/schema.py` | 固定 15 动作状态分析结构、时间语义、队列槽位、自由空间、谱系、贡献者、事件预算和 pending 结果不变量；全部类型可 pickle/Windows spawn。 | `StateAnalysis`、`AttributionEvent`、`AttributionStepResult`、`FruitLineageRecord`、`MergeLineageRecord` |
 | `src/daxigua_rl/attribution/state_analyzer.py` | 在动作前边界执行只读静态分析：解析圆形竖直列计算 15 动作可达性/队列容量，规范最小水果探针栅格计算顶部连通空间和空腔，并构建支撑、伙伴与基础连锁结构。 | `StateAnalyzer`、`StateAnalyzerConfig` |
@@ -57,7 +57,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/training/checkpointing.py` | 原子、版本化训练 checkpoint。维护 run manifest、规范配置指纹、Python/PyTorch/CUDA RNG、可选组件状态及严格 resume 配置校验。 | `RunManifest`、`atomic_torch_save()`、`build_training_checkpoint()`、`load_training_checkpoint()` |
 | `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、观看、导出等入口。 | `train_dqn.py`、`watch_dqn.py` |
 | `src/daxigua_rl/scripts/train_dqn.py` | 当前完整因果训练入口。组合 Double DQN + 3-step、主/因果 replay、并行采集、预算反事实、局部 Shapley、指标、评估、原子 checkpoint 与 hot-resume；保存配置/运行指纹及 warmup/shutdown/resume/failure sidecar。 | `python -m daxigua_rl.scripts.train_dqn --config ...`、`--resume ...` |
-| `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面，并在 RL 侧注入自动控制器选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
+| `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面；按 checkpoint 稳定窗口换算真实物理帧，只有连续稳定且拓扑未变化时才让控制器分析局面并选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。用于测试降低 fps、最大物理帧、稳定帧和 Pymunk 迭代次数后的速度收益与游戏分布偏移。 | `python -m daxigua_rl.scripts.compare_physics_modes --checkpoint ...`；输出 `summary.csv`、`episode_metrics.csv` 和 `plots/physics_mode_comparison.png`。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口。 | `train_dqn_causal_smoke_5k.toml`、`train_dqn_causal_calibration_10k.toml`、`train_dqn_causal_250k.toml`、`train_dqn_causal_500k.toml` |

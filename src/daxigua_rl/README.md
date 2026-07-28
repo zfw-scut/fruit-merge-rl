@@ -150,3 +150,10 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
   -m daxigua_rl.scripts.watch_dqn \
   --checkpoint runs/<run>/checkpoints/latest.pt
 ```
+
+The viewer does not use the manual game's fixed drop cooldown as an RL
+decision boundary. It reads `physics_fps` and `stable_frames` from the
+checkpoint, converts that stable window to the real Board's physics frame
+rate, and only runs state analysis and model inference after every fruit has
+remained below the training velocity thresholds for the full window. A drop,
+merge, restart, or renewed movement invalidates any pending visual action.
