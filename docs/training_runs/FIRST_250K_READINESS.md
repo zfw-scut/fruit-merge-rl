@@ -54,17 +54,41 @@ segments，超过容量后删除最旧段。因此当前磁盘余量能够承载
 - [x] 250k 独立配置与 run 目录已冻结。
 - [x] 500k 配置被明确标为可选延长实验，不能通过当前正式配置契约。
 - [x] 用户批准 10k 替代缺失 5k，并批准最终检查后启动。
-- [ ] 最终启动提交工作树干净，且本地、云端 HEAD 完全一致。
-- [ ] 最终提交上的全量单测与 compile/py_compile 零失败。
-- [ ] 正式 250k preflight：`ready=true`、required failures 为空、32/32 snapshot、
+- [x] 最终启动提交工作树干净，且本地、云端 HEAD 完全一致。
+- [x] 最终提交上的全量单测与 compile/py_compile 零失败。
+- [x] 正式 250k preflight：`ready=true`、required failures 为空、32/32 snapshot、
   正式配置契约和 CUDA actor 链路通过。
-- [ ] 正式 run、monitor、control 目录在启动前不存在。
-- [ ] 普通资源监控和 cgroup 监控先于训练启动，并写入独立退出码。
-- [ ] 训练以 `configs/train_dqn_causal_250k.toml` 从 update 0 启动；命令不含
+- [x] 正式 run、monitor、control 目录在启动前不存在。
+- [x] 普通资源监控和 cgroup 监控先于训练启动；两者均存活并具有独立退出码路径。
+- [x] 训练以 `configs/train_dqn_causal_250k.toml` 从 update 0 启动；命令不含
   `--resume`、`--total-updates` 或 `--overwrite`。
-- [ ] dashboard 切换到正式 run，进度、资源与 ETA 非 stale。
-- [ ] 启动后 update/env_steps 递增，无 Traceback、CUDA OOM、Xid、NaN/Inf，
+- [x] dashboard 切换到正式 run，进度、资源与 ETA 非 stale。
+- [x] 启动后 update/env_steps 递增，无 Traceback、CUDA OOM、Xid、NaN/Inf，
   `memory.events` 无新增 OOM。
 
-启动身份、preflight 哈希、进程 PID、监控目录和首次稳定心跳在训练实际启动后写入
-单独的启动记录；不能在运行前预填为已通过。
+## 5. 实际启动身份
+
+| 项目 | 实际值 |
+| --- | --- |
+| 训练源码 commit | `83026cad5b43a8d39a7e224445f28091a5f9c785`，`codex/work-1`，云端 clean |
+| 本地测试 | 376 项通过，1 项仅因 Windows 无符号链接权限跳过；0 failure/error |
+| 云端测试 | 376 项全部通过；compileall 通过 |
+| preflight | `runs/preflight/first_250k_prelaunch_83026ca_20260728T000628Z.json` |
+| preflight SHA-256 | `99598a5146408f7f131473109222448f0a334216ede0c21f94cbe31db8c86e22` |
+| 启动时间 | `2026-07-28T08:18:51+08:00` |
+| 正式 run | `runs/dqn_causal_structure_h256_l4_n3_250k` |
+| 资源监控 | `runs/resource_monitor/formal_250k_83026ca_20260728T001851Z` |
+| 阶段控制 | `runs/stage_control/formal_250k_83026ca_20260728T001851Z` |
+| supervisor | PID `40568`，PID start-ticks 身份核对通过 |
+| 面板 | `127.0.0.1:8765`，health `status=running`、`data_fresh=true` |
+
+首次稳定快照在 update 103：目标为 250000，env steps 6648，训练和四个 supervisor/
+监控进程均存活且 start-ticks 匹配；GPU utilization 约 55%，显存约 30871/32607 MiB，
+有效 CPU 利用约 91.7%，可用内存约 73 GiB，磁盘可用约 135 GiB。cgroup 的
+`low/high/max/oom/oom_kill` 全部为 0，未生成 `train.exit`，说明 run 正在运行而非
+提前结束。
+
+启动时 `config.json` 已确认 `total_updates=250000`、`epsilon_schedule=smooth`、
+`resume=None`。fresh-run 代码将 epsilon horizon 直接取自 `args.total_updates`；
+首个 20k checkpoint 落盘后，再由 checkpoint 明确复核
+`epsilon_schedule_total_updates=250000`。
