@@ -15,6 +15,7 @@ import time
 from collections import Counter, OrderedDict
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
+from io import BytesIO
 from operator import index
 
 from daxigua_rl.attribution.causal_replay import (
@@ -74,6 +75,47 @@ def _validate_runner(runner):
     except Exception as exc:
         raise TypeError('runner must be pickleable') from exc
     return runner
+
+
+def _serialize_local_shapley_task(task):
+    """把含 CPU tensor 的任务变成普通 bytes 后再跨进程传输。
+
+    PyTorch 的 multiprocessing 默认 ``file_descriptor`` 共享策略会把直接提交给
+    ``ProcessPoolExecutor`` 的每个 tensor storage 转成共享内存，并让主进程在原
+    tensor 存活期间保留一个文件描述符。可信 Shapley 样本又会把任务中的 graph
+    写入长期 ``CausalReplayBuffer``，因此直接提交 task 会随完成任务数持续消耗
+    FD。先在主进程内序列化为普通 bytes，可以让 multiprocessing 只看见一个字节
+    串；worker 再从私有 CPU storage 还原任务，不会改写主进程 graph 的存储方式。
+    """
+
+    if not isinstance(task, LocalShapleyTask):
+        raise TypeError('task must be LocalShapleyTask')
+
+    import torch
+
+    stream = BytesIO()
+    torch.save(task, stream)
+    return stream.getvalue()
+
+
+def _run_serialized_local_shapley_task(runner, payload):
+    """在物理 worker 内还原可信任务并调用注入的顶层 runner。"""
+
+    if not isinstance(payload, bytes):
+        raise TypeError('serialized LocalShapley task must be bytes')
+
+    import torch
+
+    task = torch.load(
+        BytesIO(payload),
+        map_location='cpu',
+        weights_only=False,
+    )
+    if not isinstance(task, LocalShapleyTask):
+        raise TypeError(
+            'serialized LocalShapley payload did not contain a task'
+        )
+    return runner(task)
 
 
 def _validate_shared_budget(shared_budget):
@@ -724,9 +766,15 @@ class LocalShapleyCoordinator:
                 task.estimated_tokens,
             )
             try:
+                # 任务包含 2～12 个带 GraphTensor 的历史边界。必须在进入
+                # multiprocessing queue 前转成普通 bytes；否则 PyTorch 会让这些
+                # graph 的五个 tensor storage 逐一占用共享 FD，而可信样本会把它们
+                # 长期留在因果 replay 中。
+                task_payload = _serialize_local_shapley_task(task)
                 future = self._executor.submit(
+                    _run_serialized_local_shapley_task,
                     self.runner,
-                    task,
+                    task_payload,
                 )
             except BaseException:
                 self._increment('executor_submit_failures')

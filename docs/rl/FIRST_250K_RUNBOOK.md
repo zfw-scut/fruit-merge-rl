@@ -93,6 +93,9 @@ preflight 无法证明 commit 与 `dirty=false`。ZIP 只可用于人工阅读�
   正式配置使用 16 个 rollout worker 和 6 个反事实/局部 Shapley 共享物理 worker，
   还需为 learner、集中 actor 和调度线程保留余量；preflight 按有效核数而不是宿主机
   名义核数检查。
+- Linux `nofile` hard limit 至少为 65535。`scripts/train_dqn.sh` 默认把当前训练
+  进程的 soft limit 提升到 hard limit 允许的 65535，并在 launcher log 中记录
+  `nofile_soft` / `nofile_hard`；正式启动不得继续使用常见的 1024 soft limit。
 
 安装基础工具：
 
@@ -577,6 +580,13 @@ CONDA_ENV=python-torch \
   configs/train_dqn_causal_250k.toml \
   --resume runs/dqn_causal_structure_h256_l4_n3_250k/checkpoints/latest.pt
 ```
+
+异常恢复前应保留旧 control/monitor 目录和旧 cold generation，不复用其中的
+`train.exit`、summary 或进程身份。hybrid replay checkpoint 只恢复 hot layer；
+恢复前把原 `replay_cold` 原子改名为失败现场目录，让入口创建新的 canonical
+`replay_cold`，可避免旧 generation 与 checkpoint 的递增段号混在一起。优先从
+不可变周期 checkpoint（例如 `step_00040000.pt`）恢复，并在新 control/monitor
+目录中重新记录训练进程和资源证据。
 
 旧 H128/L3 权重、optimizer、旧图 replay 和旧 causal replay 不属于“可信的同一
 run”。基础加载器能识别旧文件外层，不代表能加载到新图维度和 H256/L4

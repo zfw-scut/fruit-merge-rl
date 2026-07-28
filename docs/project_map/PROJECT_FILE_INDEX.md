@@ -53,7 +53,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/training/parallel_collector.py` | spawn 多进程 rollout 调度器。各 worker 独立持有环境、分析器、归因器、n-step 和快照环；可把 greedy 图请求集中到主进程设备上的独立 actor 副本，按数量/等待窗口做微批推理。 | `ParallelRolloutCollector`、`actor_mean_batch_size`、`WorkerAttributionFinalization` |
 | `src/daxigua_rl/training/dqn.py` | Double DQN + n-step 更新器。online 网络选择 bootstrap 动作、target 网络估值，同时联合 TD、masked 六维结构、规则排序和反事实/局部 Shapley Huber loss；非有限值在 optimizer 前 fail-fast。 | `DQNTrainer`、`DQNTrainerConfig`、`DQNTrainStats` |
 | `src/daxigua_rl/training/counterfactual_coordinator.py` | 主进程反事实协调器。冻结 target payload、登记真实步、执行软/硬 token 预算、调度独立 CPU runner，并把可复现结果写入因果 replay；预算接口同时供 Shapley 使用。 | `CounterfactualCoordinator`、`recommended_counterfactual_worker_count()` |
-| `src/daxigua_rl/training/local_shapley_coordinator.py` | 以一个独立 worker 管理极稀疏局部 Shapley 的筛选、共享预算预留、pending 重试、结果门禁与因果样本写入。 | `LocalShapleyCoordinator`、`LocalShapleyCoordinatorStats` |
+| `src/daxigua_rl/training/local_shapley_coordinator.py` | 以一个独立 worker 管理极稀疏局部 Shapley 的筛选、共享预算预留、pending 重试、结果门禁与因果样本写入；task 在进入 multiprocessing 前显式序列化为 bytes，避免长期因果 graph 占用共享 FD。 | `LocalShapleyCoordinator`、`LocalShapleyCoordinatorStats` |
 | `src/daxigua_rl/training/checkpointing.py` | 原子、版本化训练 checkpoint。维护 run manifest、规范配置指纹、Python/PyTorch/CUDA RNG、可选组件状态及严格 resume 配置校验。 | `RunManifest`、`atomic_torch_save()`、`build_training_checkpoint()`、`load_training_checkpoint()` |
 | `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、观看、导出等入口。 | `train_dqn.py`、`watch_dqn.py` |
 | `src/daxigua_rl/scripts/train_dqn.py` | 当前完整因果训练入口。组合 Double DQN + 3-step、主/因果 replay、并行采集、预算反事实、局部 Shapley、指标、评估、原子 checkpoint 与 hot-resume；保存配置/运行指纹及 warmup/shutdown/resume/failure sidecar。 | `python -m daxigua_rl.scripts.train_dqn --config ...`、`--resume ...` |
@@ -209,7 +209,8 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `CounterfactualCoordinator`：以冻结 target policy 和共享 token 账本异步执行
   有预算的物理分支，原动作不能复现时不生成标签。
 - `LocalShapleyCoordinator`：仅选择配置比例内的高价值协同事件，和普通反事实共享
-  10% 硬预算，并在 grand coalition / 效率检查后写入样本。
+  10% 硬预算，并在 grand coalition / 效率检查后写入样本；跨进程 task 使用普通
+  bytes 传输，主进程长期保存的因果 graph 不会被转成共享 FD storage。
 - `DQNTrainer`：Double DQN + n-step 更新器，联合 TD、六维 masked 结构辅助、
   规则排序和反事实/Shapley SmoothL1Loss，并记录结构有效量、误差、因果 batch、
   正确率与额外耗时。
@@ -241,7 +242,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
   依次承载烟测、标定和第一次正式大规模训练，不在阶段之间静默改变算法语义。
 - `tools/preflight_training.py`：正式启动前重复运行的短门禁；其 JSON 结果是运行证据，
   配置文件存在本身不代表门禁、烟测或标定已通过。
-- `scripts/train_dqn.sh`：TOML 配置启动器，默认读取 `configs/train_dqn_fast30_parallel.toml`，也可以传入其它配置文件路径。
+- `scripts/train_dqn.sh`：TOML 配置启动器，默认读取 `configs/train_dqn_fast30_parallel.toml`，也可以传入其它配置文件路径；Linux 启动时默认把 `nofile` soft limit 提升到 hard limit 允许的 65535 并记录实际值。
 - `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 

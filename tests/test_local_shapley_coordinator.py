@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import unittest
 from concurrent.futures import Future
 from dataclasses import replace
+from pathlib import Path
 
 import torch
 
@@ -43,6 +45,15 @@ class _ImmediateExecutor:
 class _RaisingSubmitExecutor:
     def submit(self, _function, *_args):
         raise RuntimeError('intentional executor submit failure')
+
+
+class _RecordingImmediateExecutor(_ImmediateExecutor):
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, function, *args):
+        self.calls.append((function, args))
+        return super().submit(function, *args)
 
 
 class _SharedBudget:
@@ -723,6 +734,34 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
         finally:
             coordinator.close()
 
+    def test_executor_boundary_transports_task_as_plain_bytes(self):
+        executor = _RecordingImmediateExecutor()
+        coordinator = self._coordinator(
+            config=LocalShapleyConfig(event_ratio_max=1.0),
+            executor=executor,
+        )
+        try:
+            submission = coordinator.consider(
+                self.proposals[0],
+                self.payload,
+            )
+            result = coordinator.poll()
+
+            self.assertTrue(submission.accepted)
+            self.assertEqual(result.result_count, 1)
+            self.assertEqual(len(executor.calls), 1)
+            _function, args = executor.calls[0]
+            self.assertIs(args[0], _completed_runner)
+            self.assertIsInstance(args[1], bytes)
+            self.assertGreater(len(args[1]), 0)
+            # executor 实际执行 wrapper 后仍应得到同一个任务的合法结果。
+            self.assertEqual(
+                result.results[0].task_id,
+                submission.task_id,
+            )
+        finally:
+            coordinator.close()
+
     def test_default_executor_uses_spawn_and_stays_nonblocking(self):
         config = LocalShapleyConfig(event_ratio_max=1.0)
         budget = _SharedBudget()
@@ -734,6 +773,12 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
             shared_budget=budget,
             config=config,
             runner=_thread_reporting_physical_runner,
+        )
+        proc_fd_dir = Path('/proc/self/fd')
+        fd_before = (
+            len(os.listdir(proc_fd_dir))
+            if proc_fd_dir.is_dir()
+            else None
         )
         try:
             submission = coordinator.consider(
@@ -767,6 +812,11 @@ class LocalShapleyCoordinatorTest(unittest.TestCase):
                 torch.get_num_interop_threads(),
                 main_interop_threads,
             )
+            if fd_before is not None:
+                # Linux 的 spawn worker 会固定增加少量控制管道；但 task 中两张
+                # GraphTensor 的十个 storage 不得再各自留下一个共享 FD。
+                fd_after = len(os.listdir(proc_fd_dir))
+                self.assertLessEqual(fd_after - fd_before, 8)
         finally:
             coordinator.close()
 
