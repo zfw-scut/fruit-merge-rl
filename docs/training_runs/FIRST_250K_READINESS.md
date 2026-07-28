@@ -92,3 +92,45 @@ segments，超过容量后删除最旧段。因此当前磁盘余量能够承载
 `resume=None`。fresh-run 代码将 epsilon horizon 直接取自 `args.total_updates`；
 首个 20k checkpoint 落盘后，再由 checkpoint 明确复核
 `epsilon_schedule_total_updates=250000`。
+
+## 6. update 42348 故障与 40k 恢复
+
+原 fresh 进程于 `2026-07-28T12:42:14+08:00` 在 update 42348 退出。直接异常为
+读取 cold replay 时的 `OSError: [Errno 24] Too many open files`；服务器当时
+`nofile` soft/hard 为 1024/65535。没有 CUDA OOM、Xid、cgroup OOM、磁盘不足或
+模型非有限值证据，故障 segment 也可在独立进程重复加载且 FD 恒定。
+
+根因是局部 Shapley 把含 2～12 个 `GraphTensor` 的 task 直接提交给 PyTorch
+multiprocessing。默认 `file_descriptor` 共享策略让每个 tensor storage 占一个 FD，
+可信样本又把原 graph 长期保存在因果 replay；最小复现实测每个双候选任务稳定留下
+约 10 个 FD，约 90 个任务后与固定进程句柄共同触及 1024。修复提交
+`dec106b2003135f35763259f13dfa4831f7f4863` 改为 task bytes 传输，并让启动器把
+soft limit 提升至 65535。
+
+恢复前完成：
+
+- 本地 377 项测试通过，0 failure/error，1 项 Windows 权限预期跳过；
+- 云端 Linux 377 项测试全部通过，编译检查通过；
+- 12 个连续独立 Shapley task 的 FD 压测为 10→12 后保持不变；
+- 修复提交正式 preflight `ready=true`、0 warning、32/32 snapshot，路径为
+  `runs/preflight/first_250k_resume_dec106b_20260728T083700Z.json`，SHA-256 为
+  `33ae10de89383c6ac2813bc3d237f8d6afa4329b50d9c0ea805c8a9cc8eb43a4`；
+- 不可变 `step_00040000.pt` 完整恢复审计通过，SHA-256 为
+  `900baf2329f72a8901506052ae47c6f9448915d674fb86c64aea437426d3df44`。
+
+实际于 `2026-07-28T16:43:38+08:00` 从 update 40000 恢复。旧 monitor/control
+和失败 cold generation均原样保留；新身份为：
+
+| 项目 | 恢复值 |
+| --- | --- |
+| 训练源码 | `dec106b2003135f35763259f13dfa4831f7f4863`，云端 clean |
+| checkpoint | `runs/dqn_causal_structure_h256_l4_n3_250k/checkpoints/step_00040000.pt` |
+| monitor | `runs/resource_monitor/formal_250k_resume40k_dec106b_20260728T083800Z` |
+| control | `runs/stage_control/formal_250k_resume40k_dec106b_20260728T083800Z` |
+| cold 现场 | `runs/dqn_causal_structure_h256_l4_n3_250k/replay_cold.failed_at_42348_20260728T083800Z` |
+| replay 恢复 | TD hot-only 8000/99176，省略旧 cold 91176；causal replay 20000 |
+| 日志收口 | checkpoint 后 4 行 metrics、293 行 episode metrics 自动移入 orphan 文件 |
+| 资源保护 | learner `nofile=65535/65535`，新双监控存活，面板重新绑定且数据新鲜 |
+
+恢复快照已经越过 40k 并持续增加，但本节只记录“恢复成功且当前运行中”；250k
+最终完成、最终 readiness 和模型效果仍须等待实际产物，不能提前打勾。
