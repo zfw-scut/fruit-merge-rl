@@ -6,6 +6,7 @@
 
 - `codex/`: 记录 Codex 对项目做出的较大修改，以及修改记录的维护规则。
 - `operations/`: 云端训练面板等运行服务的部署、访问、安全和排障手册。
+- `mobile/`: Android AI 陪玩版的架构、Windows 构建、安装和模型更新手册。
 - `project_map/`: 记录项目文件构成、职责分工、可复用组件和阅读入口。
 - `training_runs/`: 记录本地与云端训练实验的轻量摘要、配置、指标统计和产物索引，供迁移后的开发者或 agent 分析。
 - `CODING_STYLE.md`: 记录项目源码注释和编码风格，当前强调教学型详细注释。
@@ -80,6 +81,7 @@ checkpoint 可通过 `--init-checkpoint` 做 weights-only 尺寸迁移；这会�
 3. 需要继续训练或分析模型时，读 `training_runs/FIRST_250K_READINESS.md`、
    `training_runs/INDEX.md` 和目标实验的 `summary.md`。
 4. 需要实时观察云端训练时，读 `operations/TRAINING_DASHBOARD.md`。
-5. 再读 `CODING_STYLE.md`，了解源码注释和后续修改风格。
-6. 再读 `codex/` 下最新的修改记录，了解近期发生过哪些较大的结构或逻辑变化。
-7. 需要继续修改项目时，按对应目录下的 `RULES.md` 更新文档。
+5. 需要构建 Android 成品时，读 `mobile/ANDROID_APP.md`。
+6. 再读 `CODING_STYLE.md`，了解源码注释和后续修改风格。
+7. 再读 `codex/` 下最新的修改记录，了解近期发生过哪些较大的结构或逻辑变化。
+8. 需要继续修改项目时，按对应目录下的 `RULES.md` 更新文档。

@@ -3,11 +3,10 @@
 本包只放训练系统自己的概念，例如经验记录、回放池和更新器。
 游戏本体不得 import 本包；`daxigua_rl` 内部后续训练代码可以使用这里的结构。
 
-注意：`RolloutCollector` 和 `DQNTrainer` 依赖 PyTorch。为了避免普通
-`daxigua_rl` 导入被 torch 依赖拖住，这里使用 `__getattr__` 懒加载相关对象。
+注意：训练器、collector 和 ReplayBuffer 的 checkpoint 路径都依赖 PyTorch。
+为了避免普通 `daxigua_rl.training.identity` 导入被 torch 依赖拖住，这里使用
+`__getattr__` 懒加载相关对象。
 """
-
-from .replay_buffer import ReplayBuffer
 
 
 __all__ = [
@@ -39,6 +38,12 @@ __all__ = [
 
 def __getattr__(name):
     """懒加载依赖 torch 的训练组件。"""
+
+    if name == 'ReplayBuffer':
+        from .replay_buffer import ReplayBuffer
+
+        globals()[name] = ReplayBuffer
+        return ReplayBuffer
 
     if name in {
             'CounterfactualCoordinator',

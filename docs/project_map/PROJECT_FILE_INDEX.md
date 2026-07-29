@@ -1,6 +1,6 @@
 # 项目文件索引
 
-最后更新：2026-07-29
+最后更新：2026-07-30
 
 ## 项目定位
 
@@ -59,6 +59,9 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/scripts/train_dqn.py` | 当前完整因果训练入口。组合 Double DQN + 3-step、主/因果 replay、并行采集、预算反事实、局部 Shapley、指标、评估、原子 checkpoint 与 hot-resume；还支持从可信同架构 checkpoint 做 weights-only 新地图初始化。 | `--config ...`、`--resume ...`、`--init-checkpoint ...` |
 | `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，并按 CLI > checkpoint > 当前默认值解析场地几何；只有连续稳定且拓扑未变化时才分析局面并投放。 | `--checkpoint ...`、几何 CLI 参数 |
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。可显式选择场地几何，用于测试物理参数的速度收益与游戏分布偏移。 | `--checkpoint ...`、几何参数；输出指标和对比图。 |
+| `src/daxigua_mobile/` | Android/Chaquopy 使用的纯 Python 状态桥。把普通局面 JSON 复用为 `StateAnalyzer -> GraphBuilder` 图输入，不依赖 pygame、pymunk 或 torch。 | `build_mobile_graph()`、`build_mobile_graph_json()`；固定 21 动作、62/47 特征 ABI。 |
+| `src/daxigua_rl/models/mobile_export.py` | 把结构感知 GNN-Q 包装为五个普通张量输入，供动态 N/E 的 ONNX 导出。 | `MobileGNNQNetwork`、`export_mobile_onnx()`。 |
+| `android/` | Android AI 陪玩版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理。 | `scripts/build-debug-apk.ps1`；最低 API 24，当前仅 arm64-v8a。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口和一个 560x1120 尺寸迁移入口。 | `train_dqn_causal_*.toml`、`train_dqn_size_transfer_560x1120_50k.toml` |
 | `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：250k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套正式阶段配置继承它。 | `train_dqn.py --config ...` |
@@ -93,6 +96,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | 路径 | 作用 | 备注 |
 | --- | --- | --- |
 | `tools/cuda_stress_test.py` | 独立 PyTorch CUDA 计算压力测试脚本。只做矩阵乘法和可选显存预留，并采集 GPU、系统内存、进程内存和内核 NVIDIA/Xid 日志。 | 用于判断黑屏/Xid 是否能在脱离游戏和 RL 训练代码后复现；默认输出到 `runs/cuda_stress/<时间戳>/`。 |
+| `tools/export_android_model.py` | 把可信结构感知 checkpoint 导出为 Android ONNX。用真实稳定局面比较原模型、五输入包装器与 ONNX Runtime，数值或 argmax 门禁失败时不产出模型。 | 默认读取本地 560x1120 最优推理 checkpoint；依赖见 `requirements-mobile-export.txt`。 |
 | `tools/export_training_catalog.py` | 训练实验归档工具。扫描本地 `runs/`，识别 Reward V2 task/potential 与历史 Reward V1 指标，并从配置、训练指标和文件信息生成轻量实验目录。 | 不复制 checkpoint、replay 和完整指标 CSV；运行方式见 `docs/training_runs/README.md`。 |
 | `tools/sync_cloud_training_artifacts.py` | 云端轻量训练产物同步工具。通过一次只读 SSH tar 流同步固定白名单内的配置/指标/归因 JSON 和两张训练图，在本地校验路径、类型、大小、JSON/CSV/PNG 完整性后以目录事务安装并生成 SHA-256 manifest。 | 默认只要求训练中的 config/metrics；阶段结束加 `--require-complete` 核对目标 update 和 shutdown 包。认证交给 OpenSSH，工具没有密码参数；明确不下载 checkpoint、ReplayBuffer、日志或本地旁路证据。 |
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |
@@ -106,6 +110,8 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | 路径 | 作用 | 备注 |
 | --- | --- | --- |
 | `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向、next_graph 缓存、分层 replay、并行 collector、Reward V2 分析统计和 DQN 更新链路。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
+| `tests/test_mobile_bridge.py` | Android 纯 Python 桥契约测试。覆盖 560x1120 输入验证、21 动作、62/47 扁平布局、JSON 入口以及禁止 pygame/pymunk/torch 导入。 | 使用标准库 `unittest`。 |
+| `tests/test_mobile_model_export.py` | 移动张量包装器和动态 ONNX 测试。验证两种 N/E 图尺寸、原模型数值/argmax 一致与错误动作数拒绝。 | 依赖 PyTorch、ONNX 和 ONNX Runtime。 |
 | `tests/test_structure_graph.py` | V2 结构图契约测试。覆盖水果/全局结构特征、显式关系方向、motif 角色与逐动作 mask、q0 blocker、无分析零回退、1/3/7 动作映射、无 ID 泄漏和结构消融。 | 使用标准库 `unittest`。 |
 | `tests/test_structure_aware_gnn.py` | 关系 gate/attention、dueling Q 和共享六维辅助头测试。覆盖单图/批图等价、动作 slice 隔离、输出范围和梯度。 | 使用标准库 `unittest`，依赖 PyTorch。 |
 | `tests/test_structural_targets.py` | 六维一步结构 target、有效 mask、物理连锁谱系、terminal、float16 payload、旧 transition 和 n-step 保留语义测试。 | 使用标准库 `unittest`。 |
@@ -145,6 +151,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/operations/` | 云端运行服务的部署和运维手册目录。 | 当前包含训练实时面板的启动、SSH 隧道访问、安全边界和排障说明。 |
+| `docs/mobile/ANDROID_APP.md` | Android AI 陪玩版手册。 | 记录架构、AI 行为、Windows 构建、ADB 安装、模型更新和 Box2D/Pymunk 边界。 |
 | `docs/operations/TRAINING_DASHBOARD.md` | 云端训练实时面板运维手册。 | 默认通过 `127.0.0.1:8765` 和 SSH 本地端口转发访问；包含 Windows DPAPI 一键桌面入口、只读边界、生命周期命令和 PID 安全校验。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
 | `docs/rl/STRUCTURE_AWARE_GNN_V2.md` | 当前结构感知 GNN 与首次新架构长训的主规格。 | 记录关系图、连锁 motif、关系 GNN、六维辅助监督、集中式 actor、无泄漏/非奖励边界、启用参数、指标以及旧 checkpoint/replay 不兼容范围。 |

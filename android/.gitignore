@@ -1,0 +1,10 @@
+.gradle/
+.gradle-user-home/
+.toolchains/
+local.properties
+**/build/
+app/src/main/assets/fruits/
+app/src/main/assets/model/
+app/src/main/jniLibs/
+app/src/main/python_generated/
+release/

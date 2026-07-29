@@ -41,6 +41,23 @@ python Main.py
 
 顶部 `QUEUE` 区域从左到右显示当前水果和后续 3 颗水果；每次投放后队列会向前推进，并在末尾补充新水果。该区域和当前悬浮水果处于不同高度层，避免移动水果时遮挡队列。
 
+## 构建 Android AI 陪玩版
+
+Android 版可完全在 Windows 上构建，不需要 Qt、Ubuntu、WSL 或 Android Studio。
+它把结构感知 GNN-Q 模型、纯 Python 状态分析桥和 ONNX Runtime 一并封装进 APK，
+支持 AI/手动即时切换与拟人化投放表现。
+
+首次构建：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  android\scripts\build-debug-apk.ps1 -BootstrapSdk
+```
+
+成品位于
+`android/release/FruitMergeAI-v0.1.0-debug.apk`。模型契约、安装命令、构建缓存
+和物理兼容边界见 `docs/mobile/ANDROID_APP.md`。
+
 ## 训练准备
 
 当前正式服务器是 RTX 5090，训练环境固定为 PyTorch 2.12.1 + CUDA runtime
@@ -173,6 +190,8 @@ Windows 本地电脑可运行
 - `src/daxigua/core/engine.py`: 无渲染游戏引擎和可校验、可恢复的 `EngineSnapshot`。
 - `src/daxigua_rl/`: 环境、结构关系图、关系感知 GNN、Reward V2、因果归因、
   反事实和训练主链路。
+- `src/daxigua_mobile/`: 不依赖桌面物理或 torch 的 Android 状态分析/构图桥。
+- `android/`: 纯 Windows 可构建的 libGDX Android 游戏、AI 推理与 APK 脚本。
 - `requirements-training.txt`: 训练侧 PyTorch 和绘图依赖版本。
 - `tools/preflight_training.py`: 第一次大规模训练前门禁。
 - `tools/sync_cloud_training_artifacts.py`: 只读同步云端轻量指标和曲线。

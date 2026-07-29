@@ -1,0 +1,5 @@
+-r requirements-training.txt
+
+# 仅模型导出/桌面一致性门禁使用；Android APK 通过 ONNX Runtime Java 依赖运行。
+onnx==1.19.1
+onnxruntime==1.22.1

@@ -1,0 +1,177 @@
+plugins {
+    id "com.android.application"
+    id "com.chaquo.python"
+}
+
+configurations {
+    natives
+}
+
+android {
+    namespace "com.fruitmerge.ai"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.fruitmerge.ai"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs = ["src/main/assets"]
+            jniLibs.srcDirs = ["src/main/jniLibs"]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += ["META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*"]
+        }
+    }
+}
+
+def configuredBuildPython = providers.gradleProperty("fruitMergeBuildPython")
+        .orElse(providers.environmentVariable("FRUIT_MERGE_BUILD_PYTHON"))
+        .orNull
+def projectPython = file("${System.getProperty("user.home")}/miniconda3/envs/python-torch/python.exe")
+
+chaquopy {
+    sourceSets {
+        main {
+            srcDir("src/main/python_generated")
+        }
+    }
+    defaultConfig {
+        version = "3.11"
+        if (configuredBuildPython != null && !configuredBuildPython.isBlank()) {
+            buildPython(configuredBuildPython)
+        } else if (projectPython.isFile()) {
+            buildPython(projectPython.absolutePath)
+        }
+        pyc {
+            src = false
+        }
+    }
+}
+
+dependencies {
+    implementation project(":core")
+    implementation "com.badlogicgames.gdx:gdx-backend-android:$gdxVersion"
+    implementation "com.badlogicgames.gdx:gdx-box2d:$gdxVersion"
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:$onnxRuntimeVersion"
+
+    natives "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-arm64-v8a"
+    natives "com.badlogicgames.gdx:gdx-box2d-platform:$gdxVersion:natives-arm64-v8a"
+}
+
+def generatedFruitAssets = layout.projectDirectory.dir("src/main/assets/fruits")
+def generatedModelAssets = layout.projectDirectory.dir("src/main/assets/model")
+def generatedNativeLibs = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
+def generatedPythonSources = layout.projectDirectory.dir("src/main/python_generated")
+
+tasks.register("syncFruitAssets", Sync) {
+    description = "Copies the canonical desktop fruit textures into Android assets."
+    group = "fruit merge"
+    from(rootProject.layout.projectDirectory.dir("../assets/fruits"))
+    into(generatedFruitAssets)
+    include("*.png")
+}
+
+tasks.register("syncMobileModel", Sync) {
+    description = "Copies the validated ONNX model and its ABI metadata into the APK."
+    group = "fruit merge"
+    from(rootProject.layout.projectDirectory.dir(
+            "../runs/mobile_export/size_transfer_560x1120_15k_best"
+    )) {
+        include("fruit_merge_ai.onnx", "fruit_merge_ai.metadata.json")
+    }
+    into(generatedModelAssets)
+    doLast {
+        def modelFile = generatedModelAssets.file("fruit_merge_ai.onnx").asFile
+        if (!modelFile.isFile() || modelFile.length() != 13828110L) {
+            throw new GradleException(
+                    "Validated mobile model is missing or has the wrong size: ${modelFile}"
+            )
+        }
+        def modelSha256 = java.security.MessageDigest
+                .getInstance("SHA-256")
+                .digest(modelFile.bytes)
+                .encodeHex()
+                .toString()
+        if (modelSha256 != "7e1c95c958799714579f75d8dbd8dc7b1e3ad182ab23fa3dac51306d4865e5f4") {
+            throw new GradleException(
+                    "Validated mobile model has the wrong SHA256: ${modelSha256}"
+            )
+        }
+    }
+}
+
+tasks.register("extractLibGdxAndroidNatives", Sync) {
+    description = "Extracts the arm64 libGDX and Box2D shared libraries for APK packaging."
+    group = "fruit merge"
+    dependsOn(configurations.natives)
+    into(generatedNativeLibs)
+    from({
+        configurations.natives.collect { archive -> zipTree(archive) }
+    })
+    include("*.so")
+}
+
+def syncMobilePythonSources = tasks.register("syncMobilePythonSources", Sync) {
+    description = "Copies only the pure-Python graph builder needed by Chaquopy."
+    group = "fruit merge"
+    from(rootProject.layout.projectDirectory.dir("../src")) {
+        include("daxigua/__init__.py")
+        include("daxigua/core/__init__.py")
+        include("daxigua/core/rules.py")
+        include("daxigua/core/state.py")
+        include("daxigua_mobile/**")
+        include("daxigua_rl/__init__.py")
+        include("daxigua_rl/reward.py")
+        include("daxigua_rl/attribution/__init__.py")
+        include("daxigua_rl/attribution/schema.py")
+        include("daxigua_rl/attribution/state_analyzer.py")
+        include("daxigua_rl/attribution/tracker.py")
+        include("daxigua_rl/graph/__init__.py")
+        include("daxigua_rl/graph/ablation.py")
+        include("daxigua_rl/graph/builder.py")
+        include("daxigua_rl/graph/schema.py")
+        include("daxigua_rl/training/__init__.py")
+        include("daxigua_rl/training/identity.py")
+        exclude("**/__pycache__/**", "**/*.pyc")
+    }
+    into(generatedPythonSources)
+}
+
+tasks.configureEach { task ->
+    if (
+            task.name != "syncMobilePythonSources"
+            && task.name.endsWith("PythonSources")
+    ) {
+        task.dependsOn(syncMobilePythonSources)
+    }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(
+            "syncFruitAssets",
+            "syncMobileModel",
+            "extractLibGdxAndroidNatives",
+            "syncMobilePythonSources"
+    )
+}
