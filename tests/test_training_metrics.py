@@ -658,6 +658,40 @@ class TrainingMetricsTest(unittest.TestCase):
                 'full state attribution requires'):
             validate_args(args)
 
+    def test_training_geometry_is_configurable_and_validated(self):
+        args = parse_args((
+            '--board-width',
+            '600',
+            '--board-height',
+            '1200',
+            '--spawn-y',
+            '270',
+        ))
+        validate_args(args)
+        env_config = build_env_config(args)
+        self.assertEqual(env_config.board_width, 600)
+        self.assertEqual(env_config.board_height, 1200)
+        self.assertEqual(env_config.spawn_y, 270)
+
+        invalid = parse_args((
+            '--board-height',
+            '100',
+            '--spawn-y',
+            '100',
+        ))
+        with self.assertRaisesRegex(ValueError, 'spawn-y'):
+            validate_args(invalid)
+
+    def test_resume_and_weights_only_initialization_are_exclusive(self):
+        args = parse_args((
+            '--resume',
+            'old.pt',
+            '--init-checkpoint',
+            'source.pt',
+        ))
+        with self.assertRaisesRegex(ValueError, 'mutually exclusive'):
+            validate_args(args)
+
     def test_central_actor_and_structural_cli_validation(self):
         args = parse_args((
             '--centralized-actor-inference',

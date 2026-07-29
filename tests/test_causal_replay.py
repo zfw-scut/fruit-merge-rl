@@ -782,7 +782,10 @@ class RuleCausalSampleBuilderTests(unittest.TestCase):
         self.assertEqual(result.stats.budget_count, 1)
         self.assertEqual(result.stats.generated_sample_count, 1)
         sample = result.samples[0]
-        self.assertEqual(sample.comparison_action_offset, 14)
+        self.assertEqual(
+            sample.comparison_action_offset,
+            ANALYSIS_ACTION_COUNT - 1,
+        )
         self.assertEqual(sample.direction, 1)
         self.assertEqual(sample.cause_type, 'DIRECT_TRIGGER')
         self.assertAlmostEqual(sample.target_margin, 4.0 * 0.90)
@@ -979,10 +982,16 @@ class RuleCausalSampleBuilderTests(unittest.TestCase):
         key = TransitionKey(0, 5, 0)
         event = _event(
             key=key,
-            contributors=(_contributor(key, action_offset=7),),
+            contributors=(_contributor(
+                key,
+                action_offset=ANALYSIS_ACTION_COUNT // 2,
+            ),),
         )
         builder = RuleCausalSampleBuilder()
-        builder.remember_context(_context(key, action_offset=7))
+        builder.remember_context(_context(
+            key,
+            action_offset=ANALYSIS_ACTION_COUNT // 2,
+        ))
 
         self.assertEqual(builder.build((event,)), ())
         self.assertEqual(

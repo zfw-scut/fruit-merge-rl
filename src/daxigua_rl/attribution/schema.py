@@ -22,10 +22,10 @@ from daxigua.core.rules import (
 from daxigua_rl.training.identity import TransitionKey
 
 
-ANALYSIS_ACTION_COUNT = 15
+ANALYSIS_ACTION_COUNT = 21
 QUEUE_LOOKAHEAD_COUNT = 4
 FULL_ACTION_MASK = (1 << ANALYSIS_ACTION_COUNT) - 1
-STATE_ANALYSIS_SCHEMA_VERSION = 2
+STATE_ANALYSIS_SCHEMA_VERSION = 3
 ATTRIBUTION_EVENT_SCHEMA_VERSION = 1
 LANDING_DEPTH_WEIGHT = 0.7
 SAFE_ACTION_WEIGHT = 0.3
@@ -132,7 +132,7 @@ def _boolean(name, value):
 
 
 def _action_mask(name, value):
-    """读取固定为 15 位、按 action offset 编位的动作掩码。"""
+    """读取固定为 21 位、按 action offset 编位的动作掩码。"""
 
     result = _integer(name, value)
     if result & ~FULL_ACTION_MASK:
@@ -170,7 +170,7 @@ def _id_tuple(name, values, *, own_id=None, minimum_length=0, sort_values=True):
 
 
 def _fixed_float_tuple(name, values, *, unit=False):
-    """规范化一个与 15 个 action offset 对齐的浮点 tuple。"""
+    """规范化一个与 21 个 action offset 对齐的浮点 tuple。"""
 
     result = tuple(
         (_unit_float if unit else _finite_float)(f'{name}[{offset}]', value)
@@ -395,7 +395,7 @@ class FruitAnalysis:
 
     @property
     def reachable_fraction(self):
-        """返回 15 个动作中仍可接近本水果的比例。"""
+        """返回 21 个动作中仍可接近本水果的比例。"""
 
         return self.reachable_action_count / ANALYSIS_ACTION_COUNT
 
@@ -680,7 +680,7 @@ class ChainMotif:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class QueueLaneAnalysis:
-    """队列一个槽位在 15 个动作列上的投放容量分析。"""
+    """队列一个槽位在 21 个动作列上的投放容量分析。"""
 
     queue_index: int
     level: int
@@ -783,7 +783,7 @@ class QueueLaneAnalysis:
 
     @property
     def mean_landing_depth(self):
-        """返回 15 个动作列的平均可深入程度。"""
+        """返回 21 个动作列的平均可深入程度。"""
 
         return sum(self.landing_depths_by_action) / ANALYSIS_ACTION_COUNT
 

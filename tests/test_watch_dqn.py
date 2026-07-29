@@ -2,11 +2,13 @@ import math
 import unittest
 from types import SimpleNamespace
 
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT
 from daxigua_rl.playable_adapter import board_is_stable
 from daxigua_rl.scripts.watch_dqn import (
     BoardStabilityGate,
     DQNVisualController,
     checkpoint_stable_window_seconds,
+    resolve_board_geometry,
 )
 
 
@@ -57,7 +59,7 @@ class _RecordingController(DQNVisualController):
         super().__init__(
             model=None,
             graph_builder=None,
-            action_count=15,
+            action_count=ANALYSIS_ACTION_COUNT,
             device=None,
             stable_window_seconds=stable_window_seconds,
             decision_delay_ms=decision_delay_ms,
@@ -70,6 +72,30 @@ class _RecordingController(DQNVisualController):
 
 
 class PlayableStabilityTests(unittest.TestCase):
+    def test_board_geometry_uses_new_defaults_checkpoint_and_cli_order(self):
+        self.assertEqual(resolve_board_geometry({}), (560, 1120, 252))
+        checkpoint_args = {
+            'board_width': 600,
+            'board_height': 1000,
+            'spawn_y': 210,
+        }
+        self.assertEqual(
+            resolve_board_geometry(checkpoint_args),
+            (600, 1000, 210),
+        )
+        self.assertEqual(
+            resolve_board_geometry(
+                checkpoint_args,
+                board_width=700,
+                board_height=1200,
+                spawn_y=280,
+            ),
+            (700, 1200, 280),
+        )
+
+        with self.assertRaisesRegex(ValueError, 'spawn_y'):
+            resolve_board_geometry({}, spawn_y=1120)
+
     def test_board_stability_matches_training_motion_thresholds(self):
         board = _FakeBoard()
 

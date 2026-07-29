@@ -9,7 +9,7 @@
 
 from dataclasses import dataclass, field
 
-from daxigua.config import FPS
+from daxigua.config import DEFAULT_WINDOW_SIZE, FPS, SPAWN_LINE_Y
 from daxigua.core.engine import HeadlessGame
 
 from .attribution import (
@@ -25,7 +25,10 @@ from .training.identity import TransitionKey
 class DaxiguaEnvConfig:
     """RL 环境配置。"""
 
-    action_count: int = 15
+    board_width: int = DEFAULT_WINDOW_SIZE[0]
+    board_height: int = DEFAULT_WINDOW_SIZE[1]
+    spawn_y: int = SPAWN_LINE_Y
+    action_count: int = ANALYSIS_ACTION_COUNT
     physics_fps: int = FPS
     max_physics_frames: int = 720
     stable_frames: int = 15
@@ -34,6 +37,17 @@ class DaxiguaEnvConfig:
     state_analyzer_config: StateAnalyzerConfig = field(
         default_factory=StateAnalyzerConfig
     )
+
+    def __post_init__(self):
+        """尽早拒绝无效几何，避免 ``HeadlessGame`` 把 0 静默解释为默认值。"""
+
+        self.board_width = int(self.board_width)
+        self.board_height = int(self.board_height)
+        self.spawn_y = int(self.spawn_y)
+        if self.board_width <= 0 or self.board_height <= 0:
+            raise ValueError('board dimensions must be positive')
+        if self.spawn_y < 0 or self.spawn_y >= self.board_height:
+            raise ValueError('spawn_y must be inside the board')
 
 
 class DaxiguaEnv:
@@ -47,6 +61,9 @@ class DaxiguaEnv:
 
         # 允许外部注入 HeadlessGame，便于后续做不同场地尺寸或固定队列实验。
         self.game = game or HeadlessGame(
+            width=self.config.board_width,
+            height=self.config.board_height,
+            spawn_y=self.config.spawn_y,
             fps=self.config.physics_fps,
             space_iterations=self.config.space_iterations,
         )
@@ -85,9 +102,24 @@ class DaxiguaEnv:
         game = HeadlessGame.from_snapshot(snapshot)
         if config is None:
             config = DaxiguaEnvConfig(
+                board_width=game.width,
+                board_height=game.height,
+                spawn_y=game.spawn_y,
                 physics_fps=game.fps,
                 space_iterations=game.space.iterations,
             )
+        geometry_fields = (
+            ('board_width', game.width),
+            ('board_height', game.height),
+            ('spawn_y', game.spawn_y),
+        )
+        for field_name, game_value in geometry_fields:
+            config_value = getattr(config, field_name)
+            if config_value != game_value:
+                raise ValueError(
+                    f'config.{field_name} must match EngineSnapshot '
+                    f'{field_name}: {config_value!r} != {game_value!r}'
+                )
         if config.physics_fps != game.fps:
             raise ValueError(
                 'config.physics_fps must match EngineSnapshot fps: '
@@ -349,7 +381,7 @@ class DaxiguaEnv:
             *,
             stable_boundary,
             incoming_transition_key=None):
-        """使用固定 15 条分析列生成只读状态快照。"""
+        """使用固定 21 条分析列生成只读状态快照。"""
 
         analysis_candidates = self.game.get_action_candidates(
             ANALYSIS_ACTION_COUNT

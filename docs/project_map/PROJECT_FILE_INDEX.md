@@ -1,6 +1,6 @@
 # 项目文件索引
 
-最后更新：2026-07-28
+最后更新：2026-07-29
 
 ## 项目定位
 
@@ -16,7 +16,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | 路径 | 作用 | 主要入口或可复用点 |
 | --- | --- | --- |
 | `Main.py` | 兼容旧启动方式的薄入口，将 `src/` 加入 import 路径后调用 `daxigua.app.main()`。 | `main()` |
-| `src/daxigua/app.py` | 游戏应用入口和当前表现层实现。负责固定窗口、输入、正式渲染、鼠标跟随投放、预览线、顶部独立信息层、待投放水果队列、HUD、粒子、飘字、震动和音效反馈。 | `Board.next_frame()`、`Board.run()`、`main()` |
+| `src/daxigua/app.py` | 游戏应用入口和当前表现层实现。负责当前 `560x1120 / spawn_y=252` 默认窗口、可选几何参数、输入、正式渲染、鼠标跟随投放、预览线、队列、HUD 和反馈。 | `Board.next_frame()`、`Board.run()`、`main()`、几何 CLI 参数 |
 | `src/daxigua/config.py` | 项目路径和基础配置。 | `PROJECT_ROOT`、`FRUIT_ASSET_DIR`、`DEFAULT_WINDOW_SIZE`、`SPAWN_LINE_Y`、`FPS` |
 | `src/daxigua/core/board.py` | 游戏公共逻辑。负责 pygame 画布、pymunk 物理世界、动态墙体、碰撞合成、计分、失败检测，并向表现层暴露合成事件钩子。 | `GameBoard`、`resize_world()`、`create_ball()`、`setup_collision_handler()`、`check_fail()` |
 | `src/daxigua/core/engine.py` | 无渲染游戏引擎。除投放、队列和稳定推进外，还能在稳定边界捕获、校验和恢复完整 Pymunk 状态，并审计原动作重演。 | `HeadlessGame`、`capture_snapshot()`、`restore_snapshot()`、`replay_and_compare_original_action()` |
@@ -24,12 +24,12 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua/core/rules.py` | 纯规则常量和辅助函数。集中维护水果半径、队列长度、随机生成范围、合成分数和物理半径。 | `FRUIT_RADII`、`FRUIT_QUEUE_LENGTH`、`fruit_radius()`、`merge_score()` |
 | `src/daxigua/core/state.py` | 训练友好的纯数据结构；水果和动作候选同时公开显示/碰撞半径，并定义版本化、带 checksum 的引擎快照及动作重演结果。 | `GameState`、`FruitState`、`ActionCandidate`、`EngineSnapshot`、`EngineActionOutcome`、`OriginalActionReplayReport` |
 | `src/daxigua_rl/` | 自动游玩/RL 相关代码。游戏本体不得 import 它。训练主链路通过 `HeadlessGame` 访问游戏；观看脚本可在 RL 侧懒加载真实 `Board`。 | `DaxiguaEnv`、`DaxiguaEnvConfig`、`README.md` 中记录边界规则 |
-| `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。一次 step 表示一次投放和无渲染物理稳定；在 worker 内缓存相邻 `StateAnalysis`、接收 collector 的 `TransitionKey` 并计算 Reward V2；可从兼容 `EngineSnapshot` 创建 live 分支。 | `DaxiguaEnv.reset()`、`DaxiguaEnv.step(...)`、`DaxiguaEnv.from_snapshot()` |
+| `src/daxigua_rl/env.py` | 类 Gymnasium 的 RL 环境壳层。显式保存场地宽高和生成线；一次 step 表示一次投放和无渲染物理稳定，在 worker 内缓存相邻 `StateAnalysis`、接收 `TransitionKey` 并计算 Reward V2；可从兼容 `EngineSnapshot` 创建 live 分支。 | `DaxiguaEnvConfig`、`DaxiguaEnv.reset()`、`DaxiguaEnv.step(...)`、`DaxiguaEnv.from_snapshot()` |
 | `src/daxigua_rl/reward.py` | Reward V2 纯计算层。按合成等级计算指数 task utility，并以相邻 `StateAnalysis` 的 C/R/K potential 差完成 shaping。 | `RewardConfig`、`RewardBreakdown`、`merge_utility()`、`compute_state_potential()`、`compute_reward()` |
 | `src/daxigua_rl/playable_adapter.py` | 真实 pygame 游戏窗口到 RL 输入结构的适配层。把正在运行的 `Board` 转成 `GameState` 和 `ActionCandidate`，并按训练速度阈值只读判断当前物理边界是否稳定。 | `board_game_state()`、`board_action_candidates()`、`board_is_stable()` |
 | `src/daxigua_rl/attribution/` | 完整状态归因模块。除只读状态/事件契约、静态分析器和历史归因器外，还包含独立因果 replay、反事实 proposal/任务/执行器与局部 Shapley。完整分析对象不进入主 TD replay。 | `StateAnalyzer`、`AttributionTracker`、`CausalReplayBuffer`、`CounterfactualProposalBuilder` |
-| `src/daxigua_rl/attribution/schema.py` | 固定 15 动作状态分析结构、时间语义、队列槽位、自由空间、谱系、贡献者、事件预算和 pending 结果不变量；全部类型可 pickle/Windows spawn。 | `StateAnalysis`、`AttributionEvent`、`AttributionStepResult`、`FruitLineageRecord`、`MergeLineageRecord` |
-| `src/daxigua_rl/attribution/state_analyzer.py` | 在动作前边界执行只读静态分析：解析圆形竖直列计算 15 动作可达性/队列容量，规范最小水果探针栅格计算顶部连通空间和空腔，并构建支撑、伙伴与基础连锁结构。 | `StateAnalyzer`、`StateAnalyzerConfig` |
+| `src/daxigua_rl/attribution/schema.py` | 固定 21 动作、schema v3 的状态分析结构、时间语义、队列槽位、自由空间、谱系、贡献者、事件预算和 pending 结果不变量；全部类型可 pickle/Windows spawn。 | `ANALYSIS_ACTION_COUNT`、`StateAnalysis`、`AttributionEvent`、`AttributionStepResult` |
+| `src/daxigua_rl/attribution/state_analyzer.py` | 在动作前边界执行只读静态分析：解析圆形竖直列计算 21 动作可达性/队列容量，规范最小水果探针栅格计算顶部连通空间和空腔，并构建支撑、伙伴与基础连锁结构。 | `StateAnalyzer`、`StateAnalyzerConfig` |
 | `src/daxigua_rl/attribution/tracker.py` | worker-local 因果归因状态机。按真实 drop/ordered merge 建立谱系和唯一价值包，追踪铺垫兑现、渐进通道损失、pending 封路/埋死、终局确认与 reset/truncated/shutdown 中断。 | `AttributionTracker`、`AttributionTrackerConfig`、`TrackerTransitionInput` |
 | `src/daxigua_rl/attribution/causal_replay.py` | 与主 TD replay 隔离的稀疏因果回放。把 confirmed 事件与原始图上下文转成正铺垫/负封路规则动作对，按类别公平采样，并保存可精确恢复的版本化状态。 | `CausalSample`、`CausalReplayBuffer`、`RuleCausalSampleBuilder`、`CausalTransitionContext` |
 | `src/daxigua_rl/attribution/counterfactual_proposal.py` | worker-local 反事实候选构建层。维护稳定边界快照环，跨步关联延迟事件、真实结果和原始动作轨迹，选择有限替代动作与 2～4 个 Shapley 候选。 | `CounterfactualHistoryRing`、`CounterfactualProposal`、`CounterfactualProposalBuilder` |
@@ -56,16 +56,17 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/training/local_shapley_coordinator.py` | 以一个独立 worker 管理极稀疏局部 Shapley 的筛选、共享预算预留、pending 重试、结果门禁与因果样本写入；task 在进入 multiprocessing 前显式序列化为 bytes，避免长期因果 graph 占用共享 FD。 | `LocalShapleyCoordinator`、`LocalShapleyCoordinatorStats` |
 | `src/daxigua_rl/training/checkpointing.py` | 原子、版本化训练 checkpoint。维护 run manifest、规范配置指纹、Python/PyTorch/CUDA RNG、可选组件状态及严格 resume 配置校验。 | `RunManifest`、`atomic_torch_save()`、`build_training_checkpoint()`、`load_training_checkpoint()` |
 | `src/daxigua_rl/scripts/` | 强化学习命令行脚本目录。用于放正式训练、评估、观看、导出等入口。 | `train_dqn.py`、`watch_dqn.py` |
-| `src/daxigua_rl/scripts/train_dqn.py` | 当前完整因果训练入口。组合 Double DQN + 3-step、主/因果 replay、并行采集、预算反事实、局部 Shapley、指标、评估、原子 checkpoint 与 hot-resume；保存配置/运行指纹及 warmup/shutdown/resume/failure sidecar。 | `python -m daxigua_rl.scripts.train_dqn --config ...`、`--resume ...` |
-| `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，复用原 pygame `Board` 画面；按 checkpoint 稳定窗口换算真实物理帧，只有连续稳定且拓扑未变化时才让控制器分析局面并选择落点。 | `python -m daxigua_rl.scripts.watch_dqn --checkpoint ...` |
-| `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。用于测试降低 fps、最大物理帧、稳定帧和 Pymunk 迭代次数后的速度收益与游戏分布偏移。 | `python -m daxigua_rl.scripts.compare_physics_modes --checkpoint ...`；输出 `summary.csv`、`episode_metrics.csv` 和 `plots/physics_mode_comparison.png`。 |
+| `src/daxigua_rl/scripts/train_dqn.py` | 当前完整因果训练入口。组合 Double DQN + 3-step、主/因果 replay、并行采集、预算反事实、局部 Shapley、指标、评估、原子 checkpoint 与 hot-resume；还支持从可信同架构 checkpoint 做 weights-only 新地图初始化。 | `--config ...`、`--resume ...`、`--init-checkpoint ...` |
+| `src/daxigua_rl/scripts/watch_dqn.py` | DQN 可视化观看入口。加载训练 checkpoint，并按 CLI > checkpoint > 当前默认值解析场地几何；只有连续稳定且拓扑未变化时才分析局面并投放。 | `--checkpoint ...`、几何 CLI 参数 |
+| `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。可显式选择场地几何，用于测试物理参数的速度收益与游戏分布偏移。 | `--checkpoint ...`、几何参数；输出指标和对比图。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
-| `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口。 | `train_dqn_causal_smoke_5k.toml`、`train_dqn_causal_calibration_10k.toml`、`train_dqn_causal_250k.toml`、`train_dqn_causal_500k.toml` |
+| `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口和一个 560x1120 尺寸迁移入口。 | `train_dqn_causal_*.toml`、`train_dqn_size_transfer_560x1120_50k.toml` |
 | `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：250k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套正式阶段配置继承它。 | `train_dqn.py --config ...` |
 | `configs/train_dqn_causal_smoke_5k.toml` | 第一次完整因果训练的 5000-update 集成烟测配置；算法与物理语义不降级，只覆盖规模和日志频率。 | 运行后才可记录烟测结论。 |
 | `configs/train_dqn_causal_calibration_10k.toml` | 10000-update 规模标定配置；若稀疏事件样本不足，可通过 CLI 覆盖从 update 0 另起独立 25000 校准。 | 不直接改变总步数恢复；用于校准量级，不预先代表已通过。 |
 | `configs/train_dqn_causal_250k.toml` | 第一次 250000-update 大规模训练的正式稳定启动名，继承完整冻结基线。 | 最终 preflight 通过后从 update 0 启动。 |
 | `configs/train_dqn_causal_500k.toml` | 可选 500000-update 延长实验；显式覆盖长度与目录，不能通过当前正式契约。 | 不用于第一次 250k 正式训练。 |
+| `configs/train_dqn_size_transfer_560x1120_50k.toml` | 从同架构 checkpoint 只继承模型权重，在 560x1120、21 动作新场景中重建训练状态并适配 50000 update。 | 与 `--init-checkpoint` 配套；不是 resume。 |
 | `scripts/` | 项目级启动脚本目录。放训练和只读观察服务的薄启动器，具体训练参数仍放在 `configs/`。 | `train_dqn.sh`、`training_dashboard.sh` |
 | `scripts/train_dqn.sh` | DQN 训练启动器。默认读取 `configs/train_dqn_causal_250k.toml`，设置 `PYTHONPATH`，通过 `python-torch` conda 环境启动训练并 tee 日志。 | `./scripts/train_dqn.sh` |
 | `scripts/training_dashboard.sh` | 云端训练面板生命周期入口。通过 `setsid` 后台运行服务，并以 PID、Linux 启动时刻、命令行和工作目录共同校验进程身份，避免 stop/restart 误伤训练。 | `start`、`stop`、`status`、`restart`；默认 `127.0.0.1:8765`。 |
@@ -111,7 +112,9 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `tests/test_structural_dqn_loss.py` | DQN 结构辅助训练测试。验证只监督实际动作、逐维 mask、`lambda_structural` 加权、旧无 target 样本和非有限值 fail-fast。 | 使用标准库 `unittest`，依赖 PyTorch。 |
 | `tests/test_centralized_actor_inference.py` | 集中式 actor 的 CPU 集成测试。验证多 worker 请求、微批统计、参数同步、采集结果和干净关闭；正式 CUDA 吞吐仍在云端烟测验证。 | 使用标准库 `unittest`，依赖 PyTorch multiprocessing。 |
 | `tests/test_attribution_foundations.py` | 完整状态归因基础语义测试。验证稳定窗口、truncated bootstrap、真实碰撞半径、图几何和 worker/episode/step 身份键。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
-| `tests/test_attribution_schema.py` | `StateAnalysis` 数据契约测试。验证深只读、15 位 mask、队列槽位、跨对象引用、时间语义、pickle 和真实 Windows spawn 往返。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
+| `tests/test_attribution_schema.py` | `StateAnalysis` 数据契约测试。验证深只读、21 位 mask、队列槽位、跨对象引用、时间语义、pickle 和真实 Windows spawn 往返。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
+| `tests/test_game_geometry.py` | 当前 560x1120/252 默认画面、21 个候选投放动作、投放及物理推进测试。 | SDL dummy 下运行。 |
+| `tests/test_size_transfer.py` | weights-only checkpoint 初始化测试。验证严格模型加载、target 同步、旧几何来源记录、训练状态重置和架构不匹配拒绝。 | 使用临时可信版本化 checkpoint。 |
 | `tests/test_state_analyzer.py` | `StateAnalyzer` 人工几何场景测试。验证空棋盘、解析投放列与并列 blocker、支撑方向、伙伴/merge/ladder motif、封闭空腔、输入降级和左右镜像。 | 使用标准库 `unittest`，不依赖 Pymunk 随机稳定过程。 |
 | `tests/test_reward_v2.py` | Reward V2 纯公式和契约测试。验证指数合成效用、potential 权重、轨迹望远镜关系、相邻分析身份以及 terminal/truncated 差异。 | 不推进真实 Pymunk 物理。 |
 | `tests/test_reward_v2_integration.py` | Reward V2 环境与采集集成测试。验证 StateAnalysis 缓存、worker/episode/step 键、terminal/truncated、统计合并及 Windows spawn 边界。 | 使用标准库 `unittest`。 |
@@ -216,7 +219,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
   正确率与额外耗时。
 - `train_dqn.py`：完整训练入口，除 CSV、评估和曲线外，还保存反事实预算/重演、
   Shapley、主/因果 replay、运行指纹及 warmup/shutdown/resume/failure sidecar；
-  checkpoint 支持严格配置校验和 hot-resume。
+  checkpoint 支持严格配置校验、hot-resume 和 weights-only 新 run 初始化。
 - `training_dashboard.py`：把训练 CSV、资源监控 CSV/JSONL、阶段控制心跳和白名单
   PNG 投影为只读 HTTP API；服务端不加载模型、不写训练目录，也不向训练进程发信号。
 - `training_dashboard.sh`：面板独立生命周期入口；默认回环监听并对 PID 记录做多重
@@ -225,10 +228,10 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `watch_dqn.py`：模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `export_training_catalog.py`：扫描被 Git 忽略的训练输出，生成配置快照、指标摘要、产物清单和跨实验索引，方便迁移后复盘训练数据。
 - `compare_physics_modes.py`：物理模式对比入口，用已有 checkpoint 或随机策略比较 accurate 与 fast 模式的速度、分数、局长、物理帧、合成频率和截断率。
-- `StateAnalysis`：worker 内的完整状态归因快照。15 位 mask 按 `action_offset`
+- `StateAnalysis`：worker 内的完整状态归因快照。21 位 mask 按 `action_offset`
   编位，保存 q0-q3 独立投放横坐标、真实/探针物理半径、自由空间区域、支撑/接触
   证据、伙伴分量和连锁 motif；不写入主 replay。
-- `StateAnalyzer`：从稳定 `GameState`、15 个动作候选和 `TransitionKey` 生成
+- `StateAnalyzer`：从稳定 `GameState`、21 个动作候选和 `TransitionKey` 生成
   `StateAnalysis`。它只做静态只读近似，不推进物理；已通过环境接入 Reward V2，
   并把相邻分析交给历史 `AttributionTracker`。
 - `AttributionTracker`：每个 rollout worker 独立维护的历史归因器。它建立完整水果
@@ -243,14 +246,14 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `tools/preflight_training.py`：正式启动前重复运行的短门禁；其 JSON 结果是运行证据，
   配置文件存在本身不代表门禁、烟测或标定已通过。
 - `scripts/train_dqn.sh`：TOML 配置启动器，默认读取 `configs/train_dqn_fast30_parallel.toml`，也可以传入其它配置文件路径；Linux 启动时默认把 `nofile` soft limit 提升到 hard limit 允许的 65535 并记录实际值。
-- `resize_world(width, height)`：按窗口尺寸重设 pygame 画布和 pymunk 边界。当前手动游戏窗口固定，此函数主要作为内部调试或未来实验工具保留。
+- `resize_world(width, height, spawn_y=None)`：按场地尺寸和生成线重设 pygame 画布与 pymunk 边界。
 - `setup_collision_handler()`：水果合成逻辑所在位置，已兼容新版 `pymunk.Space.on_collision`，并在合成后调用可选的 `on_fruit_merged()`。
 
 ## 已知注意事项
 
 - 游戏运行时直接读取 `assets/fruits/`，不再需要手动解压资源。
-- 当前手动游戏窗口固定为 `400x800`，不再通过拖动窗口边框改变场地大小。
-- 顶部信息层和当前悬浮水果层已经分开；生成线固定为 `180px`，用于避免待投放队列与当前水果视野冲突。
+- 当前默认场景固定为 `560x1120`、生成线为 `252px`；水果尺寸和物理参数不随场地缩放。
+- 正式状态分析使用 21 个投放位置。旧 15 动作 replay/mask 不兼容；同架构 checkpoint 只能通过 weights-only 初始化进入新 run。
 - `daxigua` 游戏本体不得 import `daxigua_rl`；训练、环境和模型代码只通过稳定游戏接口访问游戏。
 - `watch_dqn.py` 是视觉检查用入口，会在脚本内部懒加载 `daxigua.app.Board` 并打开真实 pygame 窗口；这不是训练路径，也不要求游戏本体 import RL。
 - 旧的框架无关 `Transition` 已删除；正式训练主链路只保存 `TensorTransition`。

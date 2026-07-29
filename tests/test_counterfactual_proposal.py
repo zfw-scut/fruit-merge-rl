@@ -78,8 +78,11 @@ class CounterfactualProposalContractTest(unittest.TestCase):
             proposal.trigger_reasons,
             ('middle_placement_confidence',),
         )
-        # mirror 与 q0-q3 最安全动作相同，必须稳定去重。
-        self.assertEqual(proposal.alternative_action_offsets, (14,))
+        # 21 列下 mirror=20 与最安全动作 14 不同，两者都应稳定保留。
+        self.assertEqual(
+            proposal.alternative_action_offsets,
+            (20, 14),
+        )
         self.assertEqual(proposal.delay, 2)
         self.assertEqual(
             proposal.proposal_id,

@@ -328,6 +328,9 @@ def _env_config(task):
     payload = task.target_policy
     snapshot_config = task.snapshot.config
     return DaxiguaEnvConfig(
+        board_width=snapshot_config.width,
+        board_height=snapshot_config.height,
+        spawn_y=snapshot_config.spawn_y,
         action_count=ANALYSIS_ACTION_COUNT,
         physics_fps=snapshot_config.fps,
         max_physics_frames=payload.max_physics_frames,

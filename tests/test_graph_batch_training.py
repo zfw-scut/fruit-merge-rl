@@ -11,6 +11,7 @@ from unittest import mock
 import torch
 
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder, ReplayBuffer
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT
 from daxigua_rl.graph.tensor import collate_graph_tensors, graph_to_tensor
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.training import (
@@ -365,7 +366,7 @@ class GraphBatchTrainingTest(unittest.TestCase):
         collector = ParallelRolloutCollector(
             worker_count=2,
             env_config=DaxiguaEnvConfig(
-                action_count=15,
+                action_count=ANALYSIS_ACTION_COUNT,
                 physics_fps=30,
                 max_physics_frames=80,
                 stable_frames=3,

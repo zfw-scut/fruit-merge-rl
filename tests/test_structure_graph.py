@@ -216,7 +216,7 @@ def _actions(level=1, *, action_count=ANALYSIS_ACTION_COUNT):
 
 
 def _analyze(state):
-    """为测试状态生成与其 step 对齐的规范 15 列分析。"""
+    """为测试状态生成与其 step 对齐的规范 21 列分析。"""
 
     actions = _actions(state.fruit_queue[0])
     analysis = StateAnalyzer().analyze(
@@ -344,7 +344,7 @@ class StructureGraphCompatibilityTest(unittest.TestCase):
             )
 
     def test_seven_policy_actions_map_to_nearest_analysis_columns(self):
-        """测试用 7 动作策略仍应复用规范 15 列，而不是错用 action_index。"""
+        """测试用 7 动作策略仍应复用规范 21 列，而不是错用 action_index。"""
 
         state = _state((_fruit(1, 1, 200, 760),))
         _analysis_actions, analysis = _analyze(state)

@@ -20,13 +20,18 @@ ASSETS_DIR = PROJECT_ROOT / 'assets'
 # 水果贴图目录，要求包含 01.png 到 11.png。
 FRUIT_ASSET_DIR = ASSETS_DIR / 'fruits'
 
-# 固定窗口尺寸。保留原始 400x800 纵向空间，避免场地过矮影响手动游戏体验。
-DEFAULT_WINDOW_SIZE = (400, 800)
+# 旧版训练场地只用于解释迁移 checkpoint 的来源，不再作为运行默认值。
+LEGACY_WINDOW_SIZE = (400, 800)
+LEGACY_SPAWN_LINE_Y = 180
+
+# 当前项目场地长宽均在旧版基础上扩大 40%。水果尺寸与物理参数保持不变，
+# 因此这是实际可用空间扩大，而不是把整张画面等比拉伸。
+DEFAULT_WINDOW_SIZE = (560, 1120)
 
 # 水果生成线 / 死亡警戒线的 y 坐标。
 # 当前顶部有独立信息层展示分数和待投放队列，生成线下移到信息层下方，
 # 避免当前悬浮水果与队列预览互相遮挡。
-SPAWN_LINE_Y = 180
+SPAWN_LINE_Y = 252
 
 # 目标帧率。物理世界每帧也按这个频率推进固定步长。
 FPS = 120

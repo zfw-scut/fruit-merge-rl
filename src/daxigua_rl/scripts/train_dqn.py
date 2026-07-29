@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import math
 import os
@@ -32,7 +33,13 @@ from pathlib import Path
 import torch
 import pymunk
 
-from daxigua.config import FPS
+from daxigua.config import (
+    DEFAULT_WINDOW_SIZE,
+    FPS,
+    LEGACY_SPAWN_LINE_Y,
+    LEGACY_WINDOW_SIZE,
+    SPAWN_LINE_Y,
+)
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder, ReplayBuffer
 from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT
 from daxigua_rl.attribution.causal_replay import CausalReplayBuffer
@@ -486,7 +493,30 @@ def build_arg_parser():
 
     # 环境参数。
     parser.add_argument('--seed', type=int, default=0, help='随机种子。')
-    parser.add_argument('--action-count', type=int, default=15, help='离散候选投放动作数量。')
+    parser.add_argument(
+        '--action-count',
+        type=int,
+        default=ANALYSIS_ACTION_COUNT,
+        help='离散候选投放动作数量；当前完整归因规范固定为 21。',
+    )
+    parser.add_argument(
+        '--board-width',
+        type=int,
+        default=DEFAULT_WINDOW_SIZE[0],
+        help='headless 场地宽度；当前默认 560。',
+    )
+    parser.add_argument(
+        '--board-height',
+        type=int,
+        default=DEFAULT_WINDOW_SIZE[1],
+        help='headless 场地高度；当前默认 1120。',
+    )
+    parser.add_argument(
+        '--spawn-y',
+        type=int,
+        default=SPAWN_LINE_Y,
+        help='水果生成线/失败警戒线 y 坐标；当前默认 252。',
+    )
     parser.add_argument(
         '--physics-mode',
         choices=('accurate', 'fast30'),
@@ -548,6 +578,14 @@ def build_arg_parser():
         '--resume',
         default=None,
         help='从可信 checkpoint 恢复；默认继续写 checkpoint 所属 run 目录。',
+    )
+    parser.add_argument(
+        '--init-checkpoint',
+        default=None,
+        help=(
+            '从可信版本化 checkpoint 只加载 online 模型权重并开始一个新 run；'
+            '不恢复 optimizer、replay、RNG 或训练步数，适合尺寸迁移。'
+        ),
     )
     parser.add_argument(
         '--overwrite-run-dir',
@@ -651,6 +689,8 @@ def validate_args(args):
         'hidden_dim',
         'message_layers',
         'action_count',
+        'board_width',
+        'board_height',
         'physics_fps',
         'max_physics_frames',
         'stable_frames',
@@ -669,6 +709,14 @@ def validate_args(args):
         raise ValueError(
             'full state attribution requires '
             f'--action-count {ANALYSIS_ACTION_COUNT}'
+        )
+    if int(args.spawn_y) < 0 or int(args.spawn_y) >= int(args.board_height):
+        raise ValueError(
+            '--spawn-y must be >= 0 and smaller than --board-height'
+        )
+    if args.resume and args.init_checkpoint:
+        raise ValueError(
+            '--resume and --init-checkpoint are mutually exclusive'
         )
 
     non_negative_intervals = (
@@ -923,6 +971,25 @@ def resolve_resume_location(args):
     return checkpoint_path
 
 
+def resolve_initialization_location(args):
+    """校验 weights-only 初始化来源，且不把它解释为原 run 的 resume。"""
+
+    if not args.init_checkpoint:
+        return None
+    if args.resume:
+        raise ValueError(
+            '--init-checkpoint cannot be combined with --resume'
+        )
+    checkpoint_path = Path(
+        args.init_checkpoint
+    ).expanduser().resolve()
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            f'initialization checkpoint not found: {checkpoint_path}'
+        )
+    return checkpoint_path
+
+
 def set_random_seeds(seed):
     """设置 Python 和 PyTorch 随机种子。"""
 
@@ -961,6 +1028,17 @@ def build_env_config(args):
         ),
     )
     return DaxiguaEnvConfig(
+        board_width=getattr(
+            args,
+            'board_width',
+            DEFAULT_WINDOW_SIZE[0],
+        ),
+        board_height=getattr(
+            args,
+            'board_height',
+            DEFAULT_WINDOW_SIZE[1],
+        ),
+        spawn_y=getattr(args, 'spawn_y', SPAWN_LINE_Y),
         action_count=args.action_count,
         # 兼容旧测试对象或旧 checkpoint 参数：没有新字段时继续使用当前项目默认值。
         physics_fps=getattr(args, 'physics_fps', FPS),
@@ -2054,7 +2132,9 @@ def write_config(
         trainer_config,
         counterfactual_config,
         shapley_config,
-        resume_checkpoint=None):
+        resume_checkpoint=None,
+        init_checkpoint=None,
+        initialization_state=None):
     """冻结完整解析配置、归因契约、依赖和代码身份。"""
 
     config = {
@@ -2088,6 +2168,14 @@ def write_config(
         'resume_checkpoint': (
             str(resume_checkpoint)
             if resume_checkpoint is not None
+            else None
+        ),
+        'initialization': (
+            {
+                'checkpoint': str(init_checkpoint),
+                **(initialization_state or {}),
+            }
+            if init_checkpoint is not None
             else None
         ),
     }
@@ -4378,11 +4466,143 @@ def load_resume_training_state(
     }
 
 
+def load_initial_model_weights(
+        checkpoint_path,
+        *,
+        args,
+        online_model,
+        target_model):
+    """只继承可信 checkpoint 的策略权重，返回可写入 JSON 的迁移报告。
+
+    这是一个新 run 的初始化操作，不是 resume。加载器会完整校验版本化
+    checkpoint，但刻意不传 components、也不恢复 RNG；旧 optimizer、主/因果
+    replay、update/env 计数和 epsilon 因而不会进入新尺寸训练。
+    """
+
+    payload = load_training_checkpoint(
+        checkpoint_path,
+        map_location='cpu',
+        restore_rng=False,
+        components=None,
+    )
+    training_state = None
+    try:
+        manifest = RunManifest.from_dict(payload['run_manifest'])
+        source_config = manifest.config
+        architecture_fields = (
+            'hidden_dim',
+            'message_layers',
+            'activation',
+            'dropout',
+        )
+        mismatches = []
+        for field_name in architecture_fields:
+            if field_name not in source_config:
+                mismatches.append(
+                    f'{field_name}: source=<missing> '
+                    f'target={getattr(args, field_name)!r}'
+                )
+                continue
+            source_value = source_config[field_name]
+            target_value = getattr(args, field_name)
+            if source_value != target_value:
+                mismatches.append(
+                    f'{field_name}: source={source_value!r} '
+                    f'target={target_value!r}'
+                )
+        if mismatches:
+            raise ValueError(
+                'initialization checkpoint model architecture mismatch: '
+                + '; '.join(mismatches)
+            )
+
+        training_state = payload['training_state']
+        if 'online_model' not in training_state:
+            raise ValueError(
+                'initialization checkpoint has no online_model state'
+            )
+        source_update_step = int(training_state.get('update_step', -1))
+        if source_update_step < 0:
+            raise ValueError(
+                'initialization checkpoint update_step must be non-negative'
+            )
+
+        # strict=True 同时验证所有 tensor 键和 shape。目标网络从同一组权重复制，
+        # 而不是继承旧 run 中可能滞后若干 update 的 target_model。
+        online_model.load_state_dict(
+            training_state['online_model'],
+            strict=True,
+        )
+        target_model.load_state_dict(
+            online_model.state_dict(),
+            strict=True,
+        )
+
+        # 首次 250K 的 checkpoint 生成于几何字段进入 manifest 之前；
+        # 缺字段时按其真实旧场地记录，而不是误报为当前新默认值。
+        default_width, default_height = LEGACY_WINDOW_SIZE
+        report = {
+            'mode': 'weights_only',
+            'source_checkpoint': str(Path(checkpoint_path).resolve()),
+            'source_checkpoint_bytes': int(
+                Path(checkpoint_path).stat().st_size
+            ),
+            'source_manifest_created_at_utc': manifest.created_at_utc,
+            'source_config_fingerprint': manifest.config_fingerprint,
+            'source_update_step': source_update_step,
+            'source_env_steps': int(
+                training_state.get('env_steps', 0)
+            ),
+            'source_geometry': {
+                'board_width': int(source_config.get(
+                    'board_width',
+                    default_width,
+                )),
+                'board_height': int(source_config.get(
+                    'board_height',
+                    default_height,
+                )),
+                'spawn_y': int(source_config.get(
+                    'spawn_y',
+                    LEGACY_SPAWN_LINE_Y,
+                )),
+            },
+            'target_geometry': {
+                'board_width': int(args.board_width),
+                'board_height': int(args.board_height),
+                'spawn_y': int(args.spawn_y),
+            },
+            'inherited_state': [
+                'online_model',
+                'target_model_copied_from_online',
+            ],
+            'reset_state': [
+                'optimizer',
+                'td_replay',
+                'causal_replay',
+                'rng',
+                'update_step',
+                'env_steps',
+                'epsilon_schedule',
+                'best_eval',
+                'rollout_episodes',
+            ],
+        }
+    finally:
+        # 正式 checkpoint 还包含数 GB replay。权重复制完成后尽快释放反序列化
+        # payload，避免随后启动 rollout/反事实 worker 时保留无用内存峰值。
+        training_state = None
+        payload = None
+        gc.collect()
+    return report
+
+
 def train(args):
     """执行完整训练流程。"""
 
     validate_args(args)
     resume_checkpoint = resolve_resume_location(args)
+    init_checkpoint = resolve_initialization_location(args)
     device = resolve_device(args.device)
     run_dir = create_run_dir(
         args.run_dir,
@@ -4431,6 +4651,7 @@ def train(args):
         causal_replay_buffer=causal_replay_buffer,
     )
     resume_state = None
+    initialization_state = None
     if resume_checkpoint is not None:
         resume_state = load_resume_training_state(
             resume_checkpoint,
@@ -4442,6 +4663,13 @@ def train(args):
             trainer=trainer,
             replay_buffer=replay_buffer,
             causal_replay_buffer=causal_replay_buffer,
+        )
+    elif init_checkpoint is not None:
+        initialization_state = load_initial_model_weights(
+            init_checkpoint,
+            args=args,
+            online_model=online_model,
+            target_model=target_model,
         )
     resume_update_step = (
         resume_state['update_step'] if resume_state is not None else 0
@@ -4509,6 +4737,7 @@ def train(args):
                 'state_analyzer_fingerprint': (
                     env_config.state_analyzer_config.fingerprint
                 ),
+                'weights_initialization': initialization_state,
             },
         )
     )
@@ -4521,7 +4750,19 @@ def train(args):
         counterfactual_config=counterfactual_config,
         shapley_config=shapley_config,
         resume_checkpoint=resume_checkpoint,
+        init_checkpoint=init_checkpoint,
+        initialization_state=initialization_state,
     )
+    if initialization_state is not None:
+        _atomic_json_write(
+            run_dir / 'initialization.json',
+            {
+                'created_at': datetime.now().isoformat(
+                    timespec='seconds'
+                ),
+                **initialization_state,
+            },
+        )
 
     metrics = MetricLogger(
         run_dir / 'metrics.csv',
@@ -4627,6 +4868,18 @@ def train(args):
     metric_window = CollectStatsWindow()
 
     print(f'run_dir={run_dir}', flush=True)
+    print(
+        f'board_geometry={args.board_width}x{args.board_height} '
+        f'spawn_y={args.spawn_y}',
+        flush=True,
+    )
+    if initialization_state is not None:
+        print(
+            'initialization=weights_only '
+            f'source_update={initialization_state["source_update_step"]} '
+            f'source={init_checkpoint}',
+            flush=True,
+        )
     print(f'device={device} matplotlib_output={run_dir / "plots" / "training_curves.png"}', flush=True)
     print(
         'physics_mode={} 物理模式={} | fps={} | max_frames={} 最大物理帧={} | '

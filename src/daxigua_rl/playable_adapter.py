@@ -11,6 +11,8 @@ import math
 from daxigua.core.rules import dropped_fruit_physics_radius, fruit_radius
 from daxigua.core.state import ActionCandidate, BoardGeometry, FruitState, GameState
 
+from .attribution.schema import ANALYSIS_ACTION_COUNT
+
 
 STABLE_VELOCITY_EPSILON = 35.0
 STABLE_ANGULAR_VELOCITY_EPSILON = 4.0
@@ -69,7 +71,9 @@ def board_is_stable(
     )
 
 
-def board_action_candidates(board, action_count=15):
+def board_action_candidates(
+        board,
+        action_count=ANALYSIS_ACTION_COUNT):
     """根据当前 pygame `Board` 生成离散投放动作候选。
 
     返回值和 `HeadlessGame.get_action_candidates()` 保持同一数据结构，

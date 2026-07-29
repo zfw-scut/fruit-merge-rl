@@ -32,6 +32,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder  # noqa: E402
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT  # noqa: E402
 from daxigua_rl.models import GNNQNetwork  # noqa: E402
 
 
@@ -39,7 +40,7 @@ def parse_args():
     """解析命令行参数。
 
     参数默认值尽量贴近当前环境接口：
-    - 15 个候选动作；
+    - 21 个候选动作；
     - 每一步最多推进 720 帧物理；
     - 连续稳定 15 帧后认为本次投放结束。
     """
@@ -62,7 +63,7 @@ def parse_args():
     parser.add_argument(
         '--action-count',
         type=int,
-        default=15,
+        default=ANALYSIS_ACTION_COUNT,
         help='每个状态生成多少个离散候选投放动作。',
     )
     parser.add_argument(

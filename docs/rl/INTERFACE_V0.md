@@ -167,7 +167,7 @@ RewardConfig(
 
 `DaxiguaEnv` 为每个 worker 持有一个 `StateAnalyzer`。初始 step 分析当前和下一
 边界；之后正常连续 step 复用上一轮的 next analysis，因此通常每次投放只新增一次
-分析。分析始终使用规范 15 动作列，即使某些小型测试用更少策略动作。
+分析。分析始终使用规范 21 动作列，即使某些小型测试用更少策略动作。
 
 `DaxiguaEnv.step()` 的 `info` 包含：
 
@@ -215,7 +215,7 @@ next-state C/R/K，供短跑校准 shaping 是否压过真实合成效用。
 事件键包含 `(worker_id, episode_id, event_index)`，贡献动作使用完整
 `TransitionKey`。`AttributionEvent` 还保存 `attribution_version` 和 tracker 配置
 指纹。tracker 对象、事件、谱系和 pending 状态均可 pickle，兼容 Windows spawn。
-归因动作必须和规范 15 列分析一一对应；正式训练固定 `action_count=15`，tracker 会
+归因动作必须和规范 21 列分析一一对应；正式训练固定 `action_count=21`，tracker 会
 拒绝其它动作数或与分析列不一致的 action index/drop x，避免把责任写到错误 Q 下标。
 
 只有显式接触路径才能产生 `MECHANICAL_TRIGGER`、接触型 motif 破坏等机械归因。
@@ -263,14 +263,14 @@ next-state C/R/K，供短跑校准 shaping 是否压过真实合成效用。
 
 - `StateAnalysis`: 一个动作前稳定边界的完整分析快照。
 - `FruitAnalysis`: 单水果可达性、伙伴、支撑、埋藏和等级倒置摘要。
-- `QueueLaneAnalysis`: q0 到 q3 各自在 15 个动作列上的投放容量。
+- `QueueLaneAnalysis`: q0 到 q3 各自在 21 个动作列上的投放容量。
 - `FreeSpaceRegionAnalysis`: 规范最小水果探针下的顶部连通空间或封闭空腔。
 - `SupportEdge`: 方向固定为 supporter -> supported fruit 的稳定约束。
 - `ContactInfluenceEdge`: 产生当前边界的前一动作所留下的压缩接触证据。
 - `PartnerComponent`、`ChainMotif`: 同级伙伴分量和局部连锁结构。
 - `StateAnalysisDiagnostics`: 稳定性、归因有效性、降级码和分析耗时。
 - `StateAnalyzerConfig`: 分析容差、栅格精度和结构阈值配置。
-- `StateAnalyzer`: 从 `GameState`、15 个动作候选和 `TransitionKey` 生成完整快照。
+- `StateAnalyzer`: 从 `GameState`、21 个动作候选和 `TransitionKey` 生成完整快照。
 
 导入方式：
 
@@ -291,15 +291,15 @@ analysis = analyzer.analyze(
   `analysis[t] -> analysis[t+1]`。
 - 如果状态携带前一动作的接触证据，`incoming_transition_key` 必须指向同 episode
   的 `t-1`；初始边界没有 incoming key。
-- 动作 mask 固定为 15 位，并按 `action_offset` 编位。
+- 动作 mask 固定为 21 位，并按 `action_offset` 编位。
   `action_indices[offset]` 单独保存环境动作号，避免和 Q 值下标混淆。
-- q0 到 q3 各自保存 15 个 `drop_x_by_action`。水果半径不同会改变合法投放区间，
+- q0 到 q3 各自保存 21 个 `drop_x_by_action`。水果半径不同会改变合法投放区间，
   不能让后续队列槽复用 q0 的横坐标。
 - `FruitAnalysis.physics_radius` 是当前 shape 半径；
   `probe_physics_radius` 是未来直接投放同级水果时用于路径膨胀的半径。
 - `probe_physics_radius` 和每个队列槽的 `physics_radius` 必须符合游戏本体当前等级的
   直接投放半径规则；场上 `physics_radius` 仍保留真实 shape 值，不能按等级重算。
-- 所有数据类均为 frozen、slots、深 tuple 数据；mask/count、15 项数组、比例范围、
+- 所有数据类均为 frozen、slots、深 tuple 数据；mask/count、21 项数组、比例范围、
   当前水果引用和支撑缓存会在构造时校验。
 - 场上水果等级限制为 1 到 11，队列槽等级限制为可直接投放的 1 到 4；每槽
   `capacity` 和 q0-q3 聚合后的 `top_connected_capacity` 必须与 Reward V2 公式一致。
@@ -565,7 +565,7 @@ CausalSample
 ```
 
 `RuleCausalSampleBuilder` 只消费 confirmed 事件，并从
-`CausalTransitionContext` 找回原始状态图和规范 15 动作。正铺垫选择结构更差的合法
+`CausalTransitionContext` 找回原始状态图和规范 21 动作。正铺垫选择结构更差的合法
 比较动作，负封路选择保留更多容量的安全动作；没有可信比较动作时只记录跳过原因。
 同一个 merge budget 不复制 Reward V2 任务价值。
 
@@ -709,7 +709,7 @@ src/daxigua_rl/scripts/train_dqn.py
 
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
-  tools/preflight_training.py --config configs/train_dqn_causal_500k.toml
+  tools/preflight_training.py --config configs/train_dqn_causal_250k.toml
 ```
 
 门禁验证解析后的正式配置、Python/Pymunk/Chipmunk、CUDA 模型前后向、完整因果
@@ -722,7 +722,8 @@ optimizer step、局部 Shapley 物理链路、多次 `EngineSnapshot` 重演、
 | --- | --- |
 | `train_dqn_causal_smoke_5k.toml` | 5000 update 集成烟测 |
 | `train_dqn_causal_calibration_10k.toml` | 10000 update 标定；样本不足时从 update 0 另起独立 25000 校准 |
-| `train_dqn_causal_500k.toml` | 第一次 500000 update 正式训练 |
+| `train_dqn_causal_250k.toml` | 第一次 250000 update 正式训练 |
+| `train_dqn_size_transfer_560x1120_50k.toml` | 同架构 weights-only 新地图适配候选 |
 
 配置文件存在不代表相应运行已经通过；结果必须以实际 run 产物为准。
 
@@ -760,6 +761,7 @@ warmup 随机收集经验
 ```text
 runs/dqn_YYYYMMDD_HHMMSS/
 ├── config.json
+├── initialization.json                # 仅 weights-only 初始化时
 ├── metrics.csv
 ├── episode_metrics.csv
 ├── attribution_warmup.json
@@ -817,7 +819,7 @@ checkpoint 使用同目录临时文件、`fsync` 和 `os.replace` 原子写入�
 ```bash
 PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
   -m daxigua_rl.scripts.train_dqn \
-  --config configs/train_dqn_causal_500k.toml \
+  --config configs/train_dqn_causal_250k.toml \
   --resume runs/<run>/checkpoints/latest.pt
 ```
 
@@ -825,6 +827,23 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
 `--overwrite-run-dir` 组合。加载前按配置指纹拒绝模型、Reward、物理、replay、
 因果预算等训练语义漂移；允许变化的字段只限总更新数、输出路径、日志/保存/评估/绘图
 频率和 resume 控制字段。
+
+### weights-only 尺寸迁移
+
+当前默认环境几何为 `560x1120 / spawn_y=252`，完整归因固定 21 个投放动作。
+同架构旧场景 checkpoint 可作为新 run 的网络初始化：
+
+```bash
+PYTHONPATH=src conda run --no-capture-output -n python-torch python -u \
+  -m daxigua_rl.scripts.train_dqn \
+  --config configs/train_dqn_size_transfer_560x1120_50k.toml \
+  --init-checkpoint runs/<old_run>/checkpoints/step_00120000.pt
+```
+
+`--init-checkpoint` 与 `--resume` 互斥。入口只 strict-load 源 online 模型，并把它
+复制到新 target；optimizer、TD/causal replay、RNG、epsilon、update/env 计数、
+评估历史和 rollout episode 全部重置。继承来源、源/目标几何和重置清单写入
+`initialization.json`。旧 15 动作 replay/mask 不兼容 21 动作新 run。
 
 纯内存 TD replay 和 `CausalReplayBuffer` 精确恢复。正式 hybrid TD replay 只恢复
 checkpoint 中保存的热层，因此称为 hot-resume；`resume_<时间戳>.json` 明确记录
@@ -916,6 +935,8 @@ PYTHONPATH=src conda run --no-capture-output -n python-torch python -u -m daxigu
 
 - `--checkpoint`: 必填，训练脚本保存的 checkpoint 路径。
 - `--action-count`: 候选投放动作数量；默认读取 checkpoint 中的训练参数。
+- `--board-width` / `--board-height` / `--spawn-y`: 可选观看几何；优先于 checkpoint，
+  checkpoint 缺字段时使用当前 `560x1120 / 252` 默认值。
 - `--decision-delay-ms`: 模型选定落点后等待多久再投放，默认 `240` 毫秒，方便肉眼看清当前水果移动到哪里。
 - `--print-actions`: 每次投放时打印 action、drop_x 和 Q 值摘要，便于对照画面调试。
 

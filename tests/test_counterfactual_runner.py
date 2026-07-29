@@ -29,7 +29,10 @@ from daxigua_rl.attribution.counterfactual_runner import (
     freeze_target_policy_payload,
     run_counterfactual_task,
 )
-from daxigua_rl.attribution.schema import AttributionEventKey
+from daxigua_rl.attribution.schema import (
+    ANALYSIS_ACTION_COUNT,
+    AttributionEventKey,
+)
 from daxigua_rl.attribution.state_analyzer import (
     StateAnalyzer,
     StateAnalyzerConfig,
@@ -123,7 +126,9 @@ def _build_fixture():
     # capture 会规范化原 game；真实 outcome 必须从规范化后的同一个实例继续执行。
     snapshot = game.capture_snapshot()
     state = game.get_state()
-    candidates = tuple(game.get_action_candidates(15))
+    candidates = tuple(
+        game.get_action_candidates(ANALYSIS_ACTION_COUNT)
+    )
     transition_key = TransitionKey(0, 0, state.step_count)
     analyzer = StateAnalyzer(
         config=payload.state_analyzer_config

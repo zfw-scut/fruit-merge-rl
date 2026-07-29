@@ -8,6 +8,7 @@ import unittest
 import torch
 
 from daxigua_rl import DaxiguaEnvConfig, ReplayBuffer
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.training import ParallelRolloutCollector
 
@@ -31,8 +32,8 @@ class CentralizedActorInferenceTest(unittest.TestCase):
             worker_count=2,
             env_config=DaxiguaEnvConfig(
                 # ParallelRolloutCollector 的正式 worker 默认启用完整归因，
-                # 因而必须使用规范 15 动作列。
-                action_count=15,
+                # 因而必须使用当前规范动作列。
+                action_count=ANALYSIS_ACTION_COUNT,
                 physics_fps=30,
                 max_physics_frames=40,
                 stable_frames=2,

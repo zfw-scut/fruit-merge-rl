@@ -138,7 +138,7 @@ def _state(
 
 
 def _actions(level=1, *, first_index=0):
-    """按游戏公开规则生成固定 15 个动作候选。"""
+    """按游戏公开规则生成当前规范数量的动作候选。"""
 
     positions = drop_x_positions_for_level(
         GEOMETRY,
@@ -183,13 +183,13 @@ def _analyze(state, *, actions=None, stable_boundary=True):
 
 
 def _mask(*offsets):
-    """把动作 offset 集合转换为 15 位掩码。"""
+    """把动作 offset 集合转换为当前规范位数的掩码。"""
 
     return sum(1 << offset for offset in offsets)
 
 
 def _mirror_mask(mask):
-    """左右翻转固定 15 位动作掩码。"""
+    """左右翻转固定宽度的动作掩码。"""
 
     result = 0
     for offset in range(ANALYSIS_ACTION_COUNT):
@@ -218,7 +218,10 @@ class StateAnalyzerEmptyBoardTest(unittest.TestCase):
         analysis = _analyze(_state())
 
         self.assertEqual(len(analysis.queue_lane_analyses), 4)
-        self.assertEqual(analysis.action_indices, tuple(range(15)))
+        self.assertEqual(
+            analysis.action_indices,
+            tuple(range(ANALYSIS_ACTION_COUNT)),
+        )
         self.assertEqual(
             analysis.action_drop_x_by_offset,
             tuple(action.drop_x for action in _actions()),
@@ -281,15 +284,18 @@ class StateAnalyzerEmptyBoardTest(unittest.TestCase):
 class StateAnalyzerReachabilityTest(unittest.TestCase):
     """验证解析竖直通道的可达、阻挡和层级倒置语义。"""
 
-    def test_floor_level_one_fruit_is_directly_reachable_from_three_columns(self):
+    def test_floor_level_one_fruit_is_reachable_from_nearby_columns(self):
         target = _fruit(1, 1, 200, 760)
 
         analysis = _analyze(_state((target,)))
         fruit = analysis.get_fruit(1)
 
         self.assertIsNotNone(fruit)
-        self.assertEqual(fruit.reachable_action_mask, _mask(6, 7, 8))
-        self.assertEqual(fruit.reachable_action_count, 3)
+        self.assertEqual(
+            fruit.reachable_action_mask,
+            _mask(8, 9, 10, 11, 12),
+        )
+        self.assertEqual(fruit.reachable_action_count, 5)
         self.assertAlmostEqual(fruit.top_visible_ratio, 1.0)
         self.assertTrue(fruit.partner_reachable)
         self.assertEqual(fruit.inversion_count, 0)
@@ -337,8 +343,8 @@ class StateAnalyzerReachabilityTest(unittest.TestCase):
         analysis = _analyze(_state((right, left)))
         q0 = analysis.queue_lane_analyses[0]
 
-        self.assertEqual(q0.blocker_ids_by_action[7], (1, 2))
-        self.assertLess(q0.landing_depths_by_action[7], 1.0)
+        self.assertEqual(q0.blocker_ids_by_action[10], (1, 2))
+        self.assertLess(q0.landing_depths_by_action[10], 1.0)
 
     def test_partial_path_loss_does_not_create_final_cap_evidence(self):
         target = _fruit(1, 1, 200, 740)
@@ -347,7 +353,7 @@ class StateAnalyzerReachabilityTest(unittest.TestCase):
         analysis = _analyze(_state((target, partial_blocker)))
         fruit = analysis.get_fruit(1)
 
-        self.assertEqual(fruit.reachable_action_mask, _mask(8))
+        self.assertEqual(fruit.reachable_action_mask, _mask(12))
         self.assertEqual(fruit.critical_blocker_ids, ())
         self.assertNotIn(
             (2, 1, 'caps'),
@@ -368,7 +374,10 @@ class StateAnalyzerReachabilityTest(unittest.TestCase):
         analysis = _analyze(_state((target, above_spawn)))
         fruit = analysis.get_fruit(1)
 
-        self.assertEqual(fruit.reachable_action_mask, _mask(6, 7, 8))
+        self.assertEqual(
+            fruit.reachable_action_mask,
+            _mask(8, 9, 10, 11, 12),
+        )
         self.assertTrue(
             all(
                 2 not in blockers

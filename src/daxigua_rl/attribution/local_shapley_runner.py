@@ -46,6 +46,7 @@ from .counterfactual_runner import (
     _load_target_model,
 )
 from .schema import (
+    ANALYSIS_ACTION_COUNT,
     AttributionEventKey,
     MergeValueKey,
 )
@@ -923,7 +924,10 @@ def _env_config(task):
     payload = task.target_policy
     snapshot_config = task.snapshot.config
     return DaxiguaEnvConfig(
-        action_count=15,
+        board_width=snapshot_config.width,
+        board_height=snapshot_config.height,
+        spawn_y=snapshot_config.spawn_y,
+        action_count=ANALYSIS_ACTION_COUNT,
         physics_fps=snapshot_config.fps,
         max_physics_frames=payload.max_physics_frames,
         stable_frames=payload.stable_frames,

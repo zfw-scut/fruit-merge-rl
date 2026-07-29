@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 
-from daxigua.config import FPS
+from daxigua.config import DEFAULT_WINDOW_SIZE, FPS, SPAWN_LINE_Y
 from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT, StateAnalyzer
 from daxigua_rl.graph import GraphBuilder
 from daxigua_rl.models import GNNQNetwork
@@ -30,7 +30,7 @@ from daxigua_rl.training.checkpointing import (
 from daxigua_rl.training.identity import TransitionKey
 
 
-def parse_args():
+def parse_args(argv=None):
     """解析观看脚本参数。"""
 
     parser = argparse.ArgumentParser(description='加载 DQN checkpoint，并用原游戏画面观看模型游玩。')
@@ -39,13 +39,31 @@ def parse_args():
     parser.add_argument('--action-count', type=int, default=None, help='候选动作数量；默认读取 checkpoint args。')
     parser.add_argument('--seed', type=int, default=None, help='观看时的随机种子；默认读取 checkpoint args。')
     parser.add_argument(
+        '--board-width',
+        type=int,
+        default=None,
+        help='观看场地宽度；默认读取 checkpoint，缺字段时使用当前默认 560。',
+    )
+    parser.add_argument(
+        '--board-height',
+        type=int,
+        default=None,
+        help='观看场地高度；默认读取 checkpoint，缺字段时使用当前默认 1120。',
+    )
+    parser.add_argument(
+        '--spawn-y',
+        type=int,
+        default=None,
+        help='生成线 y 坐标；默认读取 checkpoint，缺字段时使用当前默认 252。',
+    )
+    parser.add_argument(
         '--decision-delay-ms',
         type=int,
         default=240,
         help='局面稳定且模型选定落点后等待多久再投放，方便肉眼观察。',
     )
     parser.add_argument('--print-actions', action='store_true', help='在终端打印每次模型选择的动作和 Q 值摘要。')
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def resolve_device(device_name):
@@ -91,6 +109,44 @@ def checkpoint_stable_window_seconds(checkpoint_args):
     if stable_frames <= 0:
         raise ValueError('checkpoint stable_frames must be positive')
     return float(stable_frames) / float(physics_fps)
+
+
+def resolve_board_geometry(
+        checkpoint_args,
+        *,
+        board_width=None,
+        board_height=None,
+        spawn_y=None):
+    """按“命令行 > checkpoint > 当前默认值”解析观看场地。
+
+    旧 checkpoint 没有保存显式几何字段时直接使用当前新默认场地；如需审计
+    历史画面，调用者仍可显式传入尺寸，但项目不再维护旧尺寸为默认路径。
+    """
+
+    default_width, default_height = DEFAULT_WINDOW_SIZE
+    width = (
+        checkpoint_args.get('board_width', default_width)
+        if board_width is None
+        else board_width
+    )
+    height = (
+        checkpoint_args.get('board_height', default_height)
+        if board_height is None
+        else board_height
+    )
+    resolved_spawn_y = (
+        checkpoint_args.get('spawn_y', SPAWN_LINE_Y)
+        if spawn_y is None
+        else spawn_y
+    )
+    width = int(width)
+    height = int(height)
+    resolved_spawn_y = int(resolved_spawn_y)
+    if width <= 0 or height <= 0:
+        raise ValueError('board width and height must be positive')
+    if resolved_spawn_y < 0 or resolved_spawn_y >= height:
+        raise ValueError('spawn_y must be inside the board')
+    return width, height, resolved_spawn_y
 
 
 class BoardStabilityGate:
@@ -280,7 +336,12 @@ class DQNVisualController:
         return action
 
 
-def create_dqn_board(controller):
+def create_dqn_board(
+        controller,
+        *,
+        board_width=None,
+        board_height=None,
+        spawn_y=None):
     """懒加载原游戏 Board，并创建带 DQN 控制器的子类实例。"""
 
     from daxigua.app import Board
@@ -290,7 +351,11 @@ def create_dqn_board(controller):
 
         def __init__(self, controller):
             self.ai_controller = controller
-            super().__init__()
+            super().__init__(
+                board_width=board_width,
+                board_height=board_height,
+                spawn_y=spawn_y,
+            )
 
         def reset(self):
             """重开或终局清场时同步清除观看控制器的稳定窗口。"""
@@ -329,7 +394,19 @@ def main():
         random.seed(int(seed))
         torch.manual_seed(int(seed))
 
-    action_count = args.action_count or int(checkpoint_args.get('action_count', 15))
+    action_count = (
+        args.action_count
+        or int(checkpoint_args.get(
+            'action_count',
+            ANALYSIS_ACTION_COUNT,
+        ))
+    )
+    board_width, board_height, spawn_y = resolve_board_geometry(
+        checkpoint_args,
+        board_width=args.board_width,
+        board_height=args.board_height,
+        spawn_y=args.spawn_y,
+    )
     model = build_model_from_checkpoint(checkpoint, device)
     controller = DQNVisualController(
         model=model,
@@ -343,7 +420,12 @@ def main():
         print_actions=args.print_actions,
     )
 
-    board = create_dqn_board(controller)
+    board = create_dqn_board(
+        controller,
+        board_width=board_width,
+        board_height=board_height,
+        spawn_y=spawn_y,
+    )
     board.run()
 
 

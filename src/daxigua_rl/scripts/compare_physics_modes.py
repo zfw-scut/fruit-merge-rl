@@ -23,8 +23,9 @@ from pathlib import Path
 
 import torch
 
-from daxigua.config import FPS
+from daxigua.config import DEFAULT_WINDOW_SIZE, FPS, SPAWN_LINE_Y
 from daxigua_rl import DaxiguaEnv, DaxiguaEnvConfig, GraphBuilder
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT
 from daxigua_rl.models import GNNQNetwork
 from daxigua_rl.reward import RewardConfig
 from daxigua_rl.training import TransitionKey
@@ -146,7 +147,7 @@ class EpisodeResult:
     final_height_ratio: float
 
 
-def parse_args():
+def parse_args(argv=None):
     """解析物理模式对比命令行参数。"""
 
     parser = argparse.ArgumentParser(description='对比 accurate 和 fast 物理模式的速度与游戏分布差异。')
@@ -156,7 +157,10 @@ def parse_args():
     parser.add_argument('--episodes', type=int, default=20, help='每种物理模式评估多少局。')
     parser.add_argument('--max-steps', type=int, default=500, help='每局最多投放多少次，防止极端长局。')
     parser.add_argument('--seed', type=int, default=0, help='基准随机种子；各模式会复用同一批 episode seed。')
-    parser.add_argument('--action-count', type=int, default=None, help='候选动作数量；默认读取 checkpoint args 或使用 15。')
+    parser.add_argument('--action-count', type=int, default=None, help='候选动作数量；默认读取 checkpoint args 或使用当前规范 21。')
+    parser.add_argument('--board-width', type=int, default=None, help='场地宽度；默认读取 checkpoint 或使用当前默认 560。')
+    parser.add_argument('--board-height', type=int, default=None, help='场地高度；默认读取 checkpoint 或使用当前默认 1120。')
+    parser.add_argument('--spawn-y', type=int, default=None, help='生成线 y 坐标；默认读取 checkpoint 或使用当前默认 252。')
     parser.add_argument('--run-dir', default=None, help='输出目录；默认 runs/physics_mode_compare_YYYYMMDD_HHMMSS。')
     parser.add_argument('--progress-interval', type=float, default=3.0, help='每多少秒打印一次实时进度；0 表示关闭。')
 
@@ -180,7 +184,7 @@ def parse_args():
     parser.add_argument('--chain-readiness-weight', type=float, default=0.1, help='连锁就绪度 K(s) 的 potential 权重。')
     parser.add_argument('--terminal-penalty', type=float, default=0.0, help='真实终局的可选额外惩罚；Reward V2 默认关闭。')
 
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def validate_args(args):
@@ -203,6 +207,14 @@ def validate_args(args):
 
     if args.action_count is not None and int(args.action_count) <= 0:
         raise ValueError('--action-count must be positive')
+    for field_name in ('board_width', 'board_height'):
+        value = getattr(args, field_name)
+        if value is not None and int(value) <= 0:
+            raise ValueError(
+                f'--{field_name.replace("_", "-")} must be positive'
+            )
+    if args.spawn_y is not None and int(args.spawn_y) < 0:
+        raise ValueError('--spawn-y must be >= 0')
     if args.progress_interval < 0.0:
         raise ValueError('--progress-interval must be >= 0')
     if not math.isfinite(args.gamma) or args.gamma < 0.0 or args.gamma > 1.0:
@@ -336,7 +348,7 @@ def build_model_from_checkpoint(checkpoint, device):
 
 
 def resolve_action_count(args, checkpoint):
-    """决定候选动作数量，优先使用命令行，其次使用 checkpoint，最后回到默认 15。"""
+    """决定候选动作数量，优先使用命令行，其次 checkpoint，最后用当前规范。"""
 
     if args.action_count is not None:
         return int(args.action_count)
@@ -344,8 +356,45 @@ def resolve_action_count(args, checkpoint):
         checkpoint_args, _online_model_state = (
             extract_inference_checkpoint(checkpoint)
         )
-        return int(checkpoint_args.get('action_count', 15))
-    return 15
+        return int(checkpoint_args.get(
+            'action_count',
+            ANALYSIS_ACTION_COUNT,
+        ))
+    return ANALYSIS_ACTION_COUNT
+
+
+def resolve_board_geometry(args, checkpoint):
+    """决定对比场地，优先使用 CLI，其次 checkpoint，最后当前默认值。"""
+
+    checkpoint_args = {}
+    if checkpoint is not None:
+        checkpoint_args, _online_model_state = (
+            extract_inference_checkpoint(checkpoint)
+        )
+    default_width, default_height = DEFAULT_WINDOW_SIZE
+    width = (
+        args.board_width
+        if args.board_width is not None
+        else checkpoint_args.get('board_width', default_width)
+    )
+    height = (
+        args.board_height
+        if args.board_height is not None
+        else checkpoint_args.get('board_height', default_height)
+    )
+    spawn_y = (
+        args.spawn_y
+        if args.spawn_y is not None
+        else checkpoint_args.get('spawn_y', SPAWN_LINE_Y)
+    )
+    width = int(width)
+    height = int(height)
+    spawn_y = int(spawn_y)
+    if width <= 0 or height <= 0:
+        raise ValueError('resolved board dimensions must be positive')
+    if spawn_y < 0 or spawn_y >= height:
+        raise ValueError('resolved spawn_y must be inside the board')
+    return width, height, spawn_y
 
 
 def build_reward_config(args):
@@ -366,6 +415,17 @@ def run_episode(mode, args, action_count, reward_config, model, graph_builder, d
 
     env = DaxiguaEnv(
         config=DaxiguaEnvConfig(
+            board_width=getattr(
+                args,
+                'board_width',
+                DEFAULT_WINDOW_SIZE[0],
+            ),
+            board_height=getattr(
+                args,
+                'board_height',
+                DEFAULT_WINDOW_SIZE[1],
+            ),
+            spawn_y=getattr(args, 'spawn_y', SPAWN_LINE_Y),
             action_count=action_count,
             physics_fps=mode.fps,
             max_physics_frames=mode.max_physics_frames,
@@ -715,6 +775,11 @@ def run_comparison(args):
     model = build_model_from_checkpoint(checkpoint, device)
     policy_name = 'checkpoint' if model is not None else 'random'
     action_count = resolve_action_count(args, checkpoint)
+    (
+        args.board_width,
+        args.board_height,
+        args.spawn_y,
+    ) = resolve_board_geometry(args, checkpoint)
     reward_config = build_reward_config(args)
     modes = build_mode_specs(args)
     graph_builder = GraphBuilder()
@@ -729,6 +794,11 @@ def run_comparison(args):
     print(f'run_dir={run_dir}', flush=True)
     print(f'policy={policy_name} 策略={policy_name}', flush=True)
     print(f'action_count={action_count} 候选动作数={action_count}', flush=True)
+    print(
+        f'board_geometry={args.board_width}x{args.board_height} '
+        f'spawn_y={args.spawn_y}',
+        flush=True,
+    )
     print(f'episodes_per_mode={args.episodes} 每种模式局数={args.episodes}', flush=True)
 
     all_episode_rows = []

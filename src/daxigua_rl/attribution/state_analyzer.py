@@ -113,7 +113,7 @@ def _bounded_mean(values):
 class StateAnalyzerConfig:
     """控制静态分析精度、容差和结构搜索预算。
 
-    默认值针对 400x800 棋盘和几十颗水果设置。配置会进入确定性 fingerprint，
+    默认值针对 560x1120 棋盘和几十颗水果设置。配置会进入确定性 fingerprint，
     因而训练记录可以区分不同分析口径。
     """
 

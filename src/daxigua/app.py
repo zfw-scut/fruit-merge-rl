@@ -12,6 +12,7 @@
 后续如果继续拆分表现层，再按真实需要新增模块，避免提前创建空包占位。
 """
 
+import argparse
 import math
 import random
 from array import array
@@ -251,7 +252,12 @@ class Board(GameBoard):
     输入、固定窗口渲染、特效、音效和主循环。
     """
 
-    def __init__(self):
+    def __init__(
+            self,
+            *,
+            board_width=None,
+            board_height=None,
+            spawn_y=None):
         # 当前手动游戏使用固定窗口，避免人工体验和后续训练观察受窗口尺寸变化影响。
         self.display_flags = 0
 
@@ -262,7 +268,14 @@ class Board(GameBoard):
         self.gravity = (0, 1800)
 
         # 初始化核心棋盘、pygame surface、pymunk space 等基础对象。
-        GameBoard.__init__(self, self.create_time, self.gravity)
+        GameBoard.__init__(
+            self,
+            self.create_time,
+            self.gravity,
+            width=board_width,
+            height=board_height,
+            spawn_y=spawn_y,
+        )
 
         # 设置窗口标题。
         pg.display.set_caption('Merge Melon')
@@ -953,10 +966,52 @@ class Board(GameBoard):
             self.next_frame()
 
 
-def main():
-    """创建游戏对象并启动主循环。"""
+def build_arg_parser():
+    """创建手动游戏参数解析器。
 
-    game = Board()
+    尺寸参数只改变当前进程中的物理世界；不传参数时使用当前项目默认
+    ``560x1120 / spawn_y=252``。
+    """
+
+    parser = argparse.ArgumentParser(
+        description='运行可手动游玩的合成大西瓜。',
+    )
+    parser.add_argument(
+        '--board-width',
+        type=int,
+        default=None,
+        help='场地宽度；默认 560。',
+    )
+    parser.add_argument(
+        '--board-height',
+        type=int,
+        default=None,
+        help='场地高度；默认 1120。',
+    )
+    parser.add_argument(
+        '--spawn-y',
+        type=int,
+        default=None,
+        help='水果生成线/失败警戒线 y 坐标；默认 252。',
+    )
+    return parser
+
+
+def parse_args(argv=None):
+    """解析手动游戏命令行参数，便于测试和其它入口复用。"""
+
+    return build_arg_parser().parse_args(argv)
+
+
+def main(argv=None):
+    """创建指定尺寸的游戏对象并启动主循环。"""
+
+    args = parse_args(argv)
+    game = Board(
+        board_width=args.board_width,
+        board_height=args.board_height,
+        spawn_y=args.spawn_y,
+    )
     game.run()
 
 

@@ -163,6 +163,21 @@ class CheckpointingTest(unittest.TestCase):
             },
         )
 
+    def test_weights_only_source_path_is_mutable_on_later_resume(self):
+        original = {
+            'seed': 3,
+            'init_checkpoint': 'old/source.pt',
+            'total_updates': 100,
+        }
+        manifest = self._manifest(original)
+        resumed = {
+            **original,
+            'init_checkpoint': None,
+            'total_updates': 200,
+        }
+
+        checkpointing.validate_resume_config(manifest, resumed)
+
     def test_python_and_torch_cpu_rng_round_trip(self):
         random.seed(1234)
         torch.manual_seed(5678)

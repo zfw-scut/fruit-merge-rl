@@ -323,7 +323,7 @@ class GraphBuilder:
         )
 
         # motif 与成员水果、兼容队列槽和全部动作双向相连。尤其是 action 边会把
-        # 15 位 trigger mask 拆成逐 action 的 0/1，避免把 mask 整数误当连续特征。
+        # 21 位 trigger mask 拆成逐 action 的 0/1，避免把 mask 整数误当连续特征。
         if structure is not None:
             self._connect_chain_motifs(
                 structure,
@@ -422,9 +422,9 @@ class GraphBuilder:
                     'full action layout must match state_analysis '
                     'action_indices and drop_x exactly'
                 )
-            # StateAnalyzer 的规范协议固定 15 列，但小型测试环境仍允许 1/3/7
+            # StateAnalyzer 的规范协议固定 21 列，但小型测试环境仍允许 1/3/7
             # 个策略动作。此时按真实 drop_x 映射到最近的规范列，不按两边恰好都
-            # 从 0 开始的 action_index 猜位置；正式 15 动作训练仍走上面的精确路径。
+            # 从 0 开始的 action_index 猜位置；正式 21 动作训练仍走上面的精确路径。
             analysis_offsets = tuple(
                 min(
                     range(len(analyzed_positions)),
@@ -1173,7 +1173,7 @@ class GraphBuilder:
             motif_member_ids = frozenset(motif.fruit_ids)
 
             # 每个动作都连到 motif，trigger mask 的第 a 位只写到第 a 个动作边。
-            # 这种逐 action 展开保证网络不会把 15 位 mask 的二进制数值大小误当成
+            # 这种逐 action 展开保证网络不会把 21 位 mask 的二进制数值大小误当成
             # “更强触发”，也让未触发动作显式看到保护/破坏风险。
             for action_offset, action_node in enumerate(action_node_indices):
                 analysis_offset = structure.analysis_offsets[
@@ -1512,7 +1512,7 @@ class GraphBuilder:
 
     @staticmethod
     def _mask_contains(mask, action_offset):
-        """按 action offset 解码 15 位分析 mask 中的一位。"""
+        """按 action offset 解码 21 位分析 mask 中的一位。"""
 
         return bool(mask & (1 << action_offset))
 

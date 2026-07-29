@@ -29,6 +29,7 @@ from daxigua_rl.attribution.local_shapley_runner import (
     run_local_shapley_task,
 )
 from daxigua_rl.attribution.schema import (
+    ANALYSIS_ACTION_COUNT,
     AttributionEvent,
     AttributionEventKey,
     AttributionEvidence,
@@ -51,7 +52,9 @@ def _history_entry(
         comparison_action_offset):
     snapshot = game.capture_snapshot()
     state = game.get_state()
-    candidates = tuple(game.get_action_candidates(15))
+    candidates = tuple(
+        game.get_action_candidates(ANALYSIS_ACTION_COUNT)
+    )
     key = TransitionKey(0, 0, state.step_count)
     analysis = StateAnalyzer(
         config=payload.state_analyzer_config

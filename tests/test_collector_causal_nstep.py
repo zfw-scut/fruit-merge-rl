@@ -11,6 +11,7 @@ from daxigua_rl import (
     GraphBuilder,
 )
 from daxigua_rl.attribution.causal_replay import CausalReplayBuffer
+from daxigua_rl.attribution import ANALYSIS_ACTION_COUNT
 from daxigua_rl.attribution.counterfactual_proposal import (
     CounterfactualProposal,
 )
@@ -86,7 +87,7 @@ class CollectorCausalNStepTest(unittest.TestCase):
 
     def test_rule_samples_keep_action_pre_state_and_policy_provenance(self):
         env = DaxiguaEnv(config=DaxiguaEnvConfig(
-            action_count=15,
+            action_count=ANALYSIS_ACTION_COUNT,
             max_physics_frames=300,
             stable_frames=6,
         ))
@@ -127,10 +128,13 @@ class CollectorCausalNStepTest(unittest.TestCase):
         for sample in samples:
             self.assertEqual(sample.policy_version, 'policy-test-1')
             self.assertEqual(sample.actual_action_offset, 0)
-            self.assertEqual(sample.comparison_action_offset, 14)
+            self.assertEqual(
+                sample.comparison_action_offset,
+                ANALYSIS_ACTION_COUNT - 1,
+            )
             self.assertEqual(
                 sample.graph.action_indices.tolist(),
-                list(range(15)),
+                list(range(ANALYSIS_ACTION_COUNT)),
             )
 
         # episode 边界必须先让 tracker 解决事件并构建标签，再丢弃整局 context。
@@ -220,7 +224,7 @@ class CollectorCausalNStepTest(unittest.TestCase):
 
     def test_counterfactual_default_off_never_captures_snapshot(self):
         env = DaxiguaEnv(config=DaxiguaEnvConfig(
-            action_count=15,
+            action_count=ANALYSIS_ACTION_COUNT,
             max_physics_frames=240,
             stable_frames=6,
         ))
@@ -248,7 +252,7 @@ class CollectorCausalNStepTest(unittest.TestCase):
 
     def test_single_collector_generates_drains_and_clears_proposals(self):
         env = DaxiguaEnv(config=DaxiguaEnvConfig(
-            action_count=15,
+            action_count=ANALYSIS_ACTION_COUNT,
             max_physics_frames=300,
             stable_frames=6,
         ))
@@ -318,7 +322,7 @@ class CollectorCausalNStepTest(unittest.TestCase):
 
     def test_single_collector_throttles_only_proposal_transfer(self):
         env = DaxiguaEnv(config=DaxiguaEnvConfig(
-            action_count=15,
+            action_count=ANALYSIS_ACTION_COUNT,
             max_physics_frames=300,
             stable_frames=6,
         ))
@@ -362,7 +366,7 @@ class CollectorCausalNStepTest(unittest.TestCase):
 
     def test_counterfactual_ring_expiry_reports_skip_without_fake_proposal(self):
         env = DaxiguaEnv(config=DaxiguaEnvConfig(
-            action_count=15,
+            action_count=ANALYSIS_ACTION_COUNT,
             max_physics_frames=300,
             stable_frames=6,
         ))
@@ -397,7 +401,7 @@ class CollectorCausalNStepTest(unittest.TestCase):
         collector = ParallelRolloutCollector(
             worker_count=2,
             env_config=DaxiguaEnvConfig(
-                action_count=15,
+                action_count=ANALYSIS_ACTION_COUNT,
                 physics_fps=30,
                 max_physics_frames=80,
                 stable_frames=3,

@@ -182,6 +182,12 @@ class DaxiguaEnvSnapshotTest(unittest.TestCase):
         self.assertIs(env.state_analyzer.config, analyzer_config)
 
         inferred = DaxiguaEnv.from_snapshot(snapshot)
+        self.assertEqual(inferred.config.board_width, snapshot.config.width)
+        self.assertEqual(
+            inferred.config.board_height,
+            snapshot.config.height,
+        )
+        self.assertEqual(inferred.config.spawn_y, snapshot.config.spawn_y)
         self.assertEqual(inferred.config.physics_fps, FAST_FPS)
         self.assertEqual(
             inferred.config.space_iterations,
@@ -200,6 +206,16 @@ class DaxiguaEnvSnapshotTest(unittest.TestCase):
                     space_iterations=FAST_ITERATIONS + 1,
                 ),
             )
+        for field_name, value in (
+                ('board_width', snapshot.config.width + 1),
+                ('board_height', snapshot.config.height + 1),
+                ('spawn_y', snapshot.config.spawn_y + 1)):
+            with self.subTest(field_name=field_name):
+                with self.assertRaisesRegex(ValueError, field_name):
+                    DaxiguaEnv.from_snapshot(
+                        snapshot,
+                        config=_env_config(**{field_name: value}),
+                    )
         with self.assertRaisesRegex(TypeError, 'DaxiguaEnvConfig'):
             DaxiguaEnv.from_snapshot(snapshot, config=object())
 

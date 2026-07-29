@@ -205,7 +205,7 @@ class RewardV2EnvironmentIntegrationTest(unittest.TestCase):
         analyzer = _CountingAnalyzer()
         env = DaxiguaEnv(
             config=DaxiguaEnvConfig(
-                # 环境动作数可以较小，但状态分析必须始终使用规范 15 列。
+                # 环境动作数可以较小，但状态分析必须始终使用规范 21 列。
                 action_count=3,
                 reward_config=RewardConfig(gamma=0.99),
             ),
@@ -483,7 +483,7 @@ class RewardV2CollectorIntegrationTest(unittest.TestCase):
 
     def test_reward_config_env_config_and_stats_survive_spawn_pickle(self):
         config = DaxiguaEnvConfig(
-            action_count=15,
+            action_count=ANALYSIS_ACTION_COUNT,
             physics_fps=30,
             max_physics_frames=240,
             stable_frames=6,

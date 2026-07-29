@@ -1,0 +1,35 @@
+# 400x800 -> 560x1120（长宽各 +40%）的 weights-only 尺寸迁移候选配置。
+#
+# 启动时必须另外传入可信 V2 checkpoint：
+#   --init-checkpoint runs/<old_run>/checkpoints/step_00120000.pt
+#
+# `--init-checkpoint` 只继承 online 网络；target 从 online 同步，optimizer、
+# TD/causal replay、RNG、epsilon、update/env 计数全部从新 run 重新开始。
+extends = "train_dqn_fast30_parallel.toml"
+
+[runtime]
+run_dir = "runs/dqn_size_transfer_560x1120_50k"
+
+[training]
+total_updates = 50000
+warmup_steps = 5000
+
+[epsilon]
+# 保留一定新地图探索，但不回到 fresh training 的 1.0，避免抹掉已有策略价值。
+epsilon_start = 0.30
+epsilon_end = 0.05
+
+[environment]
+board_width = 560
+board_height = 1120
+spawn_y = 252
+
+[logging]
+log_interval = 500
+save_interval = 5000
+checkpoint_keep_last = 4
+eval_interval = 5000
+eval_episodes = 20
+eval_max_steps = 800
+plot_interval = 5000
+progress_interval = 3

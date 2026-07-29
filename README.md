@@ -11,7 +11,9 @@
 
 游戏本体位于 `daxigua`，训练代码位于 `daxigua_rl`；前者不得反向依赖后者。旧实验代码已经移除，当前 RL 主链路是重新设计后的实现。
 
-当前手动游戏窗口为固定尺寸 `400x800`，顶部独立信息层会显示分数和待投放水果队列，方便提前规划投放顺序。
+当前默认场景为 `560x1120`，生成线为 `y=252`；相较旧场景长宽各增加
+约 40%，水果尺寸和物理参数不缩放。训练和归因使用 21 个离散投放位置，以保持
+接近旧场景的横向投放密度。顶部独立信息层会显示分数和待投放水果队列。
 
 ## 运行手动游戏
 
@@ -74,6 +76,8 @@ python tools/preflight_training.py \
   checkpoint 冻结的 epsilon horizon，并必须单独标记；
 - `configs/train_dqn_causal_250k.toml`：第一次 250000 次更新正式训练；
 - `configs/train_dqn_causal_500k.toml`：仅保留为未来可选延长实验。
+- `configs/train_dqn_size_transfer_560x1120_50k.toml`：把同架构旧场景 checkpoint
+  的网络权重迁移到 `560x1120` 新场景，并用 50000 次更新快速适配。
 
 当前三套正式阶段配置属于结构感知 V2：正式基线采用 H256/L4、batch 128、16 个 rollout
 worker、6 个反事实物理 worker 和集中式 GPU actor，并以
@@ -97,6 +101,19 @@ PYTHONPATH=src python -u -m daxigua_rl.scripts.train_dqn \
 checkpoint。正式 hybrid replay 采用明确记录的 hot-resume：恢复模型、target、
 optimizer、更新计数、RNG、因果 replay 和主 replay 热层，不宣称恢复已经省略的
 冷层。
+
+尺寸迁移不是 resume。它只继承同架构 checkpoint 的 online 网络权重，并从该权重
+同步新 target；optimizer、TD/causal replay、RNG、epsilon 和训练计数全部重建：
+
+```bash
+PYTHONPATH=src python -u -m daxigua_rl.scripts.train_dqn \
+  --config configs/train_dqn_size_transfer_560x1120_50k.toml \
+  --init-checkpoint runs/<old_run>/checkpoints/step_00120000.pt
+```
+
+新 run 会把来源、源/目标几何和重置边界写入 `initialization.json`。旧 15 动作
+replay 和归因掩码不能进入新的 21 动作训练，但动作节点共享参数，因此同架构模型
+权重不依赖固定动作数量，可以直接作为新地图的初始化。
 
 ## 同步云端基础训练数据
 

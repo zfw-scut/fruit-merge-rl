@@ -10,6 +10,7 @@ from dataclasses import replace
 from daxigua.core.engine import HeadlessGame
 from daxigua.core.state import MergeEvent
 from daxigua_rl.attribution import (
+    ANALYSIS_ACTION_COUNT,
     ATTRIBUTION_EVENT_TYPES,
     NEGATIVE_ATTRIBUTION_EVENT_TYPES,
     POSITIVE_ATTRIBUTION_EVENT_TYPES,
@@ -1159,7 +1160,7 @@ class RealizedStructureAndCollectorTest(unittest.TestCase):
         game.stable_velocity_epsilon = 1000.0
         env = DaxiguaEnv(
             config=DaxiguaEnvConfig(
-                action_count=15,
+                action_count=ANALYSIS_ACTION_COUNT,
                 max_physics_frames=1,
                 stable_frames=1,
             ),

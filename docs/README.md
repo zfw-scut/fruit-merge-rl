@@ -60,6 +60,12 @@ hybrid 主 replay 恢复时只恢复有界热层，并在 sidecar 中明确记�
 
 `configs/train_dqn_causal_500k.toml` 仅保留为未来可选延长实验，不属于当前正式门禁。
 
+当前项目默认地图已改为 `560x1120 / spawn_y=252 / 21 actions`。旧场景的同架构
+checkpoint 可通过 `--init-checkpoint` 做 weights-only 尺寸迁移；这会新建 run，
+不会恢复旧 optimizer、replay、RNG 或更新计数。候选入口为
+`configs/train_dqn_size_transfer_560x1120_50k.toml`，是否启动云端训练以用户确认
+新场景视觉尺寸为前提。
+
 `tools/preflight_training.py` 是启动前门禁，覆盖结构感知正式配置、CUDA、依赖版本、
 六维结构与完整因果 optimizer step、`EngineSnapshot` 重演、局部 Shapley 物理链路、
 磁盘和 CPU 余量。配置和门禁已经存在不等于对应烟测/标定已经完成；实际结果应在

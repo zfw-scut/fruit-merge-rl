@@ -11,6 +11,7 @@ from daxigua_rl.scripts.compare_physics_modes import (
     build_reward_config,
     build_mode_specs,
     parse_fast_fps_values,
+    resolve_board_geometry,
     run_episode,
 )
 from daxigua_rl.reward import RewardConfig
@@ -60,6 +61,26 @@ class ComparePhysicsModesTest(unittest.TestCase):
 
         self.assertEqual(env.game.fps, 30)
         self.assertEqual(env.game.space.iterations, 8)
+
+    def test_board_geometry_resolves_from_current_defaults_and_checkpoint(self):
+        args = SimpleNamespace(
+            board_width=None,
+            board_height=None,
+            spawn_y=None,
+        )
+        self.assertEqual(resolve_board_geometry(args, None), (560, 1120, 252))
+        checkpoint = {
+            'args': {
+                'board_width': 600,
+                'board_height': 1000,
+                'spawn_y': 220,
+            },
+            'online_model': {},
+        }
+        self.assertEqual(
+            resolve_board_geometry(args, checkpoint),
+            (600, 1000, 220),
+        )
 
     def test_reward_config_uses_reward_v2_parameters(self):
         """物理对比不能悄悄退回旧 score/高度奖励。"""

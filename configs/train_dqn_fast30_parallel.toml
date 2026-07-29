@@ -141,8 +141,14 @@ activation = "silu"
 # 随机种子：控制环境、策略和 replay 采样的基础随机种子。
 seed = 0
 
-# 动作数量：离散投放候选动作数量。
-action_count = 15
+# 当前项目场地：旧场景长宽各扩大 40%，生成线按同比例下移。
+board_width = 560
+board_height = 1120
+spawn_y = 252
+
+# 动作数量：场地宽度扩大 40% 后由 15 同比例增加到 21，
+# 保持近似相同的横向投放分辨率。
+action_count = 21
 
 # 物理模式：fast30 会使用 30fps、较少稳定帧和较少 Pymunk 迭代次数。
 physics_mode = "fast30"

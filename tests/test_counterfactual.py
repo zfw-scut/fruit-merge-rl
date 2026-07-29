@@ -36,6 +36,7 @@ from daxigua_rl.attribution.counterfactual import (
 )
 from daxigua_rl.attribution.state_analyzer import StateAnalyzerConfig
 from daxigua_rl.attribution.schema import (
+    ANALYSIS_ACTION_COUNT,
     AttributionEvent,
     AttributionEventKey,
     AttributionEvidence,
@@ -376,14 +377,17 @@ class CounterfactualContractTest(unittest.TestCase):
             ),
         )
 
-        scores = [0.0] * 15
+        scores = [0.0] * ANALYSIS_ACTION_COUNT
         scores[5] = 10.0
         alternatives = select_counterfactual_alternatives(
             actual_action_offset=2,
             safest_action_scores=scores,
             runner_up_action_offset=7,
         )
-        self.assertEqual(alternatives, (12, 5, 7))
+        self.assertEqual(
+            alternatives,
+            (ANALYSIS_ACTION_COUNT - 1 - 2, 5, 7),
+        )
         self.assertEqual(len(set(alternatives)), 3)
 
     def test_task_id_and_priority_are_stable_and_task_is_pickle_safe(self):

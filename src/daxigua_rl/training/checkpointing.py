@@ -43,6 +43,7 @@ DEFAULT_RESUME_MUTABLE_FIELDS = frozenset(
         'config',
         'checkpoint_keep_last',
         'eval_interval',
+        'init_checkpoint',
         'log_interval',
         'plot_interval',
         'progress_interval',

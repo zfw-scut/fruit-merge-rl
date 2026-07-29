@@ -25,9 +25,27 @@ class GameBoard(object):
     子类可以决定如何读取输入、如何渲染、如何驱动每一帧。
     """
 
-    def __init__(self, create_time, gravity):
+    def __init__(
+            self,
+            create_time,
+            gravity,
+            *,
+            width=None,
+            height=None,
+            spawn_y=None):
+        # 默认值取当前项目规格 560x1120 / 252；显式参数只影响当前 Board，
+        # 不修改全局配置，便于预览或后续地图实验。
+        default_width, default_height = DEFAULT_WINDOW_SIZE
+        width = default_width if width is None else int(width)
+        height = default_height if height is None else int(height)
+        spawn_y = SPAWN_LINE_Y if spawn_y is None else int(spawn_y)
+        if width <= 0 or height <= 0:
+            raise ValueError('board width and height must be positive')
+        if spawn_y < 0 or spawn_y >= height:
+            raise ValueError('spawn_y must be inside the board')
+
         # 当前窗口尺寸和画布尺寸。`RES` 是 pygame 常用的 `(width, height)`。
-        self.RES = self.WIDTH, self.HEIGHT = DEFAULT_WINDOW_SIZE
+        self.RES = self.WIDTH, self.HEIGHT = width, height
 
         # 目标帧率由配置文件统一管理，物理步进也会使用这个值。
         self.FPS = FPS
@@ -42,7 +60,7 @@ class GameBoard(object):
         self.reset()
 
         # 水果生成线的 y 坐标。当前手动游戏窗口固定，顶部预留独立信息层和悬浮水果层。
-        self.init_y = SPAWN_LINE_Y
+        self.init_y = spawn_y
 
         # 默认投放 x 坐标在窗口中间。
         self.init_x = int(self.WIDTH / 2)
@@ -132,11 +150,17 @@ class GameBoard(object):
             self.segments.append(
                 self.create_segment(*border, 20, self.space, 'darkslategray'))
 
-    def resize_world(self, width, height, recreate_display=False):
+    def resize_world(
+            self,
+            width,
+            height,
+            spawn_y=None,
+            recreate_display=False):
         """按新窗口尺寸调整游戏世界。
 
         参数：
         - width, height: 新的窗口尺寸。
+        - spawn_y: 可选的新生成线；省略时保留当前生成线，而不是退回全局默认值。
         - recreate_display: 是否重新创建 pygame display。当前手动游戏不走窗口拖拽缩放，
           这个参数主要留给内部调试或未来实验场景。
 
@@ -152,14 +176,20 @@ class GameBoard(object):
         # 限制最小窗口，避免边界反转或投放区域过窄。
         width = max(min_width, int(width))
         height = max(min_height, int(height))
+        spawn_y = self.init_y if spawn_y is None else int(spawn_y)
+        if spawn_y < 0 or spawn_y >= height:
+            raise ValueError('spawn_y must be inside the board')
 
         # 尺寸没有变化时直接退出，减少 resize 抖动时的重复工作。
-        if width == self.WIDTH and height == self.HEIGHT:
+        if (
+                width == self.WIDTH
+                and height == self.HEIGHT
+                and spawn_y == self.init_y):
             return False
 
         # 更新尺寸字段，后续渲染、边界、生成线都依赖这些值。
         self.RES = self.WIDTH, self.HEIGHT = width, height
-        self.init_y = SPAWN_LINE_Y
+        self.init_y = spawn_y
         self.init_x = int(self.WIDTH / 2)
 
         if recreate_display:

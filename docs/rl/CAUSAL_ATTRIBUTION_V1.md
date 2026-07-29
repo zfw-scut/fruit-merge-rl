@@ -11,6 +11,11 @@
 > 为什么旧 checkpoint/replay 不能续训，统一见
 > [`STRUCTURE_AWARE_GNN_V2.md`](STRUCTURE_AWARE_GNN_V2.md)。旧 V1 5k/10k
 > 证据不能批准新架构 500k。
+>
+> 2026-07-29 场景迁移说明：本文中的 15 动作描述是旧场景的历史规格。当前项目
+> 默认场景已改为 `560x1120 / spawn_y=252 / 21 actions`，状态分析 schema 升为
+> v3。归因机制不变，但旧 replay/mask 不兼容；同架构网络只能通过 weights-only
+> `--init-checkpoint` 进入新 run，详见 V2 文档第 9.1 节。
 
 ## 1. 文档目标
 
