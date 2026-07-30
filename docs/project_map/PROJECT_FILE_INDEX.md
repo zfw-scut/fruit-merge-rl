@@ -61,7 +61,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。可显式选择场地几何，用于测试物理参数的速度收益与游戏分布偏移。 | `--checkpoint ...`、几何参数；输出指标和对比图。 |
 | `src/daxigua_mobile/` | Android/Chaquopy 使用的纯 Python 状态桥。把普通局面 JSON 复用为 `StateAnalyzer -> GraphBuilder` 图输入，不依赖 pygame、pymunk 或 torch。 | `build_mobile_graph()`、`build_mobile_graph_json()`；固定 21 动作、62/47 特征 ABI。 |
 | `src/daxigua_rl/models/mobile_export.py` | 把结构感知 GNN-Q 包装为五个普通张量输入，供动态 N/E 的 ONNX 导出。 | `MobileGNNQNetwork`、`export_mobile_onnx()`。 |
-| `android/` | Android AI 陪玩版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理。 | `scripts/build-debug-apk.ps1`；最低 API 24，当前仅 arm64-v8a。 |
+| `android/` | Android AI 陪玩版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理；外围 UI 使用暖色果园主题，原有水果贴图和绘制链保持独立。 | `scripts/build-debug-apk.ps1`；主题入口为 `core/.../FruitMergeApplication.java`，最低 API 24，当前仅 arm64-v8a。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口和一个 560x1120 尺寸迁移入口。 | `train_dqn_causal_*.toml`、`train_dqn_size_transfer_560x1120_50k.toml` |
 | `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：250k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套正式阶段配置继承它。 | `train_dqn.py --config ...` |
@@ -152,6 +152,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/operations/` | 云端运行服务的部署和运维手册目录。 | 当前包含训练实时面板的启动、SSH 隧道访问、安全边界和排障说明。 |
 | `docs/mobile/ANDROID_APP.md` | Android AI 陪玩版手册。 | 记录架构、AI 行为、Windows 构建、ADB 安装、模型更新和 Box2D/Pymunk 边界。 |
+| `docs/mobile/ui-concepts/` | Android 外围 UI 方向稿。 | 当前包含暖色果园、霓虹 AI 和治愈街机三套选择稿；实际成品采用 A 版暖色果园，水果仍使用项目原图。 |
 | `docs/operations/TRAINING_DASHBOARD.md` | 云端训练实时面板运维手册。 | 默认通过 `127.0.0.1:8765` 和 SSH 本地端口转发访问；包含 Windows DPAPI 一键桌面入口、只读边界、生命周期命令和 PID 安全校验。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
 | `docs/rl/STRUCTURE_AWARE_GNN_V2.md` | 当前结构感知 GNN 与首次新架构长训的主规格。 | 记录关系图、连锁 motif、关系 GNN、六维辅助监督、集中式 actor、无泄漏/非奖励边界、启用参数、指标以及旧 checkpoint/replay 不兼容范围。 |

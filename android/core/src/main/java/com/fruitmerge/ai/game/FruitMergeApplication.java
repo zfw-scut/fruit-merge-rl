@@ -38,40 +38,60 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private static final float GAME_OVER_SECONDS = 2f;
     private static final float AI_LOADING_FALLBACK_SECONDS = 12f;
 
+    /*
+     * “暖色果园”主题只负责外围表现。水果仍从原来的 01.png～11.png 加载，
+     * 颜色、半径、队列位置和 Box2D 坐标都不参与主题换肤。
+     */
     private static final Color BACKGROUND_TOP =
-            new Color(0.035f, 0.067f, 0.091f, 1f);
+            new Color(1f, 0.98f, 0.92f, 1f);
     private static final Color BACKGROUND_BOTTOM =
-            new Color(0.075f, 0.18f, 0.19f, 1f);
+            new Color(1f, 0.92f, 0.80f, 1f);
     private static final Color BOARD_COLOR =
-            new Color(0.055f, 0.105f, 0.125f, 0.98f);
+            new Color(1f, 0.99f, 0.95f, 1f);
+    private static final Color BOARD_FRAME =
+            new Color(0.96f, 0.68f, 0.41f, 1f);
+    private static final Color BOARD_FRAME_SOFT =
+            new Color(1f, 0.82f, 0.61f, 1f);
     private static final Color PANEL_COLOR =
-            new Color(0.075f, 0.135f, 0.155f, 0.96f);
+            new Color(1f, 0.97f, 0.89f, 0.98f);
+    private static final Color SCORE_CARD =
+            new Color(1f, 0.99f, 0.95f, 1f);
+    private static final Color NEXT_CARD =
+            new Color(1f, 0.97f, 0.90f, 1f);
+    private static final Color CARD_SHADOW =
+            new Color(0.62f, 0.32f, 0.14f, 0.16f);
     private static final Color ACCENT =
-            new Color(0.37f, 0.91f, 0.65f, 1f);
+            new Color(0.24f, 0.76f, 0.55f, 1f);
+    private static final Color ACCENT_DARK =
+            new Color(0.08f, 0.58f, 0.39f, 1f);
     private static final Color ACCENT_SOFT =
-            new Color(0.37f, 0.91f, 0.65f, 0.18f);
+            new Color(0.82f, 0.95f, 0.88f, 1f);
     private static final Color DANGER =
-            new Color(1f, 0.39f, 0.41f, 0.9f);
+            new Color(0.95f, 0.43f, 0.30f, 0.94f);
     private static final Color TEXT_PRIMARY =
-            new Color(0.94f, 0.98f, 0.96f, 1f);
+            new Color(0.34f, 0.16f, 0.09f, 1f);
     private static final Color TEXT_MUTED =
-            new Color(0.58f, 0.71f, 0.71f, 1f);
-    private static final Color SUBTLE_PANEL =
-            new Color(1f, 1f, 1f, 0.055f);
+            new Color(0.60f, 0.39f, 0.28f, 1f);
     private static final Color SWITCH_OFF =
-            new Color(1f, 1f, 1f, 0.07f);
+            new Color(0.91f, 0.83f, 0.75f, 1f);
     private static final Color STATUS_BACKGROUND =
-            new Color(0f, 0f, 0f, 0.20f);
+            new Color(0.85f, 0.96f, 0.90f, 0.98f);
     private static final Color LIMIT_TEXT =
-            new Color(1f, 0.64f, 0.64f, 0.82f);
+            new Color(0.91f, 0.38f, 0.25f, 0.90f);
     private static final Color MANUAL_HINT =
-            new Color(TEXT_MUTED.r, TEXT_MUTED.g, TEXT_MUTED.b, 0.72f);
+            new Color(TEXT_MUTED.r, TEXT_MUTED.g, TEXT_MUTED.b, 0.78f);
     private static final Color PANEL_OUTLINE =
-            new Color(1f, 1f, 1f, 0.08f);
+            new Color(0.91f, 0.58f, 0.34f, 0.54f);
     private static final Color PREVIEW_OUTLINE =
-            new Color(ACCENT.r, ACCENT.g, ACCENT.b, 0.24f);
+            new Color(ACCENT.r, ACCENT.g, ACCENT.b, 0.34f);
     private static final Color GAME_OVER_PANEL =
-            new Color(0.07f, 0.14f, 0.16f, 1f);
+            new Color(1f, 0.97f, 0.89f, 1f);
+    private static final Color LEAF_LIGHT =
+            new Color(0.53f, 0.75f, 0.26f, 0.16f);
+    private static final Color LEAF_DARK =
+            new Color(0.29f, 0.59f, 0.18f, 0.13f);
+    private static final Color ORCHARD_GLOW =
+            new Color(1f, 0.60f, 0.30f, 0.10f);
 
     private final AiService aiService;
     private final Random random = new Random();
@@ -688,7 +708,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void drawBackground() {
-        // ShapeRenderer 的四角颜色让背景保留轻量渐变，不依赖额外大图资源。
+        // 继续用四角颜色生成无贴图渐变，避免为了整屏背景增加 APK 体积。
         shapes.rect(
                 0f,
                 0f,
@@ -699,16 +719,86 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 BACKGROUND_TOP,
                 BACKGROUND_TOP
         );
+
+        // 圆形暖光和低透明叶片只装饰空白边角，不进入水果纹理与物理层。
+        shapes.setColor(ORCHARD_GLOW);
+        shapes.circle(-9f, toRenderY(31f), 52f, 40);
+        shapes.circle(565f, toRenderY(86f), 64f, 40);
+        shapes.circle(524f, toRenderY(1084f), 52f, 40);
+        drawLeaf(24f, 34f, 48f, 19f, -27f, LEAF_LIGHT);
+        drawLeaf(49f, 18f, 42f, 17f, 18f, LEAF_DARK);
+        drawLeaf(528f, 32f, 50f, 20f, 32f, LEAF_LIGHT);
+        drawLeaf(548f, 59f, 42f, 17f, 67f, LEAF_DARK);
+        drawLeaf(18f, 1084f, 48f, 19f, 35f, LEAF_DARK);
+        drawLeaf(540f, 1092f, 52f, 20f, -32f, LEAF_LIGHT);
+    }
+
+    /**
+     * 用两个三角形拼出轻量叶片。这里采用程序绘制而不是背景位图，后续调整主题色时
+     * 只需要改调色板，也不会替换用户要求保留的水果素材。
+     */
+    private void drawLeaf(
+            float centerX,
+            float centerTopY,
+            float width,
+            float height,
+            float degrees,
+            Color color) {
+        float centerY = toRenderY(centerTopY);
+        float angle = degrees * MathUtils.degreesToRadians;
+        float axisX = MathUtils.cos(angle) * width * 0.5f;
+        float axisY = MathUtils.sin(angle) * width * 0.5f;
+        float sideX = -MathUtils.sin(angle) * height * 0.5f;
+        float sideY = MathUtils.cos(angle) * height * 0.5f;
+        float startX = centerX - axisX;
+        float startY = centerY - axisY;
+        float endX = centerX + axisX;
+        float endY = centerY + axisY;
+
+        shapes.setColor(color);
+        shapes.triangle(
+                startX,
+                startY,
+                centerX + sideX,
+                centerY + sideY,
+                endX,
+                endY
+        );
+        shapes.triangle(
+                startX,
+                startY,
+                endX,
+                endY,
+                centerX - sideX,
+                centerY - sideY
+        );
     }
 
     private void drawPanels() {
+        // 面板阴影统一向下偏移 4px，复刻 A 版柔和纸片层级。
+        roundedRectTop(12f, 16f, 536f, 222f, 18f, CARD_SHADOW);
         roundedRectTop(12f, 12f, 536f, 222f, 18f, PANEL_COLOR);
-        roundedRectTop(20f, FruitRules.SPAWN_Y, 520f, 848f, 13f, BOARD_COLOR);
 
-        roundedRectTop(24f, 58f, 132f, 66f, 12f, SUBTLE_PANEL);
-        roundedRectTop(166f, 58f, 116f, 66f, 12f, SUBTLE_PANEL);
+        roundedRectTop(16f, FruitRules.SPAWN_Y + 5f,
+                528f, 852f, 20f, CARD_SHADOW);
+        roundedRectTop(16f, FruitRules.SPAWN_Y - 4f,
+                528f, 860f, 20f, BOARD_FRAME);
+        roundedRectTop(18f, FruitRules.SPAWN_Y - 2f,
+                524f, 856f, 17f, BOARD_FRAME_SOFT);
+        roundedRectTop(20f, FruitRules.SPAWN_Y,
+                520f, 848f, 14f, BOARD_COLOR);
+
+        roundedRectTop(24f, 62f, 132f, 66f, 12f, CARD_SHADOW);
+        roundedRectTop(166f, 62f, 116f, 66f, 12f, CARD_SHADOW);
+        roundedRectTop(292f, 62f, 230f, 66f, 12f, CARD_SHADOW);
+        roundedRectTop(24f, 58f, 132f, 66f, 12f, SCORE_CARD);
+        roundedRectTop(166f, 58f, 116f, 66f, 12f, SCORE_CARD);
+        roundedRectTop(292f, 58f, 230f, 66f, 12f, NEXT_CARD);
+
+        roundedRectTop(382f, 27f, 152f, 50f, 25f, CARD_SHADOW);
         roundedRectTop(382f, 23f, 152f, 50f, 25f,
                 aiEnabled ? ACCENT_SOFT : SWITCH_OFF);
+        roundedRectTop(24f, 188f, 265f, 34f, 17f, CARD_SHADOW);
         roundedRectTop(24f, 184f, 265f, 34f, 17f, STATUS_BACKGROUND);
 
         float dangerAlpha = dangerSeconds <= 0f
@@ -720,8 +810,13 @@ public final class FruitMergeApplication extends ApplicationAdapter
             shapes.rect(x, y - 1f, 10f, 2f);
         }
 
-        // 左右和底部用柔和亮边表达真实碰撞区域。
-        shapes.setColor(0.24f, 0.45f, 0.46f, 0.52f);
+        // 左右和底部仍严格对齐真实 Box2D 边界，只把暗色亮边改成暖杏色。
+        shapes.setColor(
+                BOARD_FRAME.r,
+                BOARD_FRAME.g,
+                BOARD_FRAME.b,
+                0.62f
+        );
         shapes.rect(18f, toRenderY(FruitRules.BOARD_HEIGHT), 4f,
                 FruitRules.BOARD_HEIGHT - FruitRules.SPAWN_Y);
         shapes.rect(538f, toRenderY(FruitRules.BOARD_HEIGHT), 4f,
@@ -732,13 +827,19 @@ public final class FruitMergeApplication extends ApplicationAdapter
             float guideAlpha = aiEnabled ? 0.34f : 0.20f;
             shapes.setColor(ACCENT.r, ACCENT.g, ACCENT.b, guideAlpha);
             float guideTop = previewY(currentLevel) + FruitRules.displayRadius(currentLevel);
-            float guideHeight = FruitRules.BOARD_HEIGHT - FruitRules.WALL_WIDTH - guideTop;
-            shapes.rect(previewX - 1f, toRenderY(guideTop + guideHeight), 2f, guideHeight);
+            float guideBottom = FruitRules.BOARD_HEIGHT - FruitRules.WALL_WIDTH;
+            for (float screenY = guideTop + 12f;
+                    screenY < guideBottom;
+                    screenY += 20f) {
+                shapes.circle(previewX, toRenderY(screenY), 2.7f, 12);
+            }
         }
 
         // AI 开关圆钮。
-        shapes.setColor(aiEnabled ? ACCENT : TEXT_MUTED);
         float knobCenterX = aiEnabled ? 509f : 475f;
+        shapes.setColor(CARD_SHADOW);
+        shapes.circle(knobCenterX, toRenderY(51f), 17f, 28);
+        shapes.setColor(aiEnabled ? ACCENT : SCORE_CARD);
         shapes.circle(knobCenterX, toRenderY(48f), 17f, 28);
     }
 
@@ -809,7 +910,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         titleFont.setColor(TEXT_PRIMARY);
         drawTextTop(titleFont, "MERGE MELON", 25f, 45f);
 
-        smallFont.setColor(TEXT_MUTED);
+        smallFont.setColor(DANGER);
         drawTextTop(smallFont, "SCORE", 36f, 80f);
         drawTextTop(smallFont, "BEST", 178f, 80f);
         drawTextTop(smallFont, "NEXT", 303f, 80f);
@@ -818,10 +919,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
         drawTextTop(normalFont, Integer.toString(score), 36f, 111f);
         drawTextTop(normalFont, Integer.toString(bestScore), 178f, 111f);
 
-        smallFont.setColor(aiEnabled ? ACCENT : TEXT_MUTED);
+        smallFont.setColor(aiEnabled ? ACCENT_DARK : TEXT_MUTED);
         drawTextTop(smallFont, aiEnabled ? "AI ON" : "AI OFF", 397f, 55f);
 
-        smallFont.setColor(aiEnabled ? ACCENT : TEXT_MUTED);
+        smallFont.setColor(aiEnabled ? ACCENT_DARK : TEXT_MUTED);
         drawTextTop(smallFont, aiState.label, 37f, 207f);
         smallFont.setColor(TEXT_MUTED);
         drawTextTop(smallFont, truncate(aiDetail, 28), 124f, 207f);
@@ -838,7 +939,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private void drawOutlines() {
         shapes.setColor(PANEL_OUTLINE);
         roundedRectTopLine(12f, 12f, 536f, 222f, 18f);
-        roundedRectTopLine(20f, FruitRules.SPAWN_Y, 520f, 848f, 13f);
+        roundedRectTopLine(24f, 58f, 132f, 66f, 12f);
+        roundedRectTopLine(166f, 58f, 116f, 66f, 12f);
+        roundedRectTopLine(292f, 58f, 230f, 66f, 12f);
+        roundedRectTopLine(20f, FruitRules.SPAWN_Y, 520f, 848f, 14f);
         if (waiting) {
             shapes.setColor(PREVIEW_OUTLINE);
             shapes.circle(
@@ -852,8 +956,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     private void drawGameOverOverlay() {
         shapes.begin(ShapeRenderer.ShapeType.Filled);
-        shapes.setColor(0.015f, 0.025f, 0.035f, 0.82f);
+        shapes.setColor(0.28f, 0.13f, 0.07f, 0.58f);
         shapes.rect(0f, 0f, FruitRules.BOARD_WIDTH, FruitRules.BOARD_HEIGHT);
+        roundedRectTop(85f, 401f, 390f, 275f, 24f, CARD_SHADOW);
         roundedRectTop(85f, 395f, 390f, 275f, 24f, GAME_OVER_PANEL);
         roundedRectTop(145f, 585f, 270f, 58f, 29f, ACCENT);
         shapes.end();
@@ -863,7 +968,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         drawTextTop(titleFont, "GAME OVER", 184f, 450f);
         normalFont.setColor(TEXT_MUTED);
         drawTextTop(normalFont, "SCORE  " + score, 205f, 511f);
-        normalFont.setColor(BACKGROUND_TOP);
+        normalFont.setColor(TEXT_PRIMARY);
         drawTextTop(normalFont, "TAP TO RESTART", 194f, 622f);
         batch.end();
     }

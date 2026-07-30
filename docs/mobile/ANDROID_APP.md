@@ -23,6 +23,28 @@
   只负责模拟人的手势；最终投放会严格回到模型选中的规范动作坐标。
 - 合成、投放、危险线和游戏结束有轻量动效与触觉反馈。
 
+## 界面主题与修改入口
+
+当前采用“暖色果园”外围主题：奶油渐变背景、暖杏信息卡、薄荷色 AI 开关、
+珊瑚危险线和点状投放引导。选型稿保存在
+`docs/mobile/ui-concepts/variant-a-warm-orchard.png`。
+
+界面继续和游戏使用同一个 libGDX `560x1120` 逻辑画布，而不是额外叠加 Android
+XML。这样计分、AI 状态、触摸命中区和 `FitViewport` 始终使用同一套坐标，不需要
+跨 GL/UI 线程同步动态状态，也不会在长宽比不同的手机上与水果画面错位。
+
+外围 UI 的主要修改入口在
+`android/core/src/main/java/com/fruitmerge/ai/game/FruitMergeApplication.java`：
+
+- 文件顶部的 `Color` 常量负责主题调色板；
+- `drawBackground()` 负责渐变和果园装饰；
+- `drawPanels()` 负责计分卡、下一颗提示、AI 状态板、棋盘底色和提示线；
+- `drawText()`、`drawOutlines()`、`drawGameOverOverlay()` 负责文字、描边和结束弹层。
+
+水果表现与主题明确隔离：`loadFruitTextures()`、`drawFruitBodies()`、
+`drawPreviewAndQueue()`、`drawFruit()` 继续使用项目原有 `assets/fruits/01.png`
+至 `11.png`，水果尺寸、位置、透明度、Box2D 物理和模型输入均未改变。
+
 ## 模型与移动契约
 
 当前 APK 使用尺寸迁移训练中的本地最优推理 checkpoint：
