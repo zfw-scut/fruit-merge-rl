@@ -5,6 +5,8 @@ param(
         "default",
         "home",
         "solo",
+        "score-low",
+        "score-high",
         "duel",
         "demo",
         "reaction",

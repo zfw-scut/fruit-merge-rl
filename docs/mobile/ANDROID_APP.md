@@ -48,6 +48,15 @@
   设置中独立修改。
 - 单人和 AI 演示使用独占一行的大分数卡：玩家为淡红底/深红字，AI 为淡蓝底/
   深蓝字；对战在同一行并列红蓝双方分数与 `VS`。
+- 分数卡会跟随玩家的主要观察区域自适应停靠。稳定水果堆低于场景中部时，卡片
+  停靠底部且棋盘整体向上补齐顶部空位；堆高后卡片切回顶部，棋盘同步平滑复位。
+  判断只使用已经稳定的水果，不会因刚释放的水果从生成线落下而误触发。
+- 换位不是在 `50%` 附近直接翻转：上移需稳定堆高连续超过 `56%` 约 `0.65s`，
+  回到底部需连续低于 `44%` 约 `1.10s`，两次换位之间还至少停留 `3s`。拖动、
+  合成爆浆和分值吸入期间会保留换位意图，等表现结束再开始动画，避免遮挡或
+  来回抖动。对战取双方水果堆的较高值，因此切换前景不会移动分数卡。
+- 自适应布局只移动渲染和触控映射，不改变 Box2D 世界、危险线规则、模型输入、
+  21 个投放动作或存档格式；AI 的决策语义与训练地图保持一致。
 
 ## 设置与历史记录
 
@@ -262,7 +271,9 @@ powershell -ExecutionPolicy Bypass -File `
 
 大厅、三种模式、设置/历史、退出弹窗和确认结算都能直接进入，不需要在自动截图
 前模拟点击。`-Screen` 支持
-`home/solo/duel/demo/reaction/reaction-overlap/settings/history/exit/new/result`：
+`home/solo/score-low/score-high/duel/demo/reaction/reaction-overlap/settings/`
+`history/exit/new/result`。其中 `score-low` 和 `score-high` 分别构造确定性的低堆
+与高堆局面，用于验收分数卡两个停靠位和棋盘联动：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File `
@@ -276,6 +287,12 @@ powershell -ExecutionPolicy Bypass -File `
 
 powershell -ExecutionPolicy Bypass -File `
   android\scripts\run-ui-preview.ps1 -Capture -Screen result
+
+powershell -ExecutionPolicy Bypass -File `
+  android\scripts\run-ui-preview.ps1 -Capture -Screen score-low
+
+powershell -ExecutionPolicy Bypass -File `
+  android\scripts\run-ui-preview.ps1 -Capture -Screen score-high
 ```
 
 桌面入口能提前发现字体、卡片、水果预览和绘制顺序问题，但不能代替 Android

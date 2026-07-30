@@ -62,14 +62,15 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_mobile/` | Android/Chaquopy 使用的纯 Python 状态桥。把普通局面 JSON 复用为 `StateAnalyzer -> GraphBuilder` 图输入，不依赖 pygame、pymunk 或 torch。 | `build_mobile_graph()`、`build_mobile_graph_json()`；固定 21 动作、62/47 特征 ABI。 |
 | `src/daxigua_rl/models/mobile_export.py` | 把结构感知 GNN-Q 包装为五个普通张量输入，供动态 N/E 的 ONNX 导出。 | `MobileGNNQNetwork`、`export_mobile_onnx()`。 |
 | `android/` | Android AI 游戏版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理；提供大厅、单人、挑战 AI、AI 演示、实时进度恢复、设置/历史、原因观察和确认结算。 | `scripts/build-debug-apk.ps1`；最低 API 24，当前仅 arm64-v8a。 |
-| `android/core/src/main/java/com/fruitmerge/ai/game/FruitMergeApplication.java` | Android 与 Windows 预览共用的应用、表现和交互入口。管理大厅/游戏页面、三种固定控制权模式、自动保存、显式退出、独占分数行、合成反馈、同步对战、AI 文字气泡和独立颜文字脉冲。 | `drawHome()`、`requestStartMode()`、`saveCurrentSession()`、`resumeSavedSession()`、`armOrDropDuelAi()`、`drawAiReaction()` |
+| `android/core/src/main/java/com/fruitmerge/ai/game/FruitMergeApplication.java` | Android 与 Windows 预览共用的应用、表现和交互入口。管理大厅/游戏页面、三种固定控制权模式、自动保存、显式退出、自适应上下停靠分数行、棋盘联动、合成反馈、同步对战、AI 文字气泡和独立颜文字脉冲。 | `drawHome()`、`requestStartMode()`、`updateAdaptiveScoreLayout()`、`saveCurrentSession()`、`resumeSavedSession()`、`armOrDropDuelAi()`、`drawAiReaction()` |
+| `android/core/src/main/java/com/fruitmerge/ai/game/AdaptiveScoreLayoutController.java` | 与 libGDX/Box2D 解耦的分数卡停靠状态机。根据稳定水果堆高度处理 56%/44% 迟滞、连续确认、最短驻留、阻塞意图和无过冲 smootherstep 动画。 | `update()`、`snapForPileRatio()`、`bottomProgress()`、`targetDock()` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/AiDialogueDirector.java` | 七类 AI 完整静态语料的严格加载、无放回抽取和统一发言节奏控制器。文字与独立颜文字各有冷却/概率门禁，运行时不拼接任何句子片段。 | `offer()`、`offerEmoticon()`、`resetPacing()`、`Mood` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/FruitPhysicsWorld.java` | 移动端 Box2D 物理世界。除投放、固定步、接触合成外，支持保存/校验/恢复水果顺序、ID、两类半径、完整运动字段、年龄和 accumulator；旧 pending/event 不重放。 | `snapshot()`、`restore()`、`Snapshot`、`FruitState` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/DuelMatch.java` | AI 对战纯规则控制器。维护两个独立 Box2D 场景和一条共享水果序列，按真实时间管理回合，支持双方原子同步投放/超时、完整快照恢复、危险线与同帧胜负判定。 | `dropBoth()`、`timeoutBoth()`、`snapshot()`、`restore()`、`resolveOutcome()` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/GameProfileStore.java` | 基于 libGDX `Preferences` 的本地设置、分类最优与最近 200 局明细仓库。三模式结果和有界 session 账本一次 flush，逐条记录带 CRC、支持损坏尾部恢复和旧聚合迁移。 | `settings()`、`history()`、`gameRecords()`、`recordSoloGame(...)`、`recordAiDemoGame(...)`、`recordVersusGame(...)`、`resetHistory()` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/GameSessionStore.java` | 一个未完成对局的实时进度槽。使用带 generation、SHA-256 和字段门禁的交替双 bank，保存单人/AI 演示或双场景对战的完整规则状态；最新写入损坏时回退上一 bank。 | `hasSavedSession()`、`load()`、`save()`、`clear()`、`Session`、`SingleState`、`DuelState` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/UiMotionController.java` | 与渲染器解耦的 UI 手势动画状态机。为控件提供按压缩放、有界跟手、拖出取消、容错提交、松手回弹和单 pointer 所有权。 | `begin()`、`drag()`、`release()`、`cancel()`、`update()`、`visual()` |
-| `android/desktop/` | Windows 本地 UI 预览模块。通过 LWJGL3 直接复用 Android 的 `FruitMergeApplication`、Box2D、共享字体、音效和 canonical 水果素材，可交互运行、自动截图或启用合成表现验收场景；不加载 ONNX。 | `scripts/run-ui-preview.ps1`；`-Showcase -CaptureFrames N` 验收爆浆/吸附，`-Screen home/solo/duel/demo/settings/history/exit/new/result/reaction/reaction-overlap` 直达页面。 |
+| `android/desktop/` | Windows 本地 UI 预览模块。通过 LWJGL3 直接复用 Android 的 `FruitMergeApplication`、Box2D、共享字体、音效和 canonical 水果素材，可交互运行、自动截图或启用合成表现验收场景；不加载 ONNX。 | `scripts/run-ui-preview.ps1`；`-Showcase -CaptureFrames N` 验收爆浆/吸附，`-Screen score-low/score-high` 验收分数停靠，其他页面可直接进入。 |
 | `assets/fonts/` | Android 与 Windows 预览共用的高分辨率站酷快乐体中文子集 BitmapFont、官方源字体和 OFL 1.1 许可证。 | `ui-cute.fnt/png` 为 APK 实际资源；生成器会合并手工种子与 Android Java 字符串字面量并执行 cmap/最终缺字检查。 |
 | `assets/audio/` | Android 与 Windows 预览共用的合成弹出、柔软冲击和计分吸附音效。 | 三个 OGG 选自 Kenney Impact Sounds；CC0 原始许可证与来源映射一并保留。 |
 | `assets/dialogue/` | 七类 AI 离线完整句语料，每类 1024 条；每行均为大模型预先完整构思的独立句子。 | 运行时仅做整行无放回抽取，不使用前缀/词槽/后缀拼接；`README.md` 固定每类事件语义。 |
@@ -127,6 +128,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `android/core/src/test/java/com/fruitmerge/ai/game/FruitPhysicsWorldSnapshotTest.java` | 物理快照测试。覆盖水果顺序、ID 延续、速度/角度/年龄、dropped/merged 半径差异、真实 Box2D 恢复后合成、损坏输入原子拒绝和旧事件清理。 | 使用 JUnit 4 与 desktop Box2D natives。 |
 | `android/core/src/test/java/com/fruitmerge/ai/game/DuelMatchTest.java` | AI 对战规则测试。覆盖共享队列、双方一次提交、原子双投/超时、真实时间倒计时、同帧胜负/平局、合成归属、完整快照恢复和未来共享序列。 | 使用 JUnit 4 与真实 Box2D core 规则。 |
 | `android/core/src/test/java/com/fruitmerge/ai/game/AiDialogueDirectorTest.java` | 完整语料与发言节奏测试。覆盖每类 1000 条门禁、无放回抽取、硬间隔、强制消息、活动消息保护、固定随机种子和坏语料拒绝。 | 纯 Java JUnit 4。 |
+| `android/core/src/test/java/com/fruitmerge/ai/game/AdaptiveScoreLayoutControllerTest.java` | 自适应分数停靠状态机测试。覆盖初始吸附、上下连续确认、迟滞带、3 秒驻留、表现阻塞后的意图兑现、反向取消、smootherstep 端点和非法输入。 | 纯 Java JUnit 4。 |
 | `android/core/src/test/java/com/fruitmerge/ai/game/AiReactionGeometryTest.java` | AI 气泡遮挡几何测试。覆盖水果圆位于气泡内、与边缘相切和完全位于气泡外三类情况，固定重叠半透明判定的圆矩形语义。 | 纯 Java JUnit 4。 |
 | `android/core/src/test/java/com/fruitmerge/ai/game/GameProfileStoreTest.java` | 移动端设置与历史测试。覆盖三模式明细/分类最优、最近 200 局、session ID 幂等及损坏修复、记录 CRC、旧聚合迁移、独立重置和结算百分位。 | 使用 JUnit 4 与内存 `Preferences` fake。 |
 | `android/core/src/test/java/com/fruitmerge/ai/game/GameSessionStoreTest.java` | 实时进度存储测试。覆盖单人、AI 演示、完整双场景与 armed AI round-trip，双 bank 损坏回退、摘要篡改、schema 清理和防御性数组。 | 使用 JUnit 4 与内存 `Preferences` fake。 |
@@ -256,7 +258,10 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `export_training_catalog.py`：扫描被 Git 忽略的训练输出，生成配置快照、指标摘要、产物清单和跨实验索引，方便迁移后复盘训练数据。
 - `compare_physics_modes.py`：物理模式对比入口，用已有 checkpoint 或随机策略比较 accurate 与 fast 模式的速度、分数、局长、物理帧、合成频率和截断率。
 - `FruitMergeApplication`：Android 大厅和三模式共享入口；单人允许上一颗仍运动时
-  继续投放，AI 演示不可人工接管，挑战 AI 处理同步就位、双场景与确认结算。
+  继续投放，AI 演示不可人工接管，挑战 AI 处理同步就位、双场景与确认结算；
+  局内还会把稳定堆高映射为上下分数停靠、棋盘视觉位移和对应触控坐标。
+- `AdaptiveScoreLayoutController`：纯表现状态机；用双阈值、连续确认和最短驻留
+  消除中线抖动，输出连续底部权重供分数卡交叉淡入与棋盘平移复用。
 - `DuelMatch`：不依赖 UI 或 ONNX 的双场景规则控制器；复用同一随机水果序列，
   为玩家和 AI 保留独立物理、计分、危险状态和每轮提交状态，并提供原子双投及
   完整快照恢复。

@@ -125,7 +125,13 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private static final float SCORE_TOKEN_POP_SECONDS = 0.34f;
     private static final float SCORE_TOKEN_FLIGHT_SECONDS = 0.48f;
     private static final float SCORE_TARGET_X = 280f;
-    private static final float SCORE_TARGET_Y = 101f;
+    private static final float SCORE_TOP_DOCK_Y = 64f;
+    private static final float SCORE_BOTTOM_DOCK_Y = 1044f;
+    private static final float SCORE_CARD_HEIGHT = 66f;
+    private static final float SCORE_TARGET_OFFSET_Y = 37f;
+    private static final float BOTTOM_DOCK_SCENE_OFFSET_Y = -66f;
+    private static final float HEADER_EXPANDED_HEIGHT = 128f;
+    private static final float HEADER_COMPACT_HEIGHT = 52f;
     private static final float POPUP_FONT_SCALE = 0.50f;
     private static final int HISTORY_RECORDS_PER_PAGE = 4;
 
@@ -218,6 +224,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private final Color scratchColor = new Color();
     private final UiMotionController uiMotion =
             new UiMotionController();
+    private final AdaptiveScoreLayoutController scoreLayout =
+            new AdaptiveScoreLayoutController();
 
     private OrthographicCamera camera;
     private FitViewport viewport;
@@ -301,6 +309,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private AiDialogueDirector dialogueDirector;
     private float aiBubbleOcclusion;
     private boolean aiDangerReactionArmed = true;
+    private float singleStablePileRatio;
+    private float duelPlayerStablePileRatio;
+    private float duelAiStablePileRatio;
     private GameMode pendingNewMode;
     private AiState aiState = AiState.OBSERVING;
     private String aiDetail = "启动中";
@@ -402,6 +413,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 updateDuelGame(wallDelta, gameDelta);
             }
             updateAutosave(wallDelta);
+        }
+        if (appScreen == AppScreen.GAME) {
+            updateAdaptiveScoreLayout(frameDelta);
         }
         drawApp();
     }
@@ -554,6 +568,181 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     private boolean isAiControlledSingleBoard() {
         return gameMode == GameMode.AI_DEMO;
+    }
+
+    /**
+     * Keeps the score close to the player's current point of attention without feeding any visual
+     * coordinate back into Box2D or the model. Only settled fruit contributes to the live envelope:
+     * a newly released fruit starts near the spawn line and must not move the HUD by itself.
+     */
+    private void updateAdaptiveScoreLayout(float deltaSeconds) {
+        boolean resultInProgress = currentResultVisible()
+                || (gameMode == GameMode.DUEL
+                && duelMatch != null
+                && duelMatch.outcome()
+                != DuelMatch.Outcome.IN_PROGRESS);
+        float motionDelta = activeDragPointer >= 0
+                ? 0f
+                : deltaSeconds;
+        if (resultInProgress) {
+            // Finish a visible transition, but never create a new result-screen layout decision.
+            // Pausing during a drag keeps touch-down and touch-up in the same coordinate frame.
+            scoreLayout.update(Float.NaN, motionDelta, false);
+            return;
+        }
+        if (isSingleBoardMode()) {
+            singleStablePileRatio = sampleStablePileRatio(
+                    physics,
+                    singleStablePileRatio
+            );
+        } else if (duelMatch != null) {
+            duelPlayerStablePileRatio = sampleStablePileRatio(
+                    duelMatch.playerLane().physics(),
+                    duelPlayerStablePileRatio
+            );
+            duelAiStablePileRatio = sampleStablePileRatio(
+                    duelMatch.aiLane().physics(),
+                    duelAiStablePileRatio
+            );
+        }
+        scoreLayout.update(
+                currentPileRatio(),
+                motionDelta,
+                !scoreLayoutTransitionBlocked()
+        );
+    }
+
+    private void resetAdaptiveScoreLayout() {
+        singleStablePileRatio = 0f;
+        duelPlayerStablePileRatio = 0f;
+        duelAiStablePileRatio = 0f;
+        scoreLayout.resetBottom();
+    }
+
+    private void initializeAdaptiveScoreLayoutFromWorld() {
+        if (isSingleBoardMode()) {
+            singleStablePileRatio = sampleStablePileRatio(
+                    physics,
+                    0f
+            );
+            duelPlayerStablePileRatio = 0f;
+            duelAiStablePileRatio = 0f;
+        } else if (duelMatch != null) {
+            singleStablePileRatio = 0f;
+            duelPlayerStablePileRatio = sampleStablePileRatio(
+                    duelMatch.playerLane().physics(),
+                    0f
+            );
+            duelAiStablePileRatio = sampleStablePileRatio(
+                    duelMatch.aiLane().physics(),
+                    0f
+            );
+        }
+        scoreLayout.snapForPileRatio(currentPileRatio());
+    }
+
+    private float sampleStablePileRatio(
+            FruitPhysicsWorld world,
+            float fallback) {
+        if (world == null || world.fruits().size == 0) {
+            return 0f;
+        }
+        float highestSettledEdge = FruitRules.FLOOR_Y;
+        boolean sampled = false;
+        for (FruitPhysicsWorld.FruitBody fruit : world.fruits()) {
+            if (fruit.ageFrames() < 12 || !fruit.isStable()) {
+                continue;
+            }
+            sampled = true;
+            highestSettledEdge = Math.min(
+                    highestSettledEdge,
+                    fruit.y() - fruit.displayRadius
+            );
+        }
+        if (!sampled) {
+            return MathUtils.clamp(fallback, 0f, 1f);
+        }
+        float playableHeight = FruitRules.FLOOR_Y - FruitRules.SPAWN_Y;
+        return MathUtils.clamp(
+                (FruitRules.FLOOR_Y - highestSettledEdge) / playableHeight,
+                0f,
+                1f
+        );
+    }
+
+    private float currentPileRatio() {
+        if (gameMode == GameMode.DUEL) {
+            return Math.max(
+                    duelPlayerStablePileRatio,
+                    duelAiStablePileRatio
+            );
+        }
+        return singleStablePileRatio;
+    }
+
+    private boolean scoreLayoutTransitionBlocked() {
+        return overlayPage != OverlayPage.NONE
+                || activeDragPointer >= 0
+                || uiMotion.hasActiveControl()
+                || mergeCues.size > 0
+                || scoreTokens.size > 0
+                || duelScoreTokens.size > 0
+                || activeScoreSequence != null
+                || rollingScoreSequence != null
+                || scoreRollQueue.size > 0
+                || scorePulse > 0.05f;
+    }
+
+    private float bottomScoreVisibility() {
+        return scoreLayout.bottomProgress();
+    }
+
+    private float topScoreVisibility() {
+        return 1f - bottomScoreVisibility();
+    }
+
+    private float sceneOffsetY() {
+        return BOTTOM_DOCK_SCENE_OFFSET_Y * bottomScoreVisibility();
+    }
+
+    private float sceneScreenY(float screenY) {
+        return screenY + sceneOffsetY();
+    }
+
+    private float scoreTargetY() {
+        float dockTop = scoreLayout.targetDock()
+                == AdaptiveScoreLayoutController.Dock.BOTTOM
+                ? SCORE_BOTTOM_DOCK_Y
+                : SCORE_TOP_DOCK_Y;
+        return dockTop + SCORE_TARGET_OFFSET_Y;
+    }
+
+    private float manualInputTop() {
+        return MANUAL_INPUT_TOP + sceneOffsetY();
+    }
+
+    private float sceneFloorY() {
+        return FruitRules.FLOOR_Y + sceneOffsetY();
+    }
+
+    private boolean scoreHudContains(float x, float y) {
+        return (topScoreVisibility() > 0.08f
+                && isInside(
+                x,
+                y,
+                26f,
+                SCORE_TOP_DOCK_Y,
+                508f,
+                SCORE_CARD_HEIGHT
+        )) || (bottomScoreVisibility() > 0.08f
+                && isInside(
+                x,
+                y,
+                26f,
+                SCORE_BOTTOM_DOCK_Y,
+                508f,
+                SCORE_CARD_HEIGHT
+        ));
     }
 
     /**
@@ -1044,6 +1233,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 ? (aiEnabled ? "继续观察局面" : "拖动水果，松手投放")
                 : "等待确认结算";
         clearTransientPresentation();
+        initializeAdaptiveScoreLayoutFromWorld();
         if (aiEnabled && alive) {
             showAiReactionImmediately(
                     AiMood.WELCOME,
@@ -1085,6 +1275,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         duelAiReactionRound = -1;
         activeDragPointer = -1;
         clearTransientPresentation();
+        initializeAdaptiveScoreLayoutFromWorld();
         showAiReactionImmediately(
                 duelAiArmed ? AiMood.READY : AiMood.WELCOME,
                 2.0f,
@@ -1132,6 +1323,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         motionPlan = null;
         activeDragPointer = -1;
         physics.clear();
+        resetAdaptiveScoreLayout();
         queue.clear();
         fillQueue();
         bestScore = modeHighScore(gameMode);
@@ -1195,6 +1387,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 settings.versusDropSeconds(),
                 0.20f
         );
+        resetAdaptiveScoreLayout();
         duelForeground = DuelMatch.Side.PLAYER;
         duelResultHoldRemaining = 0f;
         duelResultVisible = false;
@@ -1712,8 +1905,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     accelerated
             );
             token.y = MathUtils.lerp(
-                    token.originY - 30f,
-                    SCORE_TARGET_Y,
+                    token.originY - 30f + sceneOffsetY(),
+                    scoreTargetY(),
                     accelerated
             ) - MathUtils.sin(accelerated * MathUtils.PI) * 34f;
             token.scale = 1f - accelerated * 0.55f;
@@ -1842,6 +2035,71 @@ public final class FruitMergeApplication extends ApplicationAdapter
             appScreen = AppScreen.HOME;
             overlayPage = OverlayPage.HISTORY;
             historyPageIndex = 0;
+            return;
+        }
+        if ("score-low".equals(normalized)
+                || "score-high".equals(normalized)) {
+            startNewMode(GameMode.SOLO);
+            boolean highPile = "score-high".equals(normalized);
+            FruitPhysicsWorld.FruitState[] states = highPile
+                    ? new FruitPhysicsWorld.FruitState[]{
+                    new FruitPhysicsWorld.FruitState(
+                            1,
+                            11,
+                            FruitRules.displayRadius(11),
+                            FruitRules.mergedPhysicsRadius(11),
+                            280f,
+                            945f,
+                            0f,
+                            0f,
+                            0f,
+                            0f,
+                            120
+                    ),
+                    new FruitPhysicsWorld.FruitState(
+                            2,
+                            10,
+                            FruitRules.displayRadius(10),
+                            FruitRules.mergedPhysicsRadius(10),
+                            280f,
+                            671f,
+                            0f,
+                            0f,
+                            0f,
+                            0f,
+                            120
+                    )
+            }
+                    : new FruitPhysicsWorld.FruitState[]{
+                    new FruitPhysicsWorld.FruitState(
+                            1,
+                            4,
+                            FruitRules.displayRadius(4),
+                            FruitRules.mergedPhysicsRadius(4),
+                            210f,
+                            1055f,
+                            0f,
+                            0f,
+                            0f,
+                            0f,
+                            120
+                    ),
+                    new FruitPhysicsWorld.FruitState(
+                            2,
+                            5,
+                            FruitRules.displayRadius(5),
+                            FruitRules.mergedPhysicsRadius(5),
+                            350f,
+                            1043f,
+                            0f,
+                            0f,
+                            0f,
+                            0f,
+                            120
+                    )
+            };
+            physics.restore(new FruitPhysicsWorld.Snapshot(3, 0f, states));
+            initializeAdaptiveScoreLayoutFromWorld();
             return;
         }
         if ("solo".equals(normalized)) {
@@ -2627,8 +2885,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     accelerated
             ) + arc * token.curveOffset;
             token.y = MathUtils.lerp(
-                    token.flightStartY,
-                    SCORE_TARGET_Y,
+                    token.flightStartY + sceneOffsetY(),
+                    scoreTargetY(),
                     accelerated
             ) - arc * 42f;
             token.scale = 1f - accelerated * 0.58f;
@@ -2649,7 +2907,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                         token.color,
                         2.4f,
                         0f,
-                        4f
+                        4f,
+                        false
                 ));
             }
             if (progress < 1f) {
@@ -2770,28 +3029,31 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private void spawnScoreImpact(ScoreSequence sequence) {
         scorePulse = 1f;
         Color color = sequence.lastColor;
+        float targetY = scoreTargetY();
         rings.add(new Ring(
                 SCORE_TARGET_X,
-                SCORE_TARGET_Y,
+                targetY,
                 13f,
                 150f,
                 0.42f,
                 color,
-                3.6f
+                3.6f,
+                false
         ));
         for (int index = 0; index < 15; index++) {
             float angle = effectRandom.nextFloat() * MathUtils.PI2;
             float speed = 50f + effectRandom.nextFloat() * 105f;
             particles.add(new Particle(
                     SCORE_TARGET_X,
-                    SCORE_TARGET_Y,
+                    targetY,
                     MathUtils.cos(angle) * speed,
                     MathUtils.sin(angle) * speed,
                     0.30f + effectRandom.nextFloat() * 0.22f,
                     color,
                     2.2f + effectRandom.nextFloat() * 2.8f,
                     80f,
-                    1.2f
+                    1.2f,
+                    false
             ));
         }
         float pitch = MathUtils.clamp(
@@ -2812,7 +3074,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 130f,
                 0.28f,
                 color,
-                2.2f
+                2.2f,
+                true
         ));
         for (int index = 0; index < 7; index++) {
             float angle = effectRandom.nextFloat() * MathUtils.PI2;
@@ -2826,7 +3089,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     color,
                     2.1f + effectRandom.nextFloat() * 2.4f,
                     150f,
-                    0.8f
+                    0.8f,
+                    true
             ));
         }
     }
@@ -2855,7 +3119,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 285f * intensity,
                 0.54f,
                 color,
-                4.2f
+                4.2f,
+                true
         ));
         rings.add(new Ring(
                 x,
@@ -2864,7 +3129,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 175f * intensity,
                 0.34f,
                 Color.WHITE,
-                2.7f
+                2.7f,
+                true
         ));
         int count = Math.min(
                 44,
@@ -2883,7 +3149,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     color,
                     3f + effectRandom.nextFloat() * 6f,
                     135f,
-                    0.55f
+                    0.55f,
+                    true
             ));
         }
     }
@@ -3345,7 +3612,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         for (FruitPhysicsWorld.FruitBody fruit : physics.fruits()) {
             if (circleIntersectsRectangle(
                     fruit.x(),
-                    fruit.y(),
+                    sceneScreenY(fruit.y()),
                     fruit.displayRadius + 4f,
                     left,
                     top,
@@ -3368,7 +3635,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 : lane.physics().fruits()) {
             if (circleIntersectsRectangle(
                     fruit.x(),
-                    fruit.y(),
+                    sceneScreenY(fruit.y()),
                     fruit.displayRadius + 4f,
                     left,
                     top,
@@ -3765,12 +4032,24 @@ public final class FruitMergeApplication extends ApplicationAdapter
         batch.end();
 
         shapes.begin(ShapeRenderer.ShapeType.Filled);
-        drawEffects();
+        drawEffects(true);
         shapes.end();
 
         batch.begin();
         drawScoreTokens();
         drawDuelScoreTokens();
+        batch.end();
+
+        /*
+         * 底部停靠时 HUD 必须盖在棋盘和水果之上；屏幕空间的收分冲击再画到卡片
+         * 上方。这样既不会让水果遮住总分，也不会把计分闪光压在卡片背后。
+         */
+        shapes.begin(ShapeRenderer.ShapeType.Filled);
+        drawScorePanels();
+        drawEffects(false);
+        shapes.end();
+
+        batch.begin();
         drawText();
         batch.end();
 
@@ -3853,8 +4132,13 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void drawPanels() {
-        roundedRectTop(16f, 16f, 528f, 128f, 20f, CARD_SHADOW);
-        roundedRectTop(16f, 12f, 528f, 128f, 20f, PANEL_COLOR);
+        float headerHeight = MathUtils.lerp(
+                HEADER_EXPANDED_HEIGHT,
+                HEADER_COMPACT_HEIGHT,
+                bottomScoreVisibility()
+        );
+        roundedRectTop(16f, 16f, 528f, headerHeight, 20f, CARD_SHADOW);
+        roundedRectTop(16f, 12f, 528f, headerHeight, 20f, PANEL_COLOR);
 
         drawAnimatedButton(
                 CONTROL_GAME_BACK,
@@ -3879,46 +4163,40 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
         }
 
-        if (scorePulse > 0f) {
-            float expansion = (1f - scorePulse) * 10f;
-            scratchColor.set(
-                    SCORE_GLOW.r,
-                    SCORE_GLOW.g,
-                    SCORE_GLOW.b,
-                    scorePulse * 0.34f
-            );
-            roundedRectTop(
-                    22f - expansion,
-                    65f - expansion,
-                    516f + expansion * 2f,
-                    70f + expansion * 2f,
-                    18f + expansion,
-                    scratchColor
-            );
-        }
-
-        if (gameMode == GameMode.DUEL) {
-            roundedRectTop(26f, 68f, 230f, 66f, 16f, CARD_SHADOW);
-            roundedRectTop(26f, 64f, 230f, 66f, 16f, PLAYER_TINT_SOFT);
-            roundedRectTop(304f, 68f, 230f, 66f, 16f, CARD_SHADOW);
-            roundedRectTop(304f, 64f, 230f, 66f, 16f, AI_TINT_SOFT);
-            shapes.setColor(TEXT_PRIMARY);
-            shapes.circle(280f, toRenderY(99f), 24f, 32);
-            shapes.setColor(SCORE_CARD);
-            shapes.circle(280f, toRenderY(99f), 20f, 32);
-        } else {
-            Color scoreBackground = gameMode == GameMode.AI_DEMO
-                    ? AI_TINT_SOFT
-                    : PLAYER_TINT_SOFT;
-            roundedRectTop(26f, 68f, 508f, 66f, 16f, CARD_SHADOW);
-            roundedRectTop(26f, 64f, 508f, 66f, 16f, scoreBackground);
-        }
-
         // 棋盘几何保持不变；HUD 重排绝不移动训练/推理使用的 spawn_y。
-        roundedRectTop(18f, 254f, 524f, 854f, 18f, CARD_SHADOW);
-        roundedRectTop(18f, 248f, 524f, 860f, 18f, BOARD_FRAME);
-        roundedRectTop(20f, 250f, 520f, 856f, 16f, BOARD_FRAME_SOFT);
-        roundedRectTop(22f, 252f, 516f, 848f, 14f, BOARD_COLOR);
+        float sceneOffset = sceneOffsetY();
+        roundedRectTop(
+                18f,
+                254f + sceneOffset,
+                524f,
+                854f,
+                18f,
+                CARD_SHADOW
+        );
+        roundedRectTop(
+                18f,
+                248f + sceneOffset,
+                524f,
+                860f,
+                18f,
+                BOARD_FRAME
+        );
+        roundedRectTop(
+                20f,
+                250f + sceneOffset,
+                520f,
+                856f,
+                16f,
+                BOARD_FRAME_SOFT
+        );
+        roundedRectTop(
+                22f,
+                252f + sceneOffset,
+                516f,
+                848f,
+                14f,
+                BOARD_COLOR
+        );
         if (gameMode == GameMode.DUEL) {
             Color tint = duelForeground == DuelMatch.Side.PLAYER
                     ? PLAYER_TINT
@@ -3926,7 +4204,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             scratchColor.set(tint.r, tint.g, tint.b, 0.055f);
             roundedRectTop(
                     24f,
-                    254f,
+                    254f + sceneOffset,
                     512f,
                     844f,
                     12f,
@@ -3939,8 +4217,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 ORCHARD_GLOW.b,
                 0.045f
         );
-        shapes.circle(88f, toRenderY(1018f), 58f, 36);
-        shapes.circle(474f, toRenderY(1028f), 50f, 36);
+        shapes.circle(88f, toRenderY(sceneScreenY(1018f)), 58f, 36);
+        shapes.circle(474f, toRenderY(sceneScreenY(1028f)), 50f, 36);
 
         float visibleDangerSeconds = gameMode == GameMode.DUEL
                 ? duelForegroundLane().dangerSeconds()
@@ -3949,7 +4227,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 ? 0.48f
                 : 0.55f + MathUtils.sin(elapsedSeconds * 12f) * 0.25f;
         shapes.setColor(DANGER.r, DANGER.g, DANGER.b, dangerAlpha);
-        float dangerY = toRenderY(FruitRules.SPAWN_Y + 4f);
+        float dangerY = toRenderY(sceneScreenY(FruitRules.SPAWN_Y + 4f));
         for (float x = 30f; x < 530f; x += 20f) {
             shapes.rect(x, dangerY - 1f, 11f, 2f);
         }
@@ -3980,7 +4258,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     screenY += 26f) {
                 shapes.circle(
                         visiblePreviewX,
-                        toRenderY(screenY),
+                        toRenderY(sceneScreenY(screenY)),
                         1.7f,
                         10
                 );
@@ -3993,11 +4271,140 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
             shapes.circle(
                     visiblePreviewX,
-                    toRenderY(previewY(visibleLevel)),
+                    toRenderY(sceneScreenY(previewY(visibleLevel))),
                     FruitRules.displayRadius(visibleLevel) + 5f,
                     40
             );
         }
+    }
+
+    private void drawScorePanels() {
+        drawScorePanelAt(SCORE_TOP_DOCK_Y, topScoreVisibility());
+        drawScorePanelAt(SCORE_BOTTOM_DOCK_Y, bottomScoreVisibility());
+    }
+
+    /**
+     * Two fixed docks cross-fade instead of dragging a full-width opaque card through the fruit
+     * pile. The subtle scale change still makes the relocation readable, while the board itself
+     * provides the continuous spatial motion requested by the adaptive layout.
+     */
+    private void drawScorePanelAt(float top, float visibility) {
+        float alpha = MathUtils.clamp(visibility, 0f, 1f);
+        if (alpha <= 0.002f) {
+            return;
+        }
+        float scale = 0.94f + alpha * 0.06f;
+        float scaledHeight = SCORE_CARD_HEIGHT * scale;
+        float scaledTop = top + (SCORE_CARD_HEIGHT - scaledHeight) * 0.5f;
+
+        if (scorePulse > 0f) {
+            float expansion = (1f - scorePulse) * 10f;
+            scratchColor.set(
+                    SCORE_GLOW.r,
+                    SCORE_GLOW.g,
+                    SCORE_GLOW.b,
+                    scorePulse * 0.34f * alpha
+            );
+            roundedRectTop(
+                    22f - expansion,
+                    scaledTop + 1f - expansion,
+                    516f + expansion * 2f,
+                    scaledHeight + 4f + expansion * 2f,
+                    18f + expansion,
+                    scratchColor
+            );
+        }
+
+        if (gameMode == GameMode.DUEL) {
+            float cardWidth = 230f * scale;
+            float playerLeft = 26f + (230f - cardWidth) * 0.5f;
+            float aiLeft = 304f + (230f - cardWidth) * 0.5f;
+
+            scratchColor.set(CARD_SHADOW);
+            scratchColor.a *= alpha;
+            roundedRectTop(
+                    playerLeft,
+                    scaledTop + 4f,
+                    cardWidth,
+                    scaledHeight,
+                    16f * scale,
+                    scratchColor
+            );
+            scratchColor.set(PLAYER_TINT_SOFT);
+            scratchColor.a *= alpha;
+            roundedRectTop(
+                    playerLeft,
+                    scaledTop,
+                    cardWidth,
+                    scaledHeight,
+                    16f * scale,
+                    scratchColor
+            );
+
+            scratchColor.set(CARD_SHADOW);
+            scratchColor.a *= alpha;
+            roundedRectTop(
+                    aiLeft,
+                    scaledTop + 4f,
+                    cardWidth,
+                    scaledHeight,
+                    16f * scale,
+                    scratchColor
+            );
+            scratchColor.set(AI_TINT_SOFT);
+            scratchColor.a *= alpha;
+            roundedRectTop(
+                    aiLeft,
+                    scaledTop,
+                    cardWidth,
+                    scaledHeight,
+                    16f * scale,
+                    scratchColor
+            );
+
+            float centerY = top + SCORE_CARD_HEIGHT * 0.53f;
+            shapes.setColor(
+                    TEXT_PRIMARY.r,
+                    TEXT_PRIMARY.g,
+                    TEXT_PRIMARY.b,
+                    alpha
+            );
+            shapes.circle(280f, toRenderY(centerY), 24f * scale, 32);
+            shapes.setColor(
+                    SCORE_CARD.r,
+                    SCORE_CARD.g,
+                    SCORE_CARD.b,
+                    alpha
+            );
+            shapes.circle(280f, toRenderY(centerY), 20f * scale, 32);
+            return;
+        }
+
+        float cardWidth = 508f * scale;
+        float cardLeft = 26f + (508f - cardWidth) * 0.5f;
+        Color scoreBackground = gameMode == GameMode.AI_DEMO
+                ? AI_TINT_SOFT
+                : PLAYER_TINT_SOFT;
+        scratchColor.set(CARD_SHADOW);
+        scratchColor.a *= alpha;
+        roundedRectTop(
+                cardLeft,
+                scaledTop + 4f,
+                cardWidth,
+                scaledHeight,
+                16f * scale,
+                scratchColor
+        );
+        scratchColor.set(scoreBackground);
+        scratchColor.a *= alpha;
+        roundedRectTop(
+                cardLeft,
+                scaledTop,
+                cardWidth,
+                scaledHeight,
+                16f * scale,
+                scratchColor
+        );
     }
 
     @SuppressWarnings("unused")
@@ -4291,72 +4698,81 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
     }
 
-    private void drawEffects() {
+    private void drawEffects(boolean boardPass) {
         Gdx.gl.glEnable(GL20.GL_BLEND);
-        for (MergeBurst burst : mergeBursts) {
-            float remaining = MathUtils.clamp(
-                    burst.life / burst.maxLife,
-                    0f,
-                    1f
-            );
-            float progress = 1f - remaining;
-            float renderY = toRenderY(burst.y);
-            float radius = burst.radius * (0.76f + progress * 0.54f);
-            float alpha = (float) Math.pow(remaining, 0.72f) * 0.86f;
-            shapes.setColor(
-                    burst.color.r,
-                    burst.color.g,
-                    burst.color.b,
-                    alpha
-            );
-            for (int ray = 0; ray < burst.rays; ray++) {
-                float angle = burst.rotation
-                        + ray * MathUtils.PI2 / burst.rays;
-                float halfAngle = 0.11f + (ray % 3) * 0.025f;
-                float innerRadius = radius * 0.22f;
-                float outerRadius = radius
-                        * (1.02f + (ray % 4) * 0.075f);
-                shapes.triangle(
-                        burst.x + MathUtils.cos(angle) * innerRadius,
-                        renderY + MathUtils.sin(angle) * innerRadius,
-                        burst.x + MathUtils.cos(angle - halfAngle) * outerRadius,
-                        renderY + MathUtils.sin(angle - halfAngle) * outerRadius,
-                        burst.x + MathUtils.cos(angle + halfAngle) * outerRadius,
-                        renderY + MathUtils.sin(angle + halfAngle) * outerRadius
+        if (boardPass) {
+            for (MergeBurst burst : mergeBursts) {
+                float remaining = MathUtils.clamp(
+                        burst.life / burst.maxLife,
+                        0f,
+                        1f
+                );
+                float progress = 1f - remaining;
+                float renderY = toRenderY(sceneScreenY(burst.y));
+                float radius = burst.radius * (0.76f + progress * 0.54f);
+                float alpha = (float) Math.pow(remaining, 0.72f) * 0.86f;
+                shapes.setColor(
+                        burst.color.r,
+                        burst.color.g,
+                        burst.color.b,
+                        alpha
+                );
+                for (int ray = 0; ray < burst.rays; ray++) {
+                    float angle = burst.rotation
+                            + ray * MathUtils.PI2 / burst.rays;
+                    float halfAngle = 0.11f + (ray % 3) * 0.025f;
+                    float innerRadius = radius * 0.22f;
+                    float outerRadius = radius
+                            * (1.02f + (ray % 4) * 0.075f);
+                    shapes.triangle(
+                            burst.x + MathUtils.cos(angle) * innerRadius,
+                            renderY + MathUtils.sin(angle) * innerRadius,
+                            burst.x + MathUtils.cos(angle - halfAngle)
+                                    * outerRadius,
+                            renderY + MathUtils.sin(angle - halfAngle)
+                                    * outerRadius,
+                            burst.x + MathUtils.cos(angle + halfAngle)
+                                    * outerRadius,
+                            renderY + MathUtils.sin(angle + halfAngle)
+                                    * outerRadius
+                    );
+                    shapes.circle(
+                            burst.x + MathUtils.cos(angle) * outerRadius,
+                            renderY + MathUtils.sin(angle) * outerRadius,
+                            3.4f + (ray % 3) * 1.5f,
+                            12
+                    );
+                }
+                float flashAlpha = MathUtils.clamp(
+                        (remaining - 0.58f) / 0.42f,
+                        0f,
+                        1f
+                ) * 0.26f;
+                shapes.setColor(
+                        burst.color.r,
+                        burst.color.g,
+                        burst.color.b,
+                        alpha * 0.24f
                 );
                 shapes.circle(
-                        burst.x + MathUtils.cos(angle) * outerRadius,
-                        renderY + MathUtils.sin(angle) * outerRadius,
-                        3.4f + (ray % 3) * 1.5f,
-                        12
+                        burst.x,
+                        renderY,
+                        radius * (0.53f - progress * 0.10f),
+                        32
+                );
+                shapes.setColor(1f, 1f, 0.91f, flashAlpha);
+                shapes.circle(
+                        burst.x,
+                        renderY,
+                        radius * (0.24f + remaining * 0.08f),
+                        28
                 );
             }
-            float flashAlpha = MathUtils.clamp(
-                    (remaining - 0.58f) / 0.42f,
-                    0f,
-                    1f
-            ) * 0.26f;
-            shapes.setColor(
-                    burst.color.r,
-                    burst.color.g,
-                    burst.color.b,
-                    alpha * 0.24f
-            );
-            shapes.circle(
-                    burst.x,
-                    renderY,
-                    radius * (0.53f - progress * 0.10f),
-                    32
-            );
-            shapes.setColor(1f, 1f, 0.91f, flashAlpha);
-            shapes.circle(
-                    burst.x,
-                    renderY,
-                    radius * (0.24f + remaining * 0.08f),
-                    28
-            );
         }
         for (Particle particle : particles) {
+            if (particle.boardAnchored != boardPass) {
+                continue;
+            }
             float remaining = MathUtils.clamp(
                     particle.life / particle.maxLife,
                     0f,
@@ -4371,12 +4787,19 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
             shapes.circle(
                     particle.x,
-                    toRenderY(particle.y),
+                    toRenderY(
+                            particle.boardAnchored
+                                    ? sceneScreenY(particle.y)
+                                    : particle.y
+                    ),
                     particle.radius * (0.62f + remaining * 0.38f),
                     12
             );
         }
         for (Ring ring : rings) {
+            if (ring.boardAnchored != boardPass) {
+                continue;
+            }
             float remaining = MathUtils.clamp(
                     ring.life / ring.maxLife,
                     0f,
@@ -4384,7 +4807,11 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
             float alpha = (float) Math.pow(remaining, 0.62f) * 0.82f;
             shapes.setColor(ring.color.r, ring.color.g, ring.color.b, alpha);
-            float renderY = toRenderY(ring.y);
+            float renderY = toRenderY(
+                    ring.boardAnchored
+                            ? sceneScreenY(ring.y)
+                            : ring.y
+            );
             float dotRadius = ring.dotRadius
                     * (0.46f + remaining * 0.54f);
             for (int dot = 0; dot < 30; dot++) {
@@ -4406,6 +4833,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         for (ScoreToken token : scoreTokens) {
             String text = "+" + token.value;
             float scale = POPUP_FONT_SCALE * token.scale;
+            float displayY = token.phase == TokenPhase.FLY
+                    ? token.y
+                    : sceneScreenY(token.y);
             popupFont.getData().setScale(scale);
 
             scratchColor.set(
@@ -4419,7 +4849,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     popupFont,
                     text,
                     token.x + 2.2f,
-                    token.y + 2.8f
+                    displayY + 2.8f
             );
 
             scratchColor.set(
@@ -4429,7 +4859,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     token.alpha
             );
             popupFont.setColor(scratchColor);
-            drawTextCentered(popupFont, text, token.x, token.y);
+            drawTextCentered(popupFont, text, token.x, displayY);
         }
         popupFont.getData().setScale(POPUP_FONT_SCALE);
     }
@@ -4441,6 +4871,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         for (DuelScoreToken token : duelScoreTokens) {
             String text = "+" + token.value;
             float scale = POPUP_FONT_SCALE * token.scale;
+            float displayY = token.age > 0.50f
+                    ? token.y
+                    : sceneScreenY(token.y);
             popupFont.getData().setScale(scale);
             scratchColor.set(
                     token.color.r * 0.42f,
@@ -4453,7 +4886,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     popupFont,
                     text,
                     token.x + 2.2f,
-                    token.y + 2.8f
+                    displayY + 2.8f
             );
             scratchColor.set(
                     MathUtils.lerp(token.color.r, 1f, 0.16f),
@@ -4462,7 +4895,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     token.alpha
             );
             popupFont.setColor(scratchColor);
-            drawTextCentered(popupFont, text, token.x, token.y);
+            drawTextCentered(popupFont, text, token.x, displayY);
         }
         popupFont.getData().setScale(POPUP_FONT_SCALE);
     }
@@ -4490,7 +4923,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruit(
                     fruit.level,
                     fruit.x(),
-                    fruit.y(),
+                    sceneScreenY(fruit.y()),
                     fruit.displayRadius * 2f,
                     1f
             );
@@ -4507,7 +4940,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruit(
                     currentLevel,
                     previewX,
-                    previewY(currentLevel),
+                    sceneScreenY(previewY(currentLevel)),
                     FruitRules.displayRadius(currentLevel) * 2f,
                     alpha
             );
@@ -4537,7 +4970,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruitTinted(
                     fruit.level,
                     fruit.x() - 1.8f,
-                    fruit.y(),
+                    sceneScreenY(fruit.y()),
                     size,
                     backgroundTint,
                     0.075f
@@ -4545,7 +4978,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruitTinted(
                     fruit.level,
                     fruit.x() + 1.8f,
-                    fruit.y(),
+                    sceneScreenY(fruit.y()),
                     size,
                     backgroundTint,
                     0.075f
@@ -4553,7 +4986,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruitTinted(
                     fruit.level,
                     fruit.x(),
-                    fruit.y() + 1.4f,
+                    sceneScreenY(fruit.y() + 1.4f),
                     size,
                     backgroundTint,
                     0.10f
@@ -4564,7 +4997,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruit(
                     fruit.level,
                     fruit.x(),
-                    fruit.y(),
+                    sceneScreenY(fruit.y()),
                     fruit.displayRadius * 2f,
                     1f
             );
@@ -4586,7 +5019,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruitTinted(
                     level,
                     background.previewX(),
-                    previewY(level),
+                    sceneScreenY(previewY(level)),
                     FruitRules.displayRadius(level) * 2f,
                     tint,
                     0.25f
@@ -4598,7 +5031,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawFruit(
                     level,
                     foreground.previewX(),
-                    previewY(level),
+                    sceneScreenY(previewY(level)),
                     FruitRules.displayRadius(level) * 2f,
                     0.96f
             );
@@ -4719,100 +5152,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
         }
 
-        if (gameMode == GameMode.DUEL) {
-            smallFont.setColor(PLAYER_SCORE_DARK);
-            drawTextInBox(
-                    smallFont,
-                    "玩家",
-                    38f,
-                    70f,
-                    58f,
-                    24f,
-                    Align.left
-            );
-            normalFont.getData().setScale(
-                    0.62f * (1f + scorePulse * 0.08f)
-            );
-            normalFont.setColor(PLAYER_SCORE_DARK);
-            drawTextInBox(
-                    normalFont,
-                    Integer.toString(duelPlayerScore()),
-                    88f,
-                    70f,
-                    154f,
-                    54f,
-                    Align.center
-            );
-            normalFont.setColor(AI_SCORE_DARK);
-            drawTextInBox(
-                    normalFont,
-                    Integer.toString(duelAiScore()),
-                    318f,
-                    70f,
-                    154f,
-                    54f,
-                    Align.center
-            );
-            normalFont.getData().setScale(0.38f);
-            smallFont.setColor(AI_SCORE_DARK);
-            drawTextInBox(
-                    smallFont,
-                    "AI",
-                    472f,
-                    70f,
-                    50f,
-                    24f,
-                    Align.right
-            );
-            smallFont.setColor(TEXT_PRIMARY);
-            drawTextInBox(
-                    smallFont,
-                    "VS",
-                    256f,
-                    82f,
-                    48f,
-                    34f,
-                    Align.center
-            );
-        } else {
-            Color scoreColor = gameMode == GameMode.AI_DEMO
-                    ? AI_SCORE_DARK
-                    : PLAYER_SCORE_DARK;
-            smallFont.setColor(scoreColor);
-            drawTextInBox(
-                    smallFont,
-                    gameMode == GameMode.AI_DEMO ? "AI 得分" : "本局得分",
-                    42f,
-                    70f,
-                    88f,
-                    24f,
-                    Align.left
-            );
-            normalFont.setColor(scoreColor);
-            normalFont.getData().setScale(
-                    0.68f * (1f + scorePulse * 0.08f)
-            );
-            drawTextInBox(
-                    normalFont,
-                    Integer.toString(displayedScore),
-                    130f,
-                    67f,
-                    300f,
-                    58f,
-                    Align.center
-            );
-            normalFont.getData().setScale(0.38f);
-            smallFont.setColor(scoreColor);
-            drawTextInBox(
-                    smallFont,
-                    "最高 " + displayedBestScore,
-                    430f,
-                    70f,
-                    88f,
-                    44f,
-                    Align.right
-            );
-        }
+        drawScoreTextAt(SCORE_TOP_DOCK_Y, topScoreVisibility());
+        drawScoreTextAt(SCORE_BOTTOM_DOCK_Y, bottomScoreVisibility());
 
         if (gameMode == GameMode.DUEL) {
             smallFont.setColor(duelRoundUrgent() ? DANGER : TEXT_MUTED);
@@ -4822,7 +5163,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                             ? "AI 已就位，等你一起投放"
                             : duelRoundLabel(),
                     100f,
-                    1068f,
+                    sceneScreenY(1068f),
                     360f,
                     28f,
                     Align.center
@@ -4833,7 +5174,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     smallFont,
                     "拖动水果，松手投放",
                     140f,
-                    1070f,
+                    sceneScreenY(1070f),
                     280f,
                     28f,
                     Align.center
@@ -4844,12 +5185,154 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     smallFont,
                     "AI 正在独立游玩",
                     140f,
-                    1070f,
+                    sceneScreenY(1070f),
                     280f,
                     28f,
                     Align.center
             );
         }
+    }
+
+    private void drawScoreTextAt(float dockTop, float visibility) {
+        float alpha = MathUtils.clamp(visibility, 0f, 1f);
+        if (alpha <= 0.01f) {
+            return;
+        }
+        if (gameMode == GameMode.DUEL) {
+            smallFont.setColor(
+                    PLAYER_SCORE_DARK.r,
+                    PLAYER_SCORE_DARK.g,
+                    PLAYER_SCORE_DARK.b,
+                    alpha
+            );
+            drawTextInBox(
+                    smallFont,
+                    "玩家",
+                    38f,
+                    dockTop + 6f,
+                    58f,
+                    24f,
+                    Align.left
+            );
+            normalFont.getData().setScale(
+                    0.62f * (1f + scorePulse * 0.08f)
+            );
+            normalFont.setColor(
+                    PLAYER_SCORE_DARK.r,
+                    PLAYER_SCORE_DARK.g,
+                    PLAYER_SCORE_DARK.b,
+                    alpha
+            );
+            drawTextInBox(
+                    normalFont,
+                    Integer.toString(duelPlayerScore()),
+                    88f,
+                    dockTop + 6f,
+                    154f,
+                    54f,
+                    Align.center
+            );
+            normalFont.setColor(
+                    AI_SCORE_DARK.r,
+                    AI_SCORE_DARK.g,
+                    AI_SCORE_DARK.b,
+                    alpha
+            );
+            drawTextInBox(
+                    normalFont,
+                    Integer.toString(duelAiScore()),
+                    318f,
+                    dockTop + 6f,
+                    154f,
+                    54f,
+                    Align.center
+            );
+            normalFont.getData().setScale(0.38f);
+            smallFont.setColor(
+                    AI_SCORE_DARK.r,
+                    AI_SCORE_DARK.g,
+                    AI_SCORE_DARK.b,
+                    alpha
+            );
+            drawTextInBox(
+                    smallFont,
+                    "AI",
+                    472f,
+                    dockTop + 6f,
+                    50f,
+                    24f,
+                    Align.right
+            );
+            smallFont.setColor(
+                    TEXT_PRIMARY.r,
+                    TEXT_PRIMARY.g,
+                    TEXT_PRIMARY.b,
+                    alpha
+            );
+            drawTextInBox(
+                    smallFont,
+                    "VS",
+                    256f,
+                    dockTop + 18f,
+                    48f,
+                    34f,
+                    Align.center
+            );
+            return;
+        }
+
+        Color scoreColor = gameMode == GameMode.AI_DEMO
+                ? AI_SCORE_DARK
+                : PLAYER_SCORE_DARK;
+        smallFont.setColor(
+                scoreColor.r,
+                scoreColor.g,
+                scoreColor.b,
+                alpha
+        );
+        drawTextInBox(
+                smallFont,
+                gameMode == GameMode.AI_DEMO ? "AI 得分" : "本局得分",
+                42f,
+                dockTop + 6f,
+                88f,
+                24f,
+                Align.left
+        );
+        normalFont.setColor(
+                scoreColor.r,
+                scoreColor.g,
+                scoreColor.b,
+                alpha
+        );
+        normalFont.getData().setScale(
+                0.68f * (1f + scorePulse * 0.08f)
+        );
+        drawTextInBox(
+                normalFont,
+                Integer.toString(displayedScore),
+                130f,
+                dockTop + 3f,
+                300f,
+                58f,
+                Align.center
+        );
+        normalFont.getData().setScale(0.38f);
+        smallFont.setColor(
+                scoreColor.r,
+                scoreColor.g,
+                scoreColor.b,
+                alpha
+        );
+        drawTextInBox(
+                smallFont,
+                "最高 " + displayedBestScore,
+                430f,
+                dockTop + 6f,
+                88f,
+                44f,
+                Align.right
+        );
     }
 
     private String modeTitle() {
@@ -6938,16 +7421,22 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 != DuelMatch.Outcome.IN_PROGRESS) {
             return true;
         }
+        if (scoreHudContains(touchPoint.x, touchPoint.y)) {
+            // The bottom score card is display-only but must not become a hidden drop surface.
+            return true;
+        }
         if (gameMode == GameMode.SOLO
                 && canManualDragCurrent()
-                && touchPoint.y >= MANUAL_INPUT_TOP) {
+                && touchPoint.y >= manualInputTop()
+                && touchPoint.y <= sceneFloorY()) {
             activeDragPointer = pointer;
             previewX = FruitRules.clampDropX(touchPoint.x, currentLevel);
             return true;
         }
         if (gameMode == GameMode.DUEL
                 && duelCanPlayerDrag()
-                && touchPoint.y >= MANUAL_INPUT_TOP) {
+                && touchPoint.y >= manualInputTop()
+                && touchPoint.y <= sceneFloorY()) {
             activeDragPointer = pointer;
             setDuelPlayerPreviewX(touchPoint.x);
             return true;
@@ -7003,14 +7492,18 @@ public final class FruitMergeApplication extends ApplicationAdapter
         updateTouchPoint(screenX, screenY);
         if (gameMode == GameMode.SOLO
                 && canManualDropCurrent()
-                && touchPoint.y >= MANUAL_INPUT_TOP) {
+                && touchPoint.y >= manualInputTop()
+                && touchPoint.y <= sceneFloorY()
+                && !scoreHudContains(touchPoint.x, touchPoint.y)) {
             previewX = FruitRules.clampDropX(touchPoint.x, currentLevel);
             dropCurrent(previewX);
             return true;
         }
         if (gameMode == GameMode.DUEL
                 && duelCanPlayerDrop()
-                && touchPoint.y >= MANUAL_INPUT_TOP) {
+                && touchPoint.y >= manualInputTop()
+                && touchPoint.y <= sceneFloorY()
+                && !scoreHudContains(touchPoint.x, touchPoint.y)) {
             setDuelPlayerPreviewX(touchPoint.x);
             dropDuelPlayer();
             return true;
@@ -7634,6 +8127,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         private final float radius;
         private final float gravity;
         private final float drag;
+        private final boolean boardAnchored;
 
         private Particle(
                 float x,
@@ -7644,7 +8138,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 Color color,
                 float radius,
                 float gravity,
-                float drag) {
+                float drag,
+                boolean boardAnchored) {
             this.x = x;
             this.y = y;
             this.vx = vx;
@@ -7655,6 +8150,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             this.radius = radius;
             this.gravity = gravity;
             this.drag = drag;
+            this.boardAnchored = boardAnchored;
         }
     }
 
@@ -7667,6 +8163,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         private final float maxLife;
         private final Color color;
         private final float dotRadius;
+        private final boolean boardAnchored;
 
         private Ring(
                 float x,
@@ -7675,7 +8172,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 float speed,
                 float life,
                 Color color,
-                float dotRadius) {
+                float dotRadius,
+                boolean boardAnchored) {
             this.x = x;
             this.y = y;
             this.radius = radius;
@@ -7684,6 +8182,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             this.maxLife = life;
             this.color = new Color(color);
             this.dotRadius = dotRadius;
+            this.boardAnchored = boardAnchored;
         }
     }
 }
