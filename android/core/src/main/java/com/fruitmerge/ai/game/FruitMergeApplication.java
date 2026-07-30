@@ -38,15 +38,26 @@ import java.util.Random;
 public final class FruitMergeApplication extends ApplicationAdapter
         implements InputProcessor {
     private static final float PREVIEW_GAP = 12f;
-    private static final float DROP_COOLDOWN_SECONDS = 0.36f;
+    private static final float MANUAL_DROP_COOLDOWN_SECONDS = 0.14f;
+    private static final float AI_DROP_COOLDOWN_SECONDS = 0.36f;
+    private static final float MANUAL_INPUT_TOP = 144f;
     private static final float GAME_OVER_SECONDS = 2f;
     private static final float AI_LOADING_FALLBACK_SECONDS = 12f;
-    private static final float AI_TOGGLE_LEFT = 378f;
+    private static final float MODE_BUTTON_LEFT = 188f;
+    private static final float MODE_BUTTON_TOP = 18f;
+    private static final float MODE_BUTTON_WIDTH = 86f;
+    private static final float MODE_BUTTON_HEIGHT = 42f;
+    private static final float AI_TOGGLE_LEFT = 282f;
     private static final float AI_TOGGLE_TOP = 18f;
-    private static final float AI_TOGGLE_WIDTH = 154f;
+    private static final float AI_TOGGLE_WIDTH = 148f;
     private static final float AI_TOGGLE_HEIGHT = 42f;
+    private static final float HISTORY_BUTTON_LEFT = 440f;
+    private static final float SETTINGS_BUTTON_LEFT = 490f;
+    private static final float UTILITY_BUTTON_TOP = 18f;
+    private static final float UTILITY_BUTTON_SIZE = 42f;
     private static final float MERGE_CUE_GAP_SECONDS = 0.105f;
     private static final float MERGE_PRESENTATION_SETTLE_SECONDS = 0.28f;
+    private static final float MERGE_PRESENTATION_MAX_HOLD_SECONDS = 1.45f;
     private static final float SCORE_TOKEN_POP_SECONDS = 0.34f;
     private static final float SCORE_TOKEN_FLIGHT_SECONDS = 0.48f;
     private static final float SCORE_TARGET_X = 84f;
@@ -103,6 +114,16 @@ public final class FruitMergeApplication extends ApplicationAdapter
             new Color(1f, 0.60f, 0.30f, 0.10f);
     private static final Color SCORE_GLOW =
             new Color(1f, 0.68f, 0.18f, 1f);
+    private static final Color PLAYER_TINT =
+            new Color(0.97f, 0.48f, 0.46f, 1f);
+    private static final Color PLAYER_TINT_SOFT =
+            new Color(1f, 0.84f, 0.82f, 1f);
+    private static final Color AI_TINT =
+            new Color(0.39f, 0.66f, 0.96f, 1f);
+    private static final Color AI_TINT_SOFT =
+            new Color(0.81f, 0.90f, 1f, 1f);
+    private static final Color OVERLAY_DIM =
+            new Color(0.25f, 0.12f, 0.07f, 0.62f);
 
     private final AiService aiService;
     /*
@@ -118,6 +139,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private final Array<MergeBurst> mergeBursts = new Array<>();
     private final Array<MergeCue> mergeCues = new Array<>();
     private final Array<ScoreToken> scoreTokens = new Array<>();
+    private final Array<DuelScoreToken> duelScoreTokens = new Array<>();
     private final Array<ScoreSequence> scoreRollQueue = new Array<>();
     private final Vector3 touchPoint = new Vector3();
     private final Color scratchColor = new Color();
@@ -137,6 +159,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private Sound mergePopSound;
     private Sound mergeSoftSound;
     private Sound scoreCollectSound;
+    private GameProfileStore profileStore;
+    private GameProfileStore.Settings settings;
 
     private int score;
     private int displayedScore;
@@ -164,12 +188,29 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private int scoreRollStart;
     private int scoreRollTarget;
     private int nextScoreSequenceId;
+    private int currentWatermelons;
+    private int soloPercentile;
     private long decisionEpoch;
+    private float historyResetConfirmSeconds;
+    private float modeSwitchConfirmSeconds;
+    private boolean soloResultRecorded;
     private MotionPlan motionPlan;
     private ScoreSequence activeScoreSequence;
     private ScoreSequence rollingScoreSequence;
+    private DuelMatch duelMatch;
+    private DuelMatch.Side duelForeground = DuelMatch.Side.PLAYER;
+    private MotionPlan duelAiMotionPlan;
+    private boolean duelAiRequestInFlight;
+    private long duelDecisionEpoch;
+    private float duelResultHoldRemaining;
+    private boolean duelResultVisible;
+    private boolean duelResultRecorded;
+    private int duelPercentile;
+    private String duelResultReason = "";
     private AiState aiState = AiState.OBSERVING;
     private String aiDetail = "启动中";
+    private GameMode gameMode = GameMode.CLASSIC;
+    private OverlayPage overlayPage = OverlayPage.NONE;
 
     public FruitMergeApplication(AiService aiService) {
         this.aiService = aiService;
@@ -204,6 +245,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         glyphLayout = new GlyphLayout();
         loadFruitTextures();
         loadAudio();
+        profileStore = GameProfileStore.open();
+        settings = profileStore.settings();
+        bestScore = profileStore.history().highScore();
 
         physics = new FruitPhysicsWorld();
         Gdx.input.setInputProcessor(this);
@@ -217,9 +261,24 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     @Override
     public void render() {
-        float delta = Math.min(Gdx.graphics.getDeltaTime(), 0.05f);
-        elapsedSeconds += delta;
-        updateGame(delta);
+        float realDelta = Math.min(Gdx.graphics.getDeltaTime(), 0.05f);
+        elapsedSeconds += realDelta;
+        historyResetConfirmSeconds = Math.max(
+                0f,
+                historyResetConfirmSeconds - realDelta
+        );
+        modeSwitchConfirmSeconds = Math.max(
+                0f,
+                modeSwitchConfirmSeconds - realDelta
+        );
+        if (overlayPage == OverlayPage.NONE) {
+            float gameDelta = realDelta * settings.gameSpeed();
+            if (gameMode == GameMode.CLASSIC) {
+                updateGame(gameDelta);
+            } else {
+                updateDuelGame(realDelta, gameDelta);
+            }
+        }
         drawGame();
     }
 
@@ -239,6 +298,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         if (physics != null) {
             physics.dispose();
         }
+        disposeDuelGame();
         if (fruitTextures != null) {
             for (int level = FruitRules.MIN_LEVEL;
                     level <= FruitRules.MAX_LEVEL;
@@ -359,6 +419,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         scoreRollStart = 0;
         scoreRollTarget = 0;
         nextScoreSequenceId = 0;
+        currentWatermelons = 0;
+        soloPercentile = 0;
+        soloResultRecorded = false;
     }
 
     private void fillQueue() {
@@ -369,6 +432,442 @@ public final class FruitMergeApplication extends ApplicationAdapter
                             FruitRules.SPAWN_MAX_LEVEL
                                     - FruitRules.SPAWN_MIN_LEVEL + 1)
             );
+        }
+    }
+
+    private void resetDuelGame() {
+        disposeDuelGame();
+        duelMatch = new DuelMatch(
+                queueRandom,
+                settings.versusDropSeconds(),
+                0.20f
+        );
+        duelForeground = DuelMatch.Side.PLAYER;
+        duelResultHoldRemaining = 0f;
+        duelResultVisible = false;
+        duelResultRecorded = false;
+        duelPercentile = 0;
+        duelResultReason = "";
+        invalidateDuelDecision();
+        activeDragPointer = -1;
+        particles.clear();
+        rings.clear();
+        mergeBursts.clear();
+        mergeCues.clear();
+        scoreTokens.clear();
+        duelScoreTokens.clear();
+        scoreRollQueue.clear();
+        activeScoreSequence = null;
+        rollingScoreSequence = null;
+        scorePulse = 0f;
+    }
+
+    private void disposeDuelGame() {
+        invalidateDuelDecision();
+        if (duelMatch != null) {
+            duelMatch.dispose();
+            duelMatch = null;
+        }
+        duelScoreTokens.clear();
+    }
+
+    private void invalidateDuelDecision() {
+        duelDecisionEpoch += 1L;
+        duelAiRequestInFlight = false;
+        duelAiMotionPlan = null;
+    }
+
+    private void updateDuelGame(float realDelta, float gameDelta) {
+        if (duelMatch == null) {
+            resetDuelGame();
+        }
+        if (duelMatch.outcome() != DuelMatch.Outcome.IN_PROGRESS) {
+            updateEffects(gameDelta);
+            updateDuelScoreTokens(gameDelta);
+            if (!duelResultVisible) {
+                duelResultHoldRemaining = Math.max(
+                        0f,
+                        duelResultHoldRemaining - realDelta
+                );
+                if (duelResultHoldRemaining <= 0f) {
+                    duelResultVisible = true;
+                }
+            }
+            return;
+        }
+
+        int previousRound = duelMatch.roundIndex();
+        duelMatch.update(realDelta, settings.gameSpeed());
+        consumeDuelMergeEvents();
+        updateEffects(gameDelta);
+        updateDuelScoreTokens(gameDelta);
+
+        if (duelMatch.outcome() != DuelMatch.Outcome.IN_PROGRESS) {
+            beginDuelResult();
+            return;
+        }
+        if (duelMatch.roundIndex() != previousRound) {
+            invalidateDuelDecision();
+        }
+
+        updateDuelAi(realDelta);
+        if (duelMatch.roundOpen()
+                && duelMatch.roundRemainingSeconds() <= 0f) {
+            if (!duelMatch.playerLane().submittedThisRound()) {
+                boolean dropped = duelMatch.timeoutPlayer();
+                if (dropped) {
+                    spawnDuelDropFeedback(DuelMatch.Side.PLAYER);
+                }
+            }
+            if (!duelMatch.aiLane().submittedThisRound()) {
+                AiDecision fallback = fallbackDecision(
+                        createDuelSnapshot(duelMatch.aiLane())
+                );
+                float x = FruitRules.actionDropX(
+                        fallback.actionIndex,
+                        duelMatch.currentLevel()
+                );
+                boolean dropped = duelMatch.timeoutAi(x);
+                if (dropped) {
+                    spawnDuelDropFeedback(DuelMatch.Side.AI);
+                }
+                invalidateDuelDecision();
+            }
+        }
+    }
+
+    private void consumeDuelMergeEvents() {
+        boolean aiSceneChanged = false;
+        for (DuelMatch.MergeVisualEvent event
+                : duelMatch.drainMergeVisualEvents()) {
+            if (event.side() == DuelMatch.Side.AI) {
+                /*
+                 * AI 的局面在请求发出后仍可能因低速碰撞继续合成。该请求基于旧图，
+                 * 必须只失效 AI 自己的票据；玩家场合成不能无端取消对手决策。
+                 */
+                aiSceneChanged = true;
+            }
+            boolean foreground = event.side() == duelForeground;
+            if (foreground) {
+                spawnMergeEffect(
+                        event.x(),
+                        event.y(),
+                        event.level(),
+                        1
+                );
+                duelScoreTokens.add(new DuelScoreToken(
+                        event.side(),
+                        event.x(),
+                        event.y(),
+                        event.scoreDelta(),
+                        fruitAccent(event.level())
+                ));
+            }
+            float pan = MathUtils.clamp(
+                    (event.x() / FruitRules.BOARD_WIDTH - 0.5f) * 1.1f,
+                    -0.72f,
+                    0.72f
+            );
+            float pitch = MathUtils.clamp(
+                    0.94f + event.level() * 0.018f,
+                    0.90f,
+                    1.24f
+            );
+            float sceneVolume = foreground ? 1f : 0.32f;
+            playSound(
+                    mergePopSound,
+                    0.34f * sceneVolume,
+                    pitch,
+                    pan
+            );
+            if (event.level() >= 5) {
+                playSound(
+                        mergeSoftSound,
+                        0.15f * sceneVolume,
+                        pitch * 0.97f,
+                        pan
+                );
+            }
+            if (event.side() == DuelMatch.Side.PLAYER) {
+                vibrateIf(
+                        settings.vibrateOnMerge(),
+                        event.level() >= 8 ? 36 : 18
+                );
+            }
+            scorePulse = 1f;
+        }
+        if (aiSceneChanged) {
+            invalidateDuelDecision();
+        }
+    }
+
+    private void updateDuelAi(float realDelta) {
+        if (duelMatch == null
+                || !duelMatch.roundOpen()
+                || duelMatch.aiLane().submittedThisRound()
+                || duelMatch.outcome()
+                != DuelMatch.Outcome.IN_PROGRESS) {
+            return;
+        }
+        float remaining = duelMatch.roundRemainingSeconds();
+        if (duelAiMotionPlan != null) {
+            MotionSample sample = duelAiMotionPlan.update(realDelta);
+            duelMatch.setAiPreviewX(sample.x);
+            if (sample.finished) {
+                float x = FruitRules.actionDropX(
+                        duelAiMotionPlan.decision.actionIndex,
+                        duelMatch.currentLevel()
+                );
+                duelAiMotionPlan = null;
+                dropDuelAiAt(x);
+            }
+            return;
+        }
+        if (remaining <= 0.65f) {
+            AiDecision fallback = fallbackDecision(
+                    createDuelSnapshot(duelMatch.aiLane())
+            );
+            invalidateDuelDecision();
+            dropDuelAiAt(FruitRules.actionDropX(
+                    fallback.actionIndex,
+                    duelMatch.currentLevel()
+            ));
+            return;
+        }
+        if (duelAiRequestInFlight) {
+            return;
+        }
+
+        boolean stable = duelMatch.aiLane().physics().isStable();
+        if (!stable && remaining > 1.35f) {
+            return;
+        }
+        if (!stable || !aiService.isAiReady()) {
+            AiDecision fallback = fallbackDecision(
+                    createDuelSnapshot(duelMatch.aiLane())
+            );
+            if (remaining > 1.25f) {
+                duelAiMotionPlan = MotionPlan.create(
+                        fallback,
+                        duelMatch.aiLane().previewX(),
+                        duelMatch.currentLevel(),
+                        motionRandom
+                );
+            } else {
+                dropDuelAiAt(FruitRules.actionDropX(
+                        fallback.actionIndex,
+                        duelMatch.currentLevel()
+                ));
+            }
+            return;
+        }
+        requestDuelAiDecision();
+    }
+
+    private void requestDuelAiDecision() {
+        DuelMatch match = duelMatch;
+        if (match == null || !match.roundOpen()) {
+            return;
+        }
+        duelAiRequestInFlight = true;
+        int requestRound = match.roundIndex();
+        long requestGeneration = match.matchGeneration();
+        long ticket = ++duelDecisionEpoch;
+        int requestedLevel = match.currentLevel();
+        GameSnapshot snapshot = createDuelSnapshot(match.aiLane());
+        aiService.requestDecision(snapshot, new AiService.DecisionCallback() {
+            @Override
+            public void onSuccess(AiDecision decision) {
+                deliverDuelDecision(
+                        ticket,
+                        requestGeneration,
+                        requestRound,
+                        requestedLevel,
+                        decision
+                );
+            }
+
+            @Override
+            public void onFailure(String message) {
+                deliverDuelDecision(
+                        ticket,
+                        requestGeneration,
+                        requestRound,
+                        requestedLevel,
+                        null
+                );
+            }
+        });
+    }
+
+    private void deliverDuelDecision(
+            long ticket,
+            long generation,
+            int round,
+            int level,
+            AiDecision decision) {
+        if (disposed || Gdx.app == null) {
+            return;
+        }
+        Gdx.app.postRunnable(() -> {
+            DuelMatch match = duelMatch;
+            if (disposed
+                    || gameMode != GameMode.DUEL
+                    || overlayPage != OverlayPage.NONE
+                    || match == null
+                    || ticket != duelDecisionEpoch
+                    || generation != match.matchGeneration()
+                    || round != match.roundIndex()
+                    || level != match.currentLevel()
+                    || !match.roundOpen()
+                    || match.aiLane().submittedThisRound()
+                    || match.outcome()
+                    != DuelMatch.Outcome.IN_PROGRESS) {
+                return;
+            }
+            duelAiRequestInFlight = false;
+            AiDecision selected = decision == null
+                    ? fallbackDecision(createDuelSnapshot(match.aiLane()))
+                    : decision;
+            if (match.roundRemainingSeconds() > 1.25f) {
+                duelAiMotionPlan = MotionPlan.create(
+                        selected,
+                        match.aiLane().previewX(),
+                        match.currentLevel(),
+                        motionRandom
+                );
+            } else {
+                dropDuelAiAt(FruitRules.actionDropX(
+                        selected.actionIndex,
+                        match.currentLevel()
+                ));
+            }
+        });
+    }
+
+    private GameSnapshot createDuelSnapshot(DuelMatch.Lane lane) {
+        List<GameSnapshot.FruitSnapshot> fruitSnapshots = new ArrayList<>();
+        for (FruitPhysicsWorld.FruitBody fruit : lane.physics().fruits()) {
+            fruitSnapshots.add(new GameSnapshot.FruitSnapshot(
+                    fruit.id,
+                    fruit.level,
+                    fruit.displayRadius,
+                    fruit.physicsRadius,
+                    fruit.x(),
+                    fruit.y(),
+                    fruit.vx(),
+                    fruit.vy(),
+                    fruit.angle(),
+                    fruit.angularVelocity(),
+                    fruit.ageFrames(),
+                    fruit.isStable()
+            ));
+        }
+        return new GameSnapshot(
+                lane.score(),
+                lane.lastScore(),
+                lane.stepCount(),
+                duelMatch.queueSnapshot().toArray(),
+                fruitSnapshots
+        );
+    }
+
+    private void beginDuelResult() {
+        invalidateDuelDecision();
+        activeDragPointer = -1;
+        duelResultHoldRemaining = settings.resultHoldSeconds();
+        duelResultVisible = false;
+        DuelMatch.Lane player = duelMatch.playerLane();
+        DuelMatch.Lane ai = duelMatch.aiLane();
+        boolean bothEliminated = !player.alive() && !ai.alive();
+        if (bothEliminated) {
+            duelResultReason = "双方同时越线，按得分判定";
+        } else if (!player.alive()) {
+            duelResultReason = "玩家水果持续越过警戒线";
+            duelForeground = DuelMatch.Side.PLAYER;
+        } else {
+            duelResultReason = "AI水果持续越过警戒线";
+            duelForeground = DuelMatch.Side.AI;
+        }
+        duelPercentile = profileStore.resultPercentile(player.score());
+        if (!duelResultRecorded) {
+            duelResultRecorded = true;
+            profileStore.recordVersusGame(
+                    player.score(),
+                    player.watermelonCount(),
+                    toStoredBattleResult(duelMatch.outcome())
+            );
+        }
+    }
+
+    private GameProfileStore.BattleResult toStoredBattleResult(
+            DuelMatch.Outcome outcome) {
+        if (outcome == DuelMatch.Outcome.PLAYER_WIN) {
+            return GameProfileStore.BattleResult.WIN;
+        }
+        if (outcome == DuelMatch.Outcome.AI_WIN) {
+            return GameProfileStore.BattleResult.LOSS;
+        }
+        return GameProfileStore.BattleResult.DRAW;
+    }
+
+    private void updateDuelScoreTokens(float delta) {
+        for (int index = duelScoreTokens.size - 1;
+                index >= 0;
+                index--) {
+            DuelScoreToken token = duelScoreTokens.get(index);
+            token.age += delta;
+            float popProgress = MathUtils.clamp(
+                    token.age / 0.32f,
+                    0f,
+                    1f
+            );
+            if (token.age <= 0.50f) {
+                float eased = 1f - (float) Math.pow(1f - popProgress, 3f);
+                token.x = token.originX;
+                token.y = token.originY - 30f * eased;
+                token.scale = 0.45f
+                        + eased * 0.55f
+                        + MathUtils.sin(popProgress * MathUtils.PI) * 0.16f;
+                token.alpha = MathUtils.clamp(popProgress * 5f, 0f, 1f);
+                continue;
+            }
+            float flight = MathUtils.clamp(
+                    (token.age - 0.50f) / 0.50f,
+                    0f,
+                    1f
+            );
+            float accelerated = flight * flight;
+            float targetX = token.side == DuelMatch.Side.PLAYER
+                    ? 84f : 206f;
+            token.x = MathUtils.lerp(
+                    token.originX,
+                    targetX,
+                    accelerated
+            );
+            token.y = MathUtils.lerp(
+                    token.originY - 30f,
+                    SCORE_TARGET_Y,
+                    accelerated
+            ) - MathUtils.sin(accelerated * MathUtils.PI) * 34f;
+            token.scale = 1f - accelerated * 0.55f;
+            token.alpha = 1f - Math.max(
+                    0f,
+                    accelerated - 0.82f
+            ) / 0.18f;
+            if (flight < 1f) {
+                continue;
+            }
+            duelScoreTokens.removeIndex(index);
+            playSound(
+                    scoreCollectSound,
+                    token.side == DuelMatch.Side.PLAYER ? 0.18f : 0.08f,
+                    1.03f,
+                    token.side == DuelMatch.Side.PLAYER ? -0.55f : -0.25f
+            );
+            if (token.side == DuelMatch.Side.PLAYER) {
+                vibrateIf(settings.vibrateOnScoreCollect(), 22);
+            }
         }
     }
 
@@ -424,6 +923,42 @@ public final class FruitMergeApplication extends ApplicationAdapter
             ));
         }
         bestScore = Math.max(bestScore, score);
+    }
+
+    /**
+     * 只供 Windows 共享渲染器打开设置、历史或对战画面做自动截图。
+     */
+    public void startScreenShowcase(String screen) {
+        if (screen == null || physics == null || disposed) {
+            return;
+        }
+        String normalized = screen.trim().toLowerCase(
+                java.util.Locale.ROOT
+        );
+        if ("settings".equals(normalized)) {
+            overlayPage = OverlayPage.SETTINGS;
+            return;
+        }
+        if ("history".equals(normalized)) {
+            overlayPage = OverlayPage.HISTORY;
+            return;
+        }
+        if (!"duel".equals(normalized)) {
+            return;
+        }
+        gameMode = GameMode.DUEL;
+        resetDuelGame();
+        for (int round = 0; round < 5; round++) {
+            float playerX = 105f + round * 72f;
+            float aiX = 455f - round * 70f;
+            duelMatch.setPlayerPreviewX(playerX);
+            duelMatch.setAiPreviewX(aiX);
+            duelMatch.dropPlayer(playerX);
+            duelMatch.dropAi(aiX);
+            duelMatch.update(0.22f, 1f);
+            consumeDuelMergeEvents();
+        }
+        duelForeground = DuelMatch.Side.PLAYER;
     }
 
     private void updateGame(float delta) {
@@ -484,6 +1019,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
             lastScore = score;
             score += event.scoreDelta;
             bestScore = Math.max(bestScore, score);
+            if (event.level == FruitRules.MAX_LEVEL) {
+                currentWatermelons += 1;
+            }
             sequence.scoreTarget = score;
             sequence.hasMerges = true;
             sequence.secondsSinceLastCue = 0f;
@@ -536,7 +1074,12 @@ public final class FruitMergeApplication extends ApplicationAdapter
             finishScorePresentationAtGameOver();
             aiState = AiState.GAME_OVER;
             aiDetail = "点击重新开始";
-            aiService.vibrate(90);
+            if (!soloResultRecorded) {
+                soloResultRecorded = true;
+                soloPercentile = profileStore.resultPercentile(score);
+                profileStore.recordSoloGame(score, currentWatermelons);
+                settings = profileStore.settings();
+            }
         }
     }
 
@@ -547,6 +1090,11 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         if (aiRequestInFlight) {
             aiState = AiState.THINKING;
+            return;
+        }
+        if (!isScorePresentationReady()) {
+            aiState = AiState.OBSERVING;
+            aiDetail = "等待连锁结算";
             return;
         }
         if (stableSeconds < FruitRules.STABLE_WINDOW_SECONDS) {
@@ -667,9 +1215,16 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     private AiDecision fallbackDecision(GameSnapshot snapshot) {
         float[] utilities = new float[FruitRules.ACTION_COUNT];
-        float currentRadius = FruitRules.droppedPhysicsRadius(currentLevel);
+        /*
+         * 对战与经典模式共用启发式，但两者的当前水果不一定相同。局面快照的 q0
+         * 才是这次决策的真实水果，不能读取经典模式遗留的 currentLevel。
+         */
+        int snapshotLevel = snapshot.queue.length > 0
+                ? snapshot.queue[0]
+                : currentLevel;
+        float currentRadius = FruitRules.droppedPhysicsRadius(snapshotLevel);
         for (int action = 0; action < FruitRules.ACTION_COUNT; action++) {
-            float x = FruitRules.actionDropX(action, currentLevel);
+            float x = FruitRules.actionDropX(action, snapshotLevel);
             float landingY = FruitRules.FLOOR_Y - currentRadius;
             int firstLevel = -1;
             for (GameSnapshot.FruitSnapshot fruit : snapshot.fruits) {
@@ -688,7 +1243,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 }
             }
             float depthUtility = landingY / FruitRules.BOARD_HEIGHT;
-            float mergeUtility = firstLevel == currentLevel ? 0.8f : 0f;
+            float mergeUtility = firstLevel == snapshotLevel ? 0.8f : 0f;
             float edgePreference = Math.abs(x - FruitRules.BOARD_WIDTH / 2f)
                     / FruitRules.BOARD_WIDTH * 0.04f;
             utilities[action] = depthUtility + mergeUtility + edgePreference;
@@ -771,30 +1326,35 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return;
         }
         x = FruitRules.clampDropX(x, currentLevel);
-        if (activeScoreSequence != null
-                && !activeScoreSequence.hasMerges) {
-            activeScoreSequence = null;
-        }
         /*
-         * 每次投放建立一个独立表现序列。逻辑分数仍在 MergeEvent 到达时即时更新，
-         * 这个对象只负责把同次投放产生的连锁分值聚合成一次 HUD 吸附动画。
+         * 表现序列在第一笔真实合成发生时懒创建。手动玩家可以在上一颗仍运动时
+         * 连续投放，因此这里绝不能覆盖尚未释放的合成序列；连续运动窗口内产生的
+         * 合成会自然聚合为同一组浮分，稳定后再统一吸入 HUD。
          */
-        activeScoreSequence = new ScoreSequence(
-                ++nextScoreSequenceId,
-                score
-        );
         float y = previewY(currentLevel);
         physics.addDroppedFruit(currentLevel, x, y);
         spawnDropEffect(x, y, currentLevel);
-        aiService.vibrate(10);
+        vibrateIf(settings.vibrateOnDrop(), 10);
 
         if (queue.size > 0) {
             queue.removeIndex(0);
         }
         fillQueue();
-        waiting = false;
         stepCount += 1;
-        dropCooldown = DROP_COOLDOWN_SECONDS;
+        dropCooldown = aiEnabled
+                ? AI_DROP_COOLDOWN_SECONDS
+                : MANUAL_DROP_COOLDOWN_SECONDS;
+        if (aiEnabled) {
+            waiting = false;
+        } else {
+            /*
+             * 人工模式立即展示并允许拖动下一颗；极短 cooldown 只拦截误触投放，
+             * 不再把“能否预摆位置”与上一颗水果的稳定状态绑在一起。
+             */
+            currentLevel = queue.first();
+            waiting = true;
+            previewX = FruitRules.clampDropX(previewX, currentLevel);
+        }
         stableSeconds = 0f;
         decisionEpoch += 1;
         aiRequestInFlight = false;
@@ -804,15 +1364,33 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private boolean canDropCurrent() {
-        if (!alive
-                || !waiting
-                || dropCooldown > 0f
-                || !physics.isStable()) {
-            return false;
-        }
+        return aiEnabled ? canAiDropCurrent() : canManualDropCurrent();
+    }
+
+    private boolean isBaseDropReady() {
+        return alive && waiting && dropCooldown <= 0f;
+    }
+
+    private boolean isScorePresentationReady() {
         return activeScoreSequence == null
                 || !activeScoreSequence.hasMerges
                 || activeScoreSequence.released;
+    }
+
+    private boolean canManualDropCurrent() {
+        return !aiEnabled && isBaseDropReady();
+    }
+
+    private boolean canManualDragCurrent() {
+        return !aiEnabled && alive && waiting;
+    }
+
+    private boolean canAiDropCurrent() {
+        return aiEnabled
+                && isBaseDropReady()
+                && physics.isStable()
+                && stableSeconds >= FruitRules.STABLE_WINDOW_SECONDS
+                && isScorePresentationReady();
     }
 
     private float previewY(int level) {
@@ -871,7 +1449,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
             if (sequence.pendingCues == 0
                     && sequence.secondsSinceLastCue
                     >= MERGE_PRESENTATION_SETTLE_SECONDS
-                    && (sequence.forceRelease || physics.isStable())) {
+                    && (sequence.forceRelease
+                    || physics.isStable()
+                    || sequence.secondsSinceLastCue
+                    >= MERGE_PRESENTATION_MAX_HOLD_SECONDS)) {
                 releaseScoreSequence(sequence);
             }
         }
@@ -936,12 +1517,15 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 0.90f,
                 1.30f
         );
-        mergePopSound.play(0.36f, pitch, pan);
+        playSound(mergePopSound, 0.36f, pitch, pan);
         float softVolume = cue.level >= 5 || cue.cascadeDepth > 1
                 ? 0.20f
                 : 0.10f;
-        mergeSoftSound.play(softVolume, pitch * 0.97f, pan);
-        aiService.vibrate(cue.level >= 8 ? 36 : 18);
+        playSound(mergeSoftSound, softVolume, pitch * 0.97f, pan);
+        vibrateIf(
+                settings.vibrateOnMerge(),
+                cue.level >= 8 ? 36 : 18
+        );
     }
 
     private void finishScorePresentationAtGameOver() {
@@ -1207,8 +1791,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 1.02f,
                 1.28f
         );
-        scoreCollectSound.play(0.24f, pitch, -0.55f);
-        aiService.vibrate(22);
+        playSound(scoreCollectSound, 0.24f, pitch, -0.55f);
+        vibrateIf(settings.vibrateOnScoreCollect(), 22);
     }
 
     private void spawnDropEffect(float x, float y, int level) {
@@ -1300,6 +1884,27 @@ public final class FruitMergeApplication extends ApplicationAdapter
         return (effectRandom.nextFloat() * 2f - 1f) * amplitude;
     }
 
+    private void playSound(
+            Sound sound,
+            float baseVolume,
+            float pitch,
+            float pan) {
+        float volume = baseVolume * settings.soundVolume();
+        if (sound != null && volume > 0.001f) {
+            sound.play(
+                    MathUtils.clamp(volume, 0f, 1f),
+                    pitch,
+                    pan
+            );
+        }
+    }
+
+    private void vibrateIf(boolean enabled, int milliseconds) {
+        if (enabled) {
+            aiService.vibrate(milliseconds);
+        }
+    }
+
     private Color fruitAccent(int level) {
         switch (MathUtils.clamp(level, FruitRules.MIN_LEVEL, FruitRules.MAX_LEVEL)) {
             case 1: return new Color(0.67f, 0.20f, 0.73f, 1f);
@@ -1344,11 +1949,17 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
         batch.begin();
         drawScoreTokens();
+        drawDuelScoreTokens();
         drawText();
         batch.end();
 
-        if (!alive) {
+        if (gameMode == GameMode.CLASSIC && !alive) {
             drawGameOverOverlay();
+        } else if (gameMode == GameMode.DUEL) {
+            drawDuelResultLayer();
+        }
+        if (overlayPage != OverlayPage.NONE) {
+            drawOverlayPage();
         }
     }
 
@@ -1448,21 +2059,41 @@ public final class FruitMergeApplication extends ApplicationAdapter
         // 用“外层填色 + 内层填色”形成可靠圆角边框，不再调用 Line arc。
         roundedRectTop(28f, 68f, 112f, 64f, 12f, CARD_SHADOW);
         roundedRectTop(28f, 64f, 112f, 64f, 12f, BOARD_FRAME_SOFT);
-        roundedRectTop(30f, 66f, 108f, 60f, 10f, SCORE_CARD);
+        roundedRectTop(
+                30f,
+                66f,
+                108f,
+                60f,
+                10f,
+                gameMode == GameMode.DUEL ? PLAYER_TINT_SOFT : SCORE_CARD
+        );
 
         roundedRectTop(150f, 68f, 112f, 64f, 12f, CARD_SHADOW);
         roundedRectTop(150f, 64f, 112f, 64f, 12f, BOARD_FRAME_SOFT);
-        roundedRectTop(152f, 66f, 108f, 60f, 10f, SCORE_CARD);
+        roundedRectTop(
+                152f,
+                66f,
+                108f,
+                60f,
+                10f,
+                gameMode == GameMode.DUEL ? AI_TINT_SOFT : SCORE_CARD
+        );
+        if (gameMode == GameMode.DUEL) {
+            shapes.setColor(CARD_SHADOW);
+            shapes.circle(145f, toRenderY(99f), 15f, 28);
+            shapes.setColor(TEXT_PRIMARY);
+            shapes.circle(145f, toRenderY(96f), 13f, 28);
+        }
 
         roundedRectTop(272f, 68f, 260f, 64f, 12f, CARD_SHADOW);
         roundedRectTop(272f, 64f, 260f, 64f, 12f, BOARD_FRAME_SOFT);
         roundedRectTop(274f, 66f, 256f, 60f, 10f, NEXT_CARD);
 
         // 标题旁的小叶片与队列槽给顶部区域增加果园识别度，但不替换水果本身。
-        drawLeaf(263f, 35f, 28f, 11f, -24f, LEAF_ACCENT);
-        drawLeaf(280f, 31f, 24f, 9f, 28f, LEAF_ACCENT);
+        drawLeaf(168f, 35f, 22f, 9f, -24f, LEAF_ACCENT);
+        drawLeaf(181f, 31f, 19f, 8f, 28f, LEAF_ACCENT);
         shapes.setColor(DANGER.r, DANGER.g, DANGER.b, 0.68f);
-        shapes.circle(278f, toRenderY(40f), 3.8f, 16);
+        shapes.circle(180f, toRenderY(40f), 3.4f, 16);
         float[] queueSlots = {354f, 408f, 462f};
         for (float slotX : queueSlots) {
             shapes.setColor(CARD_SHADOW);
@@ -1472,6 +2103,25 @@ public final class FruitMergeApplication extends ApplicationAdapter
             shapes.setColor(SCORE_CARD);
             shapes.circle(slotX, toRenderY(103f), 17.8f, 28);
         }
+
+        roundedRectTop(
+                MODE_BUTTON_LEFT,
+                MODE_BUTTON_TOP + 4f,
+                MODE_BUTTON_WIDTH,
+                MODE_BUTTON_HEIGHT,
+                MODE_BUTTON_HEIGHT / 2f,
+                CARD_SHADOW
+        );
+        roundedRectTop(
+                MODE_BUTTON_LEFT,
+                MODE_BUTTON_TOP,
+                MODE_BUTTON_WIDTH,
+                MODE_BUTTON_HEIGHT,
+                MODE_BUTTON_HEIGHT / 2f,
+                gameMode == GameMode.DUEL
+                        ? PLAYER_TINT_SOFT
+                        : NEXT_CARD
+        );
 
         roundedRectTop(
                 AI_TOGGLE_LEFT,
@@ -1487,7 +2137,19 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 AI_TOGGLE_WIDTH,
                 AI_TOGGLE_HEIGHT,
                 AI_TOGGLE_HEIGHT / 2f,
-                aiEnabled ? ACCENT_SOFT : SWITCH_OFF
+                gameMode == GameMode.DUEL
+                        ? (duelForegroundSide() == DuelMatch.Side.PLAYER
+                        ? PLAYER_TINT_SOFT : AI_TINT_SOFT)
+                        : (aiEnabled ? ACCENT_SOFT : SWITCH_OFF)
+        );
+
+        drawUtilityButton(
+                HISTORY_BUTTON_LEFT,
+                false
+        );
+        drawUtilityButton(
+                SETTINGS_BUTTON_LEFT,
+                true
         );
 
         /*
@@ -1498,6 +2160,20 @@ public final class FruitMergeApplication extends ApplicationAdapter
         roundedRectTop(18f, 248f, 524f, 860f, 18f, BOARD_FRAME);
         roundedRectTop(20f, 250f, 520f, 856f, 16f, BOARD_FRAME_SOFT);
         roundedRectTop(22f, 252f, 516f, 848f, 14f, BOARD_COLOR);
+        if (gameMode == GameMode.DUEL) {
+            Color tint = duelForeground == DuelMatch.Side.PLAYER
+                    ? PLAYER_TINT
+                    : AI_TINT;
+            scratchColor.set(tint.r, tint.g, tint.b, 0.055f);
+            roundedRectTop(
+                    24f,
+                    254f,
+                    512f,
+                    844f,
+                    12f,
+                    scratchColor
+            );
+        }
         shapes.setColor(
                 ORCHARD_GLOW.r,
                 ORCHARD_GLOW.g,
@@ -1507,7 +2183,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
         shapes.circle(88f, toRenderY(1018f), 58f, 36);
         shapes.circle(474f, toRenderY(1028f), 50f, 36);
 
-        float dangerAlpha = dangerSeconds <= 0f
+        float visibleDangerSeconds = gameMode == GameMode.DUEL
+                ? duelForegroundLane().dangerSeconds()
+                : dangerSeconds;
+        float dangerAlpha = visibleDangerSeconds <= 0f
                 ? 0.48f
                 : 0.55f + MathUtils.sin(elapsedSeconds * 12f) * 0.25f;
         shapes.setColor(DANGER.r, DANGER.g, DANGER.b, dangerAlpha);
@@ -1516,15 +2195,33 @@ public final class FruitMergeApplication extends ApplicationAdapter
             shapes.rect(x, y - 1f, 11f, 2f);
         }
 
-        if (waiting) {
-            float guideAlpha = aiEnabled ? 0.19f : 0.13f;
+        boolean previewVisible = gameMode == GameMode.DUEL
+                ? duelForegroundPreviewVisible()
+                : waiting;
+        if (previewVisible) {
+            boolean assistedPreview = gameMode == GameMode.DUEL
+                    ? duelForeground == DuelMatch.Side.AI
+                    : aiEnabled;
+            int visibleLevel = gameMode == GameMode.DUEL
+                    ? duelMatch.currentLevel()
+                    : currentLevel;
+            float visiblePreviewX = gameMode == GameMode.DUEL
+                    ? duelForegroundLane().previewX()
+                    : previewX;
+            float guideAlpha = assistedPreview ? 0.19f : 0.13f;
             shapes.setColor(ACCENT.r, ACCENT.g, ACCENT.b, guideAlpha);
-            float guideTop = previewY(currentLevel) + FruitRules.displayRadius(currentLevel);
+            float guideTop = previewY(visibleLevel)
+                    + FruitRules.displayRadius(visibleLevel);
             float guideBottom = FruitRules.FLOOR_Y;
             for (float screenY = guideTop + 14f;
                     screenY < guideBottom;
                     screenY += 26f) {
-                shapes.circle(previewX, toRenderY(screenY), 1.7f, 10);
+                shapes.circle(
+                        visiblePreviewX,
+                        toRenderY(screenY),
+                        1.7f,
+                        10
+                );
             }
 
             // 实心半透明外圆在水果之前绘制，水果本身会盖住中心形成干净的光环。
@@ -1532,18 +2229,21 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     ACCENT.r,
                     ACCENT.g,
                     ACCENT.b,
-                    aiEnabled ? 0.22f : 0.14f
+                    assistedPreview ? 0.22f : 0.14f
             );
             shapes.circle(
-                    previewX,
-                    toRenderY(previewY(currentLevel)),
-                    FruitRules.displayRadius(currentLevel) + 5f,
+                    visiblePreviewX,
+                    toRenderY(previewY(visibleLevel)),
+                    FruitRules.displayRadius(visibleLevel) + 5f,
                     40
             );
         }
 
-        // AI 开关圆钮。
-        float knobCenterX = aiEnabled
+        // 经典模式显示 AI 开关；对战模式用同一控件切换前景场景。
+        boolean knobOnRight = gameMode == GameMode.DUEL
+                ? duelForegroundSide() == DuelMatch.Side.AI
+                : aiEnabled;
+        float knobCenterX = knobOnRight
                 ? AI_TOGGLE_LEFT + AI_TOGGLE_WIDTH - 21f
                 : AI_TOGGLE_LEFT + 21f;
         float knobCenterY = AI_TOGGLE_TOP + AI_TOGGLE_HEIGHT / 2f;
@@ -1551,7 +2251,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
         shapes.circle(knobCenterX, toRenderY(knobCenterY + 3f), 15f, 28);
         shapes.setColor(SCORE_CARD);
         shapes.circle(knobCenterX, toRenderY(knobCenterY), 15f, 28);
-        Color faceColor = aiEnabled ? ACCENT_DARK : TEXT_MUTED;
+        Color faceColor = gameMode == GameMode.DUEL
+                ? (duelForegroundSide() == DuelMatch.Side.PLAYER
+                ? PLAYER_TINT : AI_TINT)
+                : (aiEnabled ? ACCENT_DARK : TEXT_MUTED);
         shapes.setColor(faceColor);
         shapes.circle(knobCenterX - 4.2f, toRenderY(knobCenterY - 1f), 1.5f, 10);
         shapes.circle(knobCenterX + 4.2f, toRenderY(knobCenterY - 1f), 1.5f, 10);
@@ -1561,6 +2264,60 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 7f,
                 1.5f
         );
+    }
+
+    private void drawUtilityButton(float left, boolean gear) {
+        roundedRectTop(
+                left,
+                UTILITY_BUTTON_TOP + 4f,
+                UTILITY_BUTTON_SIZE,
+                UTILITY_BUTTON_SIZE,
+                UTILITY_BUTTON_SIZE / 2f,
+                CARD_SHADOW
+        );
+        roundedRectTop(
+                left,
+                UTILITY_BUTTON_TOP,
+                UTILITY_BUTTON_SIZE,
+                UTILITY_BUTTON_SIZE,
+                UTILITY_BUTTON_SIZE / 2f,
+                SCORE_CARD
+        );
+        float centerX = left + UTILITY_BUTTON_SIZE / 2f;
+        float centerY = UTILITY_BUTTON_TOP + UTILITY_BUTTON_SIZE / 2f;
+        if (gear) {
+            shapes.setColor(TEXT_MUTED);
+            for (int tooth = 0; tooth < 8; tooth++) {
+                float angle = tooth * MathUtils.PI2 / 8f;
+                shapes.circle(
+                        centerX + MathUtils.cos(angle) * 10.5f,
+                        toRenderY(centerY + MathUtils.sin(angle) * 10.5f),
+                        3.2f,
+                        10
+                );
+            }
+            shapes.circle(centerX, toRenderY(centerY), 10f, 24);
+            shapes.setColor(SCORE_CARD);
+            shapes.circle(centerX, toRenderY(centerY), 4.1f, 18);
+        } else {
+            shapes.setColor(TEXT_MUTED);
+            shapes.circle(centerX, toRenderY(centerY), 11f, 28);
+            shapes.setColor(SCORE_CARD);
+            shapes.circle(centerX, toRenderY(centerY), 7.4f, 24);
+            shapes.setColor(TEXT_MUTED);
+            shapes.rect(
+                    centerX - 1.2f,
+                    toRenderY(centerY + 0.5f),
+                    2.4f,
+                    7f
+            );
+            shapes.rect(
+                    centerX - 0.5f,
+                    toRenderY(centerY + 1.8f),
+                    6.5f,
+                    2.2f
+            );
+        }
     }
 
     private void drawEffects() {
@@ -1672,6 +2429,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void drawScoreTokens() {
+        if (gameMode == GameMode.DUEL) {
+            return;
+        }
         for (ScoreToken token : scoreTokens) {
             String text = "+" + token.value;
             float scale = POPUP_FONT_SCALE * token.scale;
@@ -1703,6 +2463,39 @@ public final class FruitMergeApplication extends ApplicationAdapter
         popupFont.getData().setScale(POPUP_FONT_SCALE);
     }
 
+    private void drawDuelScoreTokens() {
+        if (gameMode != GameMode.DUEL) {
+            return;
+        }
+        for (DuelScoreToken token : duelScoreTokens) {
+            String text = "+" + token.value;
+            float scale = POPUP_FONT_SCALE * token.scale;
+            popupFont.getData().setScale(scale);
+            scratchColor.set(
+                    token.color.r * 0.42f,
+                    token.color.g * 0.42f,
+                    token.color.b * 0.42f,
+                    token.alpha * 0.66f
+            );
+            popupFont.setColor(scratchColor);
+            drawTextCentered(
+                    popupFont,
+                    text,
+                    token.x + 2.2f,
+                    token.y + 2.8f
+            );
+            scratchColor.set(
+                    MathUtils.lerp(token.color.r, 1f, 0.16f),
+                    MathUtils.lerp(token.color.g, 1f, 0.16f),
+                    MathUtils.lerp(token.color.b, 1f, 0.16f),
+                    token.alpha
+            );
+            popupFont.setColor(scratchColor);
+            drawTextCentered(popupFont, text, token.x, token.y);
+        }
+        popupFont.getData().setScale(POPUP_FONT_SCALE);
+    }
+
     private void drawTextCentered(
             BitmapFont font,
             String text,
@@ -1718,6 +2511,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void drawFruitBodies() {
+        if (gameMode == GameMode.DUEL) {
+            drawDuelFruitBodies();
+            return;
+        }
         for (FruitPhysicsWorld.FruitBody fruit : physics.fruits()) {
             drawFruit(
                     fruit.level,
@@ -1730,6 +2527,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void drawPreviewAndQueue() {
+        if (gameMode == GameMode.DUEL) {
+            drawDuelPreviewAndQueue();
+            return;
+        }
         if (waiting) {
             float alpha = dropCooldown > 0f ? 0.55f : 0.96f;
             drawFruit(
@@ -1750,8 +2551,126 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
     }
 
+    private void drawDuelFruitBodies() {
+        DuelMatch.Lane background = duelForeground == DuelMatch.Side.PLAYER
+                ? duelMatch.aiLane()
+                : duelMatch.playerLane();
+        DuelMatch.Lane foreground = duelForegroundLane();
+        Color backgroundTint = background.side() == DuelMatch.Side.PLAYER
+                ? PLAYER_TINT
+                : AI_TINT;
+        for (FruitPhysicsWorld.FruitBody fruit
+                : background.physics().fruits()) {
+            float size = fruit.displayRadius * 2f;
+            // 三次轻微错位、低饱和绘制形成无需 shader 的柔和虚影。
+            drawFruitTinted(
+                    fruit.level,
+                    fruit.x() - 1.8f,
+                    fruit.y(),
+                    size,
+                    backgroundTint,
+                    0.075f
+            );
+            drawFruitTinted(
+                    fruit.level,
+                    fruit.x() + 1.8f,
+                    fruit.y(),
+                    size,
+                    backgroundTint,
+                    0.075f
+            );
+            drawFruitTinted(
+                    fruit.level,
+                    fruit.x(),
+                    fruit.y() + 1.4f,
+                    size,
+                    backgroundTint,
+                    0.10f
+            );
+        }
+        for (FruitPhysicsWorld.FruitBody fruit
+                : foreground.physics().fruits()) {
+            drawFruit(
+                    fruit.level,
+                    fruit.x(),
+                    fruit.y(),
+                    fruit.displayRadius * 2f,
+                    1f
+            );
+        }
+    }
+
+    private void drawDuelPreviewAndQueue() {
+        DuelMatch.Lane background = duelForeground == DuelMatch.Side.PLAYER
+                ? duelMatch.aiLane()
+                : duelMatch.playerLane();
+        DuelMatch.Lane foreground = duelForegroundLane();
+        int level = duelMatch.currentLevel();
+        if (duelMatch.roundOpen()
+                && !background.submittedThisRound()
+                && background.alive()) {
+            Color tint = background.side() == DuelMatch.Side.PLAYER
+                    ? PLAYER_TINT
+                    : AI_TINT;
+            drawFruitTinted(
+                    level,
+                    background.previewX(),
+                    previewY(level),
+                    FruitRules.displayRadius(level) * 2f,
+                    tint,
+                    0.25f
+            );
+        }
+        if (duelMatch.roundOpen()
+                && !foreground.submittedThisRound()
+                && foreground.alive()) {
+            drawFruit(
+                    level,
+                    foreground.previewX(),
+                    previewY(level),
+                    FruitRules.displayRadius(level) * 2f,
+                    0.96f
+            );
+        }
+        float[] queueX = {354f, 408f, 462f};
+        for (int index = 1;
+                index < FruitRules.QUEUE_LENGTH;
+                index++) {
+            int queuedLevel = duelMatch.queuedLevel(index);
+            float size = Math.min(
+                    34f,
+                    FruitRules.displayRadius(queuedLevel) * 1.05f
+            );
+            drawFruit(
+                    queuedLevel,
+                    queueX[index - 1],
+                    103f,
+                    size,
+                    0.88f
+            );
+        }
+    }
+
     private void drawFruit(int level, float centerX, float centerY, float size, float alpha) {
         batch.setColor(1f, 1f, 1f, alpha);
+        batch.draw(
+                fruitTextures[level],
+                centerX - size / 2f,
+                toRenderY(centerY + size / 2f),
+                size,
+                size
+        );
+        batch.setColor(Color.WHITE);
+    }
+
+    private void drawFruitTinted(
+            int level,
+            float centerX,
+            float centerY,
+            float size,
+            Color tint,
+            float alpha) {
+        batch.setColor(tint.r, tint.g, tint.b, alpha);
         batch.draw(
                 fruitTextures[level],
                 centerX - size / 2f,
@@ -1769,21 +2688,44 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 "合成大西瓜",
                 28f,
                 16f,
-                330f,
+                154f,
                 42f,
                 Align.left
         );
 
         smallFont.setColor(DANGER);
-        drawTextInBox(smallFont, "分数", 30f, 68f, 108f, 20f, Align.center);
-        drawTextInBox(smallFont, "最高", 152f, 68f, 108f, 20f, Align.center);
+        drawTextInBox(
+                smallFont,
+                gameMode == GameMode.DUEL ? "玩家" : "分数",
+                30f,
+                68f,
+                108f,
+                20f,
+                Align.center
+        );
+        smallFont.setColor(
+                gameMode == GameMode.DUEL ? AI_TINT : DANGER
+        );
+        drawTextInBox(
+                smallFont,
+                gameMode == GameMode.DUEL ? "AI" : "最高",
+                152f,
+                68f,
+                108f,
+                20f,
+                Align.center
+        );
         drawTextInBox(smallFont, "下一颗", 284f, 68f, 62f, 20f, Align.left);
 
         normalFont.setColor(TEXT_PRIMARY);
         normalFont.getData().setScale(0.38f * (1f + scorePulse * 0.10f));
         drawTextInBox(
                 normalFont,
-                Integer.toString(displayedScore),
+                Integer.toString(
+                        gameMode == GameMode.DUEL
+                                ? duelPlayerScore()
+                                : displayedScore
+                ),
                 30f,
                 88f,
                 108f,
@@ -1793,20 +2735,51 @@ public final class FruitMergeApplication extends ApplicationAdapter
         normalFont.getData().setScale(0.38f);
         drawTextInBox(
                 normalFont,
-                Integer.toString(displayedBestScore),
+                Integer.toString(
+                        gameMode == GameMode.DUEL
+                                ? duelAiScore()
+                                : displayedBestScore
+                ),
                 152f,
                 88f,
                 108f,
                 34f,
                 Align.center
         );
+        if (gameMode == GameMode.DUEL) {
+            smallFont.setColor(Color.WHITE);
+            drawTextInBox(
+                    smallFont,
+                    "VS",
+                    132f,
+                    84f,
+                    26f,
+                    24f,
+                    Align.center
+            );
+        }
 
-        smallFont.setColor(aiEnabled ? ACCENT_DARK : TEXT_MUTED);
-        String aiLabel = aiEnabled ? "AI" + aiState.label : "AI关闭";
-        float aiTextLeft = aiEnabled
-                ? AI_TOGGLE_LEFT + 12f
-                : AI_TOGGLE_LEFT + 43f;
-        float aiTextWidth = aiEnabled ? 98f : 96f;
+        smallFont.setColor(
+                gameMode == GameMode.DUEL
+                        ? (duelForegroundSide() == DuelMatch.Side.PLAYER
+                        ? PLAYER_TINT : AI_TINT)
+                        : (aiEnabled ? ACCENT_DARK : TEXT_MUTED)
+        );
+        String aiLabel;
+        if (gameMode == GameMode.DUEL) {
+            aiLabel = duelForegroundSide() == DuelMatch.Side.PLAYER
+                    ? "玩家前景"
+                    : "AI前景";
+        } else {
+            aiLabel = aiEnabled ? "AI" + aiState.label : "AI关闭";
+        }
+        boolean labelOnLeft = gameMode == GameMode.DUEL
+                ? duelForegroundSide() == DuelMatch.Side.AI
+                : aiEnabled;
+        float aiTextLeft = labelOnLeft
+                ? AI_TOGGLE_LEFT + 8f
+                : AI_TOGGLE_LEFT + 39f;
+        float aiTextWidth = 97f;
         drawTextInBox(
                 smallFont,
                 fitText(smallFont, aiLabel, aiTextWidth),
@@ -1817,7 +2790,42 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 Align.center
         );
 
-        if (!aiEnabled && alive) {
+        smallFont.setColor(TEXT_PRIMARY);
+        drawTextInBox(
+                smallFont,
+                gameMode == GameMode.DUEL ? "对战" : "经典",
+                MODE_BUTTON_LEFT,
+                MODE_BUTTON_TOP,
+                MODE_BUTTON_WIDTH,
+                MODE_BUTTON_HEIGHT,
+                Align.center
+        );
+
+        if (modeSwitchConfirmSeconds > 0f) {
+            smallFont.setColor(DANGER);
+            drawTextInBox(
+                    smallFont,
+                    "再次点击切换，本局会重置",
+                    120f,
+                    1068f,
+                    320f,
+                    30f,
+                    Align.center
+            );
+        } else if (gameMode == GameMode.DUEL) {
+            smallFont.setColor(
+                    duelRoundUrgent() ? DANGER : TEXT_MUTED
+            );
+            drawTextInBox(
+                    smallFont,
+                    duelRoundLabel(),
+                    120f,
+                    1068f,
+                    320f,
+                    30f,
+                    Align.center
+            );
+        } else if (!aiEnabled && alive) {
             smallFont.setColor(MANUAL_HINT);
             drawTextInBox(
                     smallFont,
@@ -1861,6 +2869,16 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 46f,
                 Align.center
         );
+        smallFont.setColor(ACCENT_DARK);
+        drawTextInBox(
+                smallFont,
+                "恭喜你已超越 " + soloPercentile + "% 的玩家",
+                105f,
+                540f,
+                350f,
+                34f,
+                Align.center
+        );
         normalFont.setColor(TEXT_PRIMARY);
         drawTextInBox(
                 normalFont,
@@ -1872,6 +2890,386 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 Align.center
         );
         batch.end();
+    }
+
+    private void drawDuelResultLayer() {
+        if (duelMatch == null
+                || duelMatch.outcome()
+                == DuelMatch.Outcome.IN_PROGRESS) {
+            return;
+        }
+        if (!duelResultVisible) {
+            shapes.begin(ShapeRenderer.ShapeType.Filled);
+            shapes.setColor(0.24f, 0.12f, 0.08f, 0.24f);
+            shapes.rect(0f, 0f, FruitRules.BOARD_WIDTH, FruitRules.BOARD_HEIGHT);
+            roundedRectTop(74f, 294f, 412f, 150f, 22f, CARD_SHADOW);
+            roundedRectTop(74f, 288f, 412f, 150f, 22f, PANEL_COLOR);
+            shapes.end();
+
+            batch.begin();
+            normalFont.setColor(TEXT_PRIMARY);
+            drawTextInBox(
+                    normalFont,
+                    "观察淘汰原因",
+                    94f,
+                    306f,
+                    372f,
+                    42f,
+                    Align.center
+            );
+            smallFont.setColor(DANGER);
+            drawTextInBox(
+                    smallFont,
+                    duelResultReason,
+                    94f,
+                    354f,
+                    372f,
+                    34f,
+                    Align.center
+            );
+            smallFont.setColor(TEXT_MUTED);
+            drawTextInBox(
+                    smallFont,
+                    formatOneDecimal(duelResultHoldRemaining)
+                            + " 秒后结算，可切换场景",
+                    94f,
+                    394f,
+                    372f,
+                    30f,
+                    Align.center
+            );
+            batch.end();
+            return;
+        }
+
+        DuelMatch.Outcome outcome = duelMatch.outcome();
+        Color resultColor = outcome == DuelMatch.Outcome.PLAYER_WIN
+                ? PLAYER_TINT
+                : (outcome == DuelMatch.Outcome.AI_WIN
+                ? AI_TINT : ACCENT);
+        shapes.begin(ShapeRenderer.ShapeType.Filled);
+        shapes.setColor(OVERLAY_DIM);
+        shapes.rect(0f, 0f, FruitRules.BOARD_WIDTH, FruitRules.BOARD_HEIGHT);
+        roundedRectTop(70f, 350f, 420f, 400f, 26f, CARD_SHADOW);
+        roundedRectTop(70f, 344f, 420f, 400f, 26f, GAME_OVER_PANEL);
+        roundedRectTop(146f, 658f, 268f, 62f, 31f, resultColor);
+        shapes.end();
+
+        batch.begin();
+        titleFont.setColor(resultColor);
+        drawTextInBox(
+                titleFont,
+                duelResultTitle(),
+                90f,
+                372f,
+                380f,
+                58f,
+                Align.center
+        );
+        normalFont.setColor(PLAYER_TINT);
+        drawTextInBox(
+                normalFont,
+                "玩家 " + duelPlayerScore(),
+                104f,
+                450f,
+                170f,
+                46f,
+                Align.center
+        );
+        normalFont.setColor(AI_TINT);
+        drawTextInBox(
+                normalFont,
+                "AI " + duelAiScore(),
+                286f,
+                450f,
+                170f,
+                46f,
+                Align.center
+        );
+        smallFont.setColor(TEXT_MUTED);
+        drawTextInBox(
+                smallFont,
+                duelResultReason,
+                94f,
+                518f,
+                372f,
+                34f,
+                Align.center
+        );
+        smallFont.setColor(ACCENT_DARK);
+        drawTextInBox(
+                smallFont,
+                "你已超越 " + duelPercentile + "% 的玩家",
+                94f,
+                568f,
+                372f,
+                34f,
+                Align.center
+        );
+        normalFont.setColor(Color.WHITE);
+        drawTextInBox(
+                normalFont,
+                "点击再战",
+                146f,
+                658f,
+                268f,
+                62f,
+                Align.center
+        );
+        batch.end();
+    }
+
+    private String duelResultTitle() {
+        if (duelMatch.outcome() == DuelMatch.Outcome.PLAYER_WIN) {
+            return "对战胜利";
+        }
+        if (duelMatch.outcome() == DuelMatch.Outcome.AI_WIN) {
+            return "对战失败";
+        }
+        return "势均力敌";
+    }
+
+    private void drawOverlayPage() {
+        shapes.begin(ShapeRenderer.ShapeType.Filled);
+        shapes.setColor(OVERLAY_DIM);
+        shapes.rect(0f, 0f, FruitRules.BOARD_WIDTH, FruitRules.BOARD_HEIGHT);
+        roundedRectTop(34f, 104f, 492f, 938f, 26f, CARD_SHADOW);
+        roundedRectTop(34f, 98f, 492f, 938f, 26f, PANEL_COLOR);
+        roundedRectTop(430f, 124f, 70f, 46f, 23f, ACCENT_SOFT);
+        if (overlayPage == OverlayPage.SETTINGS) {
+            drawSettingsPageShapes();
+        } else {
+            drawHistoryPageShapes();
+        }
+        shapes.end();
+
+        batch.begin();
+        if (overlayPage == OverlayPage.SETTINGS) {
+            drawSettingsPageText();
+        } else {
+            drawHistoryPageText();
+        }
+        batch.end();
+    }
+
+    private void drawSettingsPageShapes() {
+        float[] rows = {218f, 308f, 398f, 488f, 578f, 668f, 758f};
+        for (float row : rows) {
+            roundedRectTop(62f, row + 4f, 436f, 68f, 16f, CARD_SHADOW);
+            roundedRectTop(62f, row, 436f, 68f, 16f, SCORE_CARD);
+        }
+        // 数值设置使用同一组“减 / 当前值 / 加”控件。
+        for (float row : new float[]{218f, 578f, 668f, 758f}) {
+            roundedRectTop(350f, row + 12f, 132f, 44f, 22f, NEXT_CARD);
+            shapes.setColor(BOARD_FRAME_SOFT);
+            shapes.circle(372f, toRenderY(row + 34f), 18f, 24);
+            shapes.circle(460f, toRenderY(row + 34f), 18f, 24);
+            shapes.setColor(SCORE_CARD);
+            shapes.circle(372f, toRenderY(row + 34f), 15f, 24);
+            shapes.circle(460f, toRenderY(row + 34f), 15f, 24);
+        }
+        for (float row : new float[]{308f, 398f, 488f}) {
+            roundedRectTop(
+                    370f,
+                    row + 13f,
+                    108f,
+                    42f,
+                    21f,
+                    ACCENT_SOFT
+            );
+        }
+        roundedRectTop(154f, 886f, 252f, 62f, 31f, BOARD_FRAME_SOFT);
+        roundedRectTop(158f, 882f, 244f, 58f, 29f, NEXT_CARD);
+    }
+
+    private void drawHistoryPageShapes() {
+        float[] rows = {230f, 320f, 410f, 500f, 590f, 680f};
+        for (float row : rows) {
+            roundedRectTop(62f, row + 4f, 436f, 68f, 16f, CARD_SHADOW);
+            roundedRectTop(62f, row, 436f, 68f, 16f, SCORE_CARD);
+        }
+        roundedRectTop(154f, 838f, 252f, 62f, 31f, BOARD_FRAME_SOFT);
+        roundedRectTop(
+                158f,
+                834f,
+                244f,
+                58f,
+                29f,
+                historyResetConfirmSeconds > 0f
+                        ? PLAYER_TINT_SOFT
+                        : NEXT_CARD
+        );
+    }
+
+    private void drawSettingsPageText() {
+        titleFont.setColor(TEXT_PRIMARY);
+        drawTextInBox(
+                titleFont,
+                "游戏设置",
+                62f,
+                124f,
+                340f,
+                52f,
+                Align.left
+        );
+        smallFont.setColor(ACCENT_DARK);
+        drawTextInBox(
+                smallFont,
+                "返回",
+                430f,
+                124f,
+                70f,
+                46f,
+                Align.center
+        );
+        GameProfileStore.Settings current = settings;
+        drawSettingRow("音效音量", Math.round(current.soundVolume() * 100f) + "%", 218f, true);
+        drawSettingRow("合成震动", onOff(current.vibrateOnMerge()), 308f, false);
+        drawSettingRow("投放震动", onOff(current.vibrateOnDrop()), 398f, false);
+        drawSettingRow("收分震动", onOff(current.vibrateOnScoreCollect()), 488f, false);
+        drawSettingRow(
+                "游戏速度",
+                formatOneDecimal(current.gameSpeed()) + "x",
+                578f,
+                true
+        );
+        drawSettingRow(
+                "对战限时",
+                Math.round(current.versusDropSeconds()) + "秒",
+                668f,
+                true
+        );
+        drawSettingRow(
+                "结算停留",
+                Math.round(current.resultHoldSeconds()) + "秒",
+                758f,
+                true
+        );
+        normalFont.setColor(TEXT_PRIMARY);
+        drawTextInBox(
+                normalFont,
+                "恢复默认",
+                158f,
+                882f,
+                244f,
+                58f,
+                Align.center
+        );
+    }
+
+    private void drawSettingRow(
+            String label,
+            String value,
+            float top,
+            boolean stepper) {
+        normalFont.setColor(TEXT_PRIMARY);
+        drawTextInBox(
+                normalFont,
+                label,
+                82f,
+                top + 10f,
+                238f,
+                48f,
+                Align.left
+        );
+        smallFont.setColor(stepper ? TEXT_PRIMARY : ACCENT_DARK);
+        if (stepper) {
+            drawTextInBox(smallFont, "-", 354f, top + 12f, 36f, 44f, Align.center);
+            drawTextInBox(smallFont, value, 388f, top + 12f, 56f, 44f, Align.center);
+            drawTextInBox(smallFont, "+", 442f, top + 12f, 36f, 44f, Align.center);
+        } else {
+            drawTextInBox(smallFont, value, 370f, top + 13f, 108f, 42f, Align.center);
+        }
+    }
+
+    private void drawHistoryPageText() {
+        titleFont.setColor(TEXT_PRIMARY);
+        drawTextInBox(
+                titleFont,
+                "历史记录",
+                62f,
+                124f,
+                340f,
+                52f,
+                Align.left
+        );
+        smallFont.setColor(ACCENT_DARK);
+        drawTextInBox(
+                smallFont,
+                "返回",
+                430f,
+                124f,
+                70f,
+                46f,
+                Align.center
+        );
+        GameProfileStore.History history = profileStore.history();
+        drawHistoryRow("完成局数", history.totalGames(), 230f);
+        drawHistoryRow("历史最高分", history.highScore(), 320f);
+        drawHistoryRow(
+                "单局最多大西瓜",
+                history.maxWatermelonsInGame(),
+                410f
+        );
+        drawHistoryRow("累计合成大西瓜", history.totalWatermelons(), 500f);
+        drawHistoryRow(
+                "对战胜负平",
+                history.versusWins() + " / "
+                        + history.versusLosses() + " / "
+                        + history.versusDraws(),
+                590f
+        );
+        drawHistoryRow("对战最高分", history.highestVersusScore(), 680f);
+
+        normalFont.setColor(
+                historyResetConfirmSeconds > 0f ? DANGER : TEXT_PRIMARY
+        );
+        drawTextInBox(
+                normalFont,
+                historyResetConfirmSeconds > 0f
+                        ? "再次点击确认重置"
+                        : "重置记录",
+                158f,
+                834f,
+                244f,
+                58f,
+                Align.center
+        );
+    }
+
+    private void drawHistoryRow(String label, int value, float top) {
+        drawHistoryRow(label, Integer.toString(value), top);
+    }
+
+    private void drawHistoryRow(String label, String value, float top) {
+        normalFont.setColor(TEXT_PRIMARY);
+        drawTextInBox(
+                normalFont,
+                label,
+                82f,
+                top + 10f,
+                272f,
+                48f,
+                Align.left
+        );
+        normalFont.setColor(TEXT_MUTED);
+        drawTextInBox(
+                normalFont,
+                value,
+                350f,
+                top + 10f,
+                126f,
+                48f,
+                Align.right
+        );
+    }
+
+    private String onOff(boolean value) {
+        return value ? "开启" : "关闭";
+    }
+
+    private String formatOneDecimal(float value) {
+        return String.format(java.util.Locale.ROOT, "%.1f", value);
     }
 
     private void roundedRectTop(
@@ -1970,8 +3368,304 @@ public final class FruitMergeApplication extends ApplicationAdapter
         previewAnchorX = previewX;
         if (enabled) {
             aiLoadingSeconds = 0f;
+        } else if (!waiting && queue.size > 0) {
+            /*
+             * AI 刚投下水果后切换人工模式时，也立即提供下一颗的预摆入口。
+             * 仍保留极短人工投放冷却，避免切换按钮的同一次触摸误投。
+             */
+            currentLevel = queue.first();
+            waiting = true;
+            dropCooldown = Math.min(
+                    dropCooldown,
+                    MANUAL_DROP_COOLDOWN_SECONDS
+            );
+            previewX = FruitRules.clampDropX(previewX, currentLevel);
+            previewAnchorX = previewX;
         }
-        aiService.vibrate(12);
+    }
+
+    private void openOverlay(OverlayPage page) {
+        overlayPage = page;
+        activeDragPointer = -1;
+        historyResetConfirmSeconds = 0f;
+        if (gameMode == GameMode.CLASSIC) {
+            cancelPendingDecision("页面暂停");
+        } else {
+            invalidateDuelDecision();
+        }
+    }
+
+    private void closeOverlay() {
+        overlayPage = OverlayPage.NONE;
+        activeDragPointer = -1;
+        historyResetConfirmSeconds = 0f;
+    }
+
+    private void handleOverlayTouch(float x, float y) {
+        if (isInside(x, y, 430f, 124f, 70f, 46f)) {
+            closeOverlay();
+            return;
+        }
+        if (overlayPage == OverlayPage.SETTINGS) {
+            handleSettingsTouch(x, y);
+        } else {
+            handleHistoryTouch(x, y);
+        }
+    }
+
+    private void handleSettingsTouch(float x, float y) {
+        if (isInside(x, y, 158f, 882f, 244f, 58f)) {
+            profileStore.resetSettings();
+            settings = profileStore.settings();
+            return;
+        }
+        if (isInside(x, y, 370f, 321f, 108f, 42f)) {
+            profileStore
+                    .setVibrateOnMerge(!settings.vibrateOnMerge())
+                    .save();
+            settings = profileStore.settings();
+            return;
+        }
+        if (isInside(x, y, 370f, 411f, 108f, 42f)) {
+            profileStore
+                    .setVibrateOnDrop(!settings.vibrateOnDrop())
+                    .save();
+            settings = profileStore.settings();
+            return;
+        }
+        if (isInside(x, y, 370f, 501f, 108f, 42f)) {
+            profileStore
+                    .setVibrateOnScoreCollect(
+                            !settings.vibrateOnScoreCollect()
+                    )
+                    .save();
+            settings = profileStore.settings();
+            return;
+        }
+        if (isStepperTouch(x, y, 218f)) {
+            float delta = x < 416f ? -0.1f : 0.1f;
+            profileStore
+                    .setSoundVolume(settings.soundVolume() + delta)
+                    .save();
+            settings = profileStore.settings();
+            return;
+        }
+        if (isStepperTouch(x, y, 578f)) {
+            float delta = x < 416f ? -0.25f : 0.25f;
+            profileStore
+                    .setGameSpeed(settings.gameSpeed() + delta)
+                    .save();
+            settings = profileStore.settings();
+            return;
+        }
+        if (isStepperTouch(x, y, 668f)) {
+            float delta = x < 416f ? -1f : 1f;
+            profileStore
+                    .setVersusDropSeconds(
+                            settings.versusDropSeconds() + delta
+                    )
+                    .save();
+            settings = profileStore.settings();
+            return;
+        }
+        if (isStepperTouch(x, y, 758f)) {
+            float delta = x < 416f ? -1f : 1f;
+            profileStore
+                    .setResultHoldSeconds(
+                            settings.resultHoldSeconds() + delta
+                    )
+                    .save();
+            settings = profileStore.settings();
+        }
+    }
+
+    private boolean isStepperTouch(float x, float y, float top) {
+        boolean minus = isInside(x, y, 354f, top + 12f, 36f, 44f);
+        boolean plus = isInside(x, y, 442f, top + 12f, 36f, 44f);
+        return minus || plus;
+    }
+
+    private void handleHistoryTouch(float x, float y) {
+        if (!isInside(x, y, 158f, 834f, 244f, 58f)) {
+            return;
+        }
+        if (historyResetConfirmSeconds <= 0f) {
+            historyResetConfirmSeconds = 3f;
+            return;
+        }
+        profileStore.resetHistory();
+        bestScore = 0;
+        displayedBestScore = Math.max(displayedScore, bestScore);
+        historyResetConfirmSeconds = 0f;
+    }
+
+    private void requestModeSwitch() {
+        if (gameMode == GameMode.DUEL
+                && duelMatch != null
+                && duelMatch.outcome()
+                != DuelMatch.Outcome.IN_PROGRESS
+                && !duelResultVisible) {
+            // 淘汰原因观察期是规则的一部分，不能用模式切换提前跳过。
+            return;
+        }
+        boolean hasProgress = gameMode == GameMode.CLASSIC
+                ? stepCount > 0
+                : duelHasProgress();
+        if (hasProgress && modeSwitchConfirmSeconds <= 0f) {
+            modeSwitchConfirmSeconds = 2.6f;
+            return;
+        }
+        modeSwitchConfirmSeconds = 0f;
+        activeDragPointer = -1;
+        decisionEpoch += 1;
+        aiRequestInFlight = false;
+        motionPlan = null;
+        if (gameMode == GameMode.CLASSIC) {
+            gameMode = GameMode.DUEL;
+            resetDuelGame();
+        } else {
+            gameMode = GameMode.CLASSIC;
+            disposeDuelGame();
+            resetGame();
+        }
+    }
+
+    private DuelMatch.Side duelForegroundSide() {
+        return duelForeground;
+    }
+
+    private DuelMatch.Lane duelForegroundLane() {
+        return duelMatch.lane(duelForeground);
+    }
+
+    private int duelPlayerScore() {
+        return duelMatch == null ? 0 : duelMatch.playerLane().score();
+    }
+
+    private int duelAiScore() {
+        return duelMatch == null ? 0 : duelMatch.aiLane().score();
+    }
+
+    private boolean duelRoundUrgent() {
+        return duelMatch != null
+                && duelMatch.outcome()
+                == DuelMatch.Outcome.IN_PROGRESS
+                && duelMatch.roundOpen()
+                && duelMatch.roundRemainingSeconds() <= 2f;
+    }
+
+    private String duelRoundLabel() {
+        if (duelMatch == null) {
+            return "正在准备对战";
+        }
+        if (duelMatch.outcome() != DuelMatch.Outcome.IN_PROGRESS) {
+            return duelResultVisible
+                    ? "对战已结束"
+                    : "正在观察淘汰原因";
+        }
+        if (duelMatch.awaitingNextRound()) {
+            return "双方已投放，准备下一颗";
+        }
+        return "本轮剩余 "
+                + formatOneDecimal(duelMatch.roundRemainingSeconds())
+                + " 秒";
+    }
+
+    private boolean duelForegroundPreviewVisible() {
+        if (duelMatch == null || !duelMatch.roundOpen()) {
+            return false;
+        }
+        DuelMatch.Lane lane = duelForegroundLane();
+        return lane.alive() && !lane.submittedThisRound();
+    }
+
+    private boolean duelHasProgress() {
+        return duelMatch != null
+                && (duelMatch.roundIndex() > 0
+                || duelMatch.playerLane().stepCount() > 0
+                || duelMatch.aiLane().stepCount() > 0);
+    }
+
+    private void toggleDuelForeground() {
+        if (duelMatch == null) {
+            return;
+        }
+        duelForeground = duelForeground == DuelMatch.Side.PLAYER
+                ? DuelMatch.Side.AI
+                : DuelMatch.Side.PLAYER;
+        particles.clear();
+        rings.clear();
+        mergeBursts.clear();
+        duelScoreTokens.clear();
+    }
+
+    private boolean duelCanPlayerDrag() {
+        return duelMatch != null
+                && duelMatch.outcome()
+                == DuelMatch.Outcome.IN_PROGRESS
+                && duelMatch.roundOpen()
+                && duelMatch.playerLane().alive()
+                && !duelMatch.playerLane().submittedThisRound();
+    }
+
+    private boolean duelCanPlayerDrop() {
+        return duelCanPlayerDrag();
+    }
+
+    private void setDuelPlayerPreviewX(float x) {
+        if (duelMatch != null) {
+            duelMatch.setPlayerPreviewX(x);
+        }
+    }
+
+    private void moveDuelPlayerPreview(float deltaX) {
+        if (!duelCanPlayerDrag()) {
+            return;
+        }
+        duelMatch.setPlayerPreviewX(
+                duelMatch.playerLane().previewX() + deltaX
+        );
+    }
+
+    private void dropDuelPlayer() {
+        if (!duelCanPlayerDrop()) {
+            return;
+        }
+        if (duelMatch.dropPlayer(
+                duelMatch.playerLane().previewX())) {
+            spawnDuelDropFeedback(DuelMatch.Side.PLAYER);
+        }
+    }
+
+    private void dropDuelAiAt(float x) {
+        if (duelMatch == null) {
+            return;
+        }
+        if (duelMatch.dropAi(x)) {
+            spawnDuelDropFeedback(DuelMatch.Side.AI);
+            invalidateDuelDecision();
+        }
+    }
+
+    private void spawnDuelDropFeedback(DuelMatch.Side side) {
+        DuelMatch.Lane lane = duelMatch.lane(side);
+        if (side == duelForeground) {
+            spawnDropEffect(
+                    lane.previewX(),
+                    previewY(duelMatch.currentLevel()),
+                    duelMatch.currentLevel()
+            );
+        }
+        if (side == DuelMatch.Side.PLAYER) {
+            vibrateIf(settings.vibrateOnDrop(), 10);
+        }
+    }
+
+    private boolean duelResultCanRestart() {
+        return duelMatch != null
+                && duelMatch.outcome()
+                != DuelMatch.Outcome.IN_PROGRESS
+                && duelResultVisible;
     }
 
     private void updateTouchPoint(int screenX, int screenY) {
@@ -1990,8 +3684,41 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return false;
         }
         updateTouchPoint(screenX, screenY);
-        if (!alive) {
-            resetGame();
+        if (overlayPage != OverlayPage.NONE) {
+            handleOverlayTouch(touchPoint.x, touchPoint.y);
+            return true;
+        }
+        if (isInside(
+                touchPoint.x,
+                touchPoint.y,
+                SETTINGS_BUTTON_LEFT,
+                UTILITY_BUTTON_TOP,
+                UTILITY_BUTTON_SIZE,
+                UTILITY_BUTTON_SIZE
+        )) {
+            openOverlay(OverlayPage.SETTINGS);
+            return true;
+        }
+        if (isInside(
+                touchPoint.x,
+                touchPoint.y,
+                HISTORY_BUTTON_LEFT,
+                UTILITY_BUTTON_TOP,
+                UTILITY_BUTTON_SIZE,
+                UTILITY_BUTTON_SIZE
+        )) {
+            openOverlay(OverlayPage.HISTORY);
+            return true;
+        }
+        if (isInside(
+                touchPoint.x,
+                touchPoint.y,
+                MODE_BUTTON_LEFT,
+                MODE_BUTTON_TOP,
+                MODE_BUTTON_WIDTH,
+                MODE_BUTTON_HEIGHT
+        )) {
+            requestModeSwitch();
             return true;
         }
         if (isInside(
@@ -2002,14 +3729,34 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 AI_TOGGLE_WIDTH,
                 AI_TOGGLE_HEIGHT
         )) {
-            setAiEnabled(!aiEnabled);
+            if (gameMode == GameMode.DUEL) {
+                toggleDuelForeground();
+            } else {
+                setAiEnabled(!aiEnabled);
+            }
             return true;
         }
-        if (!aiEnabled
-                && canDropCurrent()
-                && touchPoint.y >= 144f) {
+        if (gameMode == GameMode.CLASSIC && !alive) {
+            resetGame();
+            return true;
+        }
+        if (gameMode == GameMode.DUEL && duelResultCanRestart()) {
+            resetDuelGame();
+            return true;
+        }
+        if (gameMode == GameMode.CLASSIC
+                && !aiEnabled
+                && canManualDragCurrent()
+                && touchPoint.y >= MANUAL_INPUT_TOP) {
             activeDragPointer = pointer;
             previewX = FruitRules.clampDropX(touchPoint.x, currentLevel);
+            return true;
+        }
+        if (gameMode == GameMode.DUEL
+                && duelCanPlayerDrag()
+                && touchPoint.y >= MANUAL_INPUT_TOP) {
+            activeDragPointer = pointer;
+            setDuelPlayerPreviewX(touchPoint.x);
             return true;
         }
         return false;
@@ -2022,8 +3769,13 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return false;
         }
         updateTouchPoint(screenX, screenY);
-        if (!aiEnabled && alive && waiting) {
+        if (gameMode == GameMode.CLASSIC
+                && canManualDragCurrent()) {
             previewX = FruitRules.clampDropX(touchPoint.x, currentLevel);
+            return true;
+        }
+        if (gameMode == GameMode.DUEL && duelCanPlayerDrag()) {
+            setDuelPlayerPreviewX(touchPoint.x);
             return true;
         }
         return false;
@@ -2039,11 +3791,19 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return true;
         }
         updateTouchPoint(screenX, screenY);
-        if (!aiEnabled
-                && canDropCurrent()
-                && touchPoint.y >= 144f) {
+        if (gameMode == GameMode.CLASSIC
+                && !aiEnabled
+                && canManualDropCurrent()
+                && touchPoint.y >= MANUAL_INPUT_TOP) {
             previewX = FruitRules.clampDropX(touchPoint.x, currentLevel);
             dropCurrent(previewX);
+            return true;
+        }
+        if (gameMode == GameMode.DUEL
+                && duelCanPlayerDrop()
+                && touchPoint.y >= MANUAL_INPUT_TOP) {
+            setDuelPlayerPreviewX(touchPoint.x);
+            dropDuelPlayer();
             return true;
         }
         return false;
@@ -2064,24 +3824,46 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     @Override
     public boolean keyDown(int keycode) {
+        if (overlayPage != OverlayPage.NONE) {
+            if (keycode == Input.Keys.ESCAPE) {
+                closeOverlay();
+            }
+            // 配置/历史页是暂停层，不能让键盘在其背后重开或投放水果。
+            return true;
+        }
         if (keycode == Input.Keys.R) {
-            resetGame();
+            if (gameMode == GameMode.DUEL) {
+                if (duelMatch == null
+                        || duelMatch.outcome()
+                        == DuelMatch.Outcome.IN_PROGRESS
+                        || duelResultVisible) {
+                    resetDuelGame();
+                }
+            } else {
+                resetGame();
+            }
             return true;
         }
         if (keycode == Input.Keys.SPACE || keycode == Input.Keys.ENTER) {
-            if (!aiEnabled) {
+            if (gameMode == GameMode.DUEL) {
+                dropDuelPlayer();
+            } else if (!aiEnabled) {
                 dropCurrent(previewX);
             }
             return true;
         }
         if (keycode == Input.Keys.A || keycode == Input.Keys.LEFT) {
-            if (!aiEnabled && waiting) {
+            if (gameMode == GameMode.DUEL) {
+                moveDuelPlayerPreview(-14f);
+            } else if (!aiEnabled && waiting) {
                 previewX = FruitRules.clampDropX(previewX - 14f, currentLevel);
             }
             return true;
         }
         if (keycode == Input.Keys.D || keycode == Input.Keys.RIGHT) {
-            if (!aiEnabled && waiting) {
+            if (gameMode == GameMode.DUEL) {
+                moveDuelPlayerPreview(14f);
+            } else if (!aiEnabled && waiting) {
                 previewX = FruitRules.clampDropX(previewX + 14f, currentLevel);
             }
             return true;
@@ -2104,6 +3886,17 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 && screenX < left + width
                 && screenY >= top
                 && screenY < top + height;
+    }
+
+    private enum GameMode {
+        CLASSIC,
+        DUEL
+    }
+
+    private enum OverlayPage {
+        NONE,
+        SETTINGS,
+        HISTORY
     }
 
     private enum AiState {
@@ -2429,6 +4222,34 @@ public final class FruitMergeApplication extends ApplicationAdapter
             this.value = value;
             this.color = new Color(color);
             this.sequence = sequence;
+        }
+    }
+
+    private static final class DuelScoreToken {
+        private final DuelMatch.Side side;
+        private final float originX;
+        private final float originY;
+        private final int value;
+        private final Color color;
+        private float x;
+        private float y;
+        private float age;
+        private float scale = 0.45f;
+        private float alpha;
+
+        private DuelScoreToken(
+                DuelMatch.Side side,
+                float originX,
+                float originY,
+                int value,
+                Color color) {
+            this.side = side;
+            this.originX = originX;
+            this.originY = originY;
+            this.value = value;
+            this.color = new Color(color);
+            x = originX;
+            y = originY;
         }
     }
 

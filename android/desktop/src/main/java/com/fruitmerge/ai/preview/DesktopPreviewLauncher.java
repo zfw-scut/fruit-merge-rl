@@ -33,6 +33,8 @@ public final class DesktopPreviewLauncher {
     private static final String HEIGHT_PROPERTY = "fruitMerge.previewHeight";
     private static final String SHOWCASE_PROPERTY =
             "fruitMerge.previewShowcase";
+    private static final String SCREEN_PROPERTY =
+            "fruitMerge.previewScreen";
     private static final String CAPTURE_FRAMES_PROPERTY =
             "fruitMerge.previewCaptureFrames";
 
@@ -45,6 +47,10 @@ public final class DesktopPreviewLauncher {
         int previewWidth = Integer.getInteger(WIDTH_PROPERTY, 560);
         int previewHeight = Integer.getInteger(HEIGHT_PROPERTY, 1120);
         boolean showcase = Boolean.getBoolean(SHOWCASE_PROPERTY);
+        String screen = System.getProperty(
+                SCREEN_PROPERTY,
+                "default"
+        ).trim();
         int captureFrames = Math.max(
                 1,
                 Integer.getInteger(CAPTURE_FRAMES_PROPERTY, 12)
@@ -76,6 +82,7 @@ public final class DesktopPreviewLauncher {
                         outputPath,
                         previewWidth,
                         previewHeight,
+                        screen,
                         showcase,
                         captureFrames
                 ),
@@ -92,6 +99,7 @@ public final class DesktopPreviewLauncher {
         private final String outputPath;
         private final int captureWidth;
         private final int captureHeight;
+        private final String screen;
         private final boolean showcase;
         private final int captureAfterFrames;
         private FrameBuffer captureBuffer;
@@ -103,12 +111,14 @@ public final class DesktopPreviewLauncher {
                 String outputPath,
                 int captureWidth,
                 int captureHeight,
+                String screen,
                 boolean showcase,
                 int captureAfterFrames) {
             this.delegate = delegate;
             this.outputPath = outputPath;
             this.captureWidth = captureWidth;
             this.captureHeight = captureHeight;
+            this.screen = screen;
             this.showcase = showcase;
             this.captureAfterFrames = captureAfterFrames;
         }
@@ -125,7 +135,13 @@ public final class DesktopPreviewLauncher {
                 );
                 delegate.resize(captureWidth, captureHeight);
             }
-            if (showcase) {
+            /*
+             * 页面切换和爆浆演示都必须由真实 core 入口完成，desktop 不复制任何
+             * UI 状态。爆浆 showcase 只属于默认游戏页，避免把经典模式分值动画
+             * 混进设置、历史或双场对战截图。
+             */
+            delegate.startScreenShowcase(screen);
+            if (showcase && "default".equalsIgnoreCase(screen)) {
                 delegate.startPresentationShowcase();
             }
         }

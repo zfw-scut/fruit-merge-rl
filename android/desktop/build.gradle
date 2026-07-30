@@ -25,6 +25,7 @@ tasks.withType(JavaExec).configureEach {
     jvmArgs "-DfruitMerge.previewWidth=${providers.gradleProperty("previewWidth").orElse("560").get()}"
     jvmArgs "-DfruitMerge.previewHeight=${providers.gradleProperty("previewHeight").orElse("1120").get()}"
     jvmArgs "-DfruitMerge.previewShowcase=${providers.gradleProperty("previewShowcase").orElse("false").get()}"
+    jvmArgs "-DfruitMerge.previewScreen=${providers.gradleProperty("previewScreen").orElse("default").get()}"
     jvmArgs "-DfruitMerge.previewCaptureFrames=${providers.gradleProperty("previewCaptureFrames").orElse("12").get()}"
 }
 

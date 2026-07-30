@@ -61,9 +61,12 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。可显式选择场地几何，用于测试物理参数的速度收益与游戏分布偏移。 | `--checkpoint ...`、几何参数；输出指标和对比图。 |
 | `src/daxigua_mobile/` | Android/Chaquopy 使用的纯 Python 状态桥。把普通局面 JSON 复用为 `StateAnalyzer -> GraphBuilder` 图输入，不依赖 pygame、pymunk 或 torch。 | `build_mobile_graph()`、`build_mobile_graph_json()`；固定 21 动作、62/47 特征 ABI。 |
 | `src/daxigua_rl/models/mobile_export.py` | 把结构感知 GNN-Q 包装为五个普通张量输入，供动态 N/E 的 ONNX 导出。 | `MobileGNNQNetwork`、`export_mobile_onnx()`。 |
-| `android/` | Android AI 陪玩版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理；外围 UI 使用暖色果园主题，并实现错峰爆浆、连锁浮分、分值吸附和滚分表现，原有水果贴图与物理保持独立。 | `scripts/build-debug-apk.ps1`；主题与合成表现入口为 `core/.../FruitMergeApplication.java`，最低 API 24，当前仅 arm64-v8a。 |
-| `android/desktop/` | Windows 本地 UI 预览模块。通过 LWJGL3 直接复用 Android 的 `FruitMergeApplication`、Box2D、共享字体、音效和 canonical 水果素材，可交互运行、自动截图或启用合成表现验收场景；不加载 ONNX。 | `scripts/run-ui-preview.ps1`；`-Showcase -CaptureFrames N` 验收爆浆/吸附阶段，输出默认位于 `runs/mobile_ui_preview/`。 |
-| `assets/fonts/` | Android 与 Windows 预览共用的高分辨率站酷快乐体中文子集 BitmapFont、官方源字体和 OFL 1.1 许可证。 | `ui-cute.fnt/png` 为 APK 实际资源；由 `tools/generate_mobile_ui_font.py` 做 cmap 缺字门禁后生成。 |
+| `android/` | Android AI 陪玩版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理；同时提供经典、AI 对战、持久化设置/历史、原因观察与结算页，原有水果贴图和模型契约保持独立。 | `scripts/build-debug-apk.ps1`；最低 API 24，当前仅 arm64-v8a。 |
+| `android/core/src/main/java/com/fruitmerge/ai/game/FruitMergeApplication.java` | Android 与 Windows 预览共用的完整表现和交互入口。区分人工/AI 投放门控，组合暖色果园 HUD、设置/历史浮层、经典模式、双场景对战、合成表现和结算反馈。 | `canManualDropCurrent()`、`canAiDropCurrent()`、`drawOverlayPage()`、`updateDuelGame()`、`drawDuelResultLayer()` |
+| `android/core/src/main/java/com/fruitmerge/ai/game/DuelMatch.java` | AI 对战纯规则控制器。维护两个独立 Box2D 场景和一条共享水果序列，按真实时间管理回合，统一处理双方合成、超时投放、危险线与同帧胜负判定。 | `update(realDelta, gameSpeed)`、`dropPlayer()`、`dropAi()`、`timeoutPlayer()`、`timeoutAi()`、`resolveOutcome()` |
+| `android/core/src/main/java/com/fruitmerge/ai/game/GameProfileStore.java` | 基于 libGDX `Preferences` 的本地设置与历史契约。负责数值 clamp、损坏数据修复、显式批量保存、结果/重置即时持久化、经典/对战记录和离线结算百分位估计。 | `open()`、`settings()`、`history()`、`save()`、`recordSoloGame()`、`recordVersusGame()`、`resetSettings()`、`resetHistory()` |
+| `android/desktop/` | Windows 本地 UI 预览模块。通过 LWJGL3 直接复用 Android 的 `FruitMergeApplication`、Box2D、共享字体、音效和 canonical 水果素材，可交互运行、自动截图或启用合成表现验收场景；不加载 ONNX。 | `scripts/run-ui-preview.ps1`；`-Showcase -CaptureFrames N` 验收爆浆/吸附，`-Screen settings/history/duel` 直达新增页面。 |
+| `assets/fonts/` | Android 与 Windows 预览共用的高分辨率站酷快乐体中文子集 BitmapFont、官方源字体和 OFL 1.1 许可证。 | `ui-cute.fnt/png` 为 APK 实际资源；生成器会合并手工种子与 Android Java 字符串字面量并执行 cmap/最终缺字检查。 |
 | `assets/audio/` | Android 与 Windows 预览共用的合成弹出、柔软冲击和计分吸附音效。 | 三个 OGG 选自 Kenney Impact Sounds；CC0 原始许可证与来源映射一并保留。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口和一个 560x1120 尺寸迁移入口。 | `train_dqn_causal_*.toml`、`train_dqn_size_transfer_560x1120_50k.toml` |
@@ -100,7 +103,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | --- | --- | --- |
 | `tools/cuda_stress_test.py` | 独立 PyTorch CUDA 计算压力测试脚本。只做矩阵乘法和可选显存预留，并采集 GPU、系统内存、进程内存和内核 NVIDIA/Xid 日志。 | 用于判断黑屏/Xid 是否能在脱离游戏和 RL 训练代码后复现；默认输出到 `runs/cuda_stress/<时间戳>/`。 |
 | `tools/export_android_model.py` | 把可信结构感知 checkpoint 导出为 Android ONNX。用真实稳定局面比较原模型、五输入包装器与 ONNX Runtime，数值或 argmax 门禁失败时不产出模型。 | 默认读取本地 560x1120 最优推理 checkpoint；依赖见 `requirements-mobile-export.txt`。 |
-| `tools/generate_mobile_ui_font.py` | 从 OFL 授权的站酷快乐体生成 64px“可打印 ASCII + 明确中文 UI 字表”AngelCode BMFont 图集，供 Android 与桌面预览使用相同字形和度量。 | 依赖 Pillow 与 fontTools；先验证 Unicode cmap，输出 `assets/fonts/ui-cute.fnt/png`。 |
+| `tools/generate_mobile_ui_font.py` | 从 OFL 授权的站酷快乐体生成 64px AngelCode BMFont 图集，供 Android 与桌面预览使用相同字形和度量；会词法扫描 `core/app` 主 Java 源码的字符串字面量，跳过注释和字符常量，自动补入新增中文 UI 字符。 | 依赖 Pillow 与 fontTools；先验证 Unicode cmap，当前输出 `1024x1024`、266 glyph 的 `assets/fonts/ui-cute.fnt/png`。 |
 | `tools/export_training_catalog.py` | 训练实验归档工具。扫描本地 `runs/`，识别 Reward V2 task/potential 与历史 Reward V1 指标，并从配置、训练指标和文件信息生成轻量实验目录。 | 不复制 checkpoint、replay 和完整指标 CSV；运行方式见 `docs/training_runs/README.md`。 |
 | `tools/sync_cloud_training_artifacts.py` | 云端轻量训练产物同步工具。通过一次只读 SSH tar 流同步固定白名单内的配置/指标/归因 JSON 和两张训练图，在本地校验路径、类型、大小、JSON/CSV/PNG 完整性后以目录事务安装并生成 SHA-256 manifest。 | 默认只要求训练中的 config/metrics；阶段结束加 `--require-complete` 核对目标 update 和 shutdown 包。认证交给 OpenSSH，工具没有密码参数；明确不下载 checkpoint、ReplayBuffer、日志或本地旁路证据。 |
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |
@@ -116,6 +119,8 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `tests/test_graph_batch_training.py` | GraphBatch 和张量化 DQN 训练链路测试。验证批量图前向、next_graph 缓存、分层 replay、并行 collector、Reward V2 分析统计和 DQN 更新链路。 | 使用标准库 `unittest`，在 `python-torch` 环境中运行。 |
 | `tests/test_mobile_bridge.py` | Android 纯 Python 桥契约测试。覆盖 560x1120 输入验证、21 动作、62/47 扁平布局、JSON 入口以及禁止 pygame/pymunk/torch 导入。 | 使用标准库 `unittest`。 |
 | `tests/test_mobile_model_export.py` | 移动张量包装器和动态 ONNX 测试。验证两种 N/E 图尺寸、原模型数值/argmax 一致与错误动作数拒绝。 | 依赖 PyTorch、ONNX 和 ONNX Runtime。 |
+| `android/core/src/test/java/com/fruitmerge/ai/game/DuelMatchTest.java` | AI 对战规则测试。覆盖共享队列、双方一次提交、真实时间倒计时、超时投放、同帧胜负/平局、合成归属、大西瓜统计和 reset generation。 | 使用 JUnit 4 与真实 Box2D core 规则。 |
+| `android/core/src/test/java/com/fruitmerge/ai/game/GameProfileStoreTest.java` | 移动端设置与历史测试。覆盖默认仅合成震动、数值 clamp、Preferences 重载、经典/对战统计、设置/历史独立重置和结算百分位单调边界。 | 使用 JUnit 4 与内存 `Preferences` fake。 |
 | `tests/test_structure_graph.py` | V2 结构图契约测试。覆盖水果/全局结构特征、显式关系方向、motif 角色与逐动作 mask、q0 blocker、无分析零回退、1/3/7 动作映射、无 ID 泄漏和结构消融。 | 使用标准库 `unittest`。 |
 | `tests/test_structure_aware_gnn.py` | 关系 gate/attention、dueling Q 和共享六维辅助头测试。覆盖单图/批图等价、动作 slice 隔离、输出范围和梯度。 | 使用标准库 `unittest`，依赖 PyTorch。 |
 | `tests/test_structural_targets.py` | 六维一步结构 target、有效 mask、物理连锁谱系、terminal、float16 payload、旧 transition 和 n-step 保留语义测试。 | 使用标准库 `unittest`。 |
@@ -155,7 +160,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `docs/training_runs/` | 可提交到 Git 的训练实验目录。 | 总览见 `INDEX.md`；每个实验保留摘要、配置、指标统计和原始产物索引。 |
 | `docs/learning/` | 强化学习项目化学习文档。 | 放学习路线、阶段规划、练习说明和学习笔记。 |
 | `docs/operations/` | 云端运行服务的部署和运维手册目录。 | 当前包含训练实时面板的启动、SSH 隧道访问、安全边界和排障说明。 |
-| `docs/mobile/ANDROID_APP.md` | Android AI 陪玩版手册。 | 记录架构、AI 行为、Windows 构建、ADB 安装、模型更新和 Box2D/Pymunk 边界。 |
+| `docs/mobile/ANDROID_APP.md` | Android AI 陪玩版手册。 | 记录经典/对战行为、人工与 AI 门控、设置/历史持久化、结算反馈、Windows 构建、ADB 安装、模型更新和 Box2D/Pymunk 边界。 |
 | `docs/mobile/ui-concepts/` | Android 外围 UI 方向稿。 | 当前包含暖色果园、霓虹 AI 和治愈街机三套选择稿；实际成品采用 A 版暖色果园，水果仍使用项目原图。 |
 | `docs/operations/TRAINING_DASHBOARD.md` | 云端训练实时面板运维手册。 | 默认通过 `127.0.0.1:8765` 和 SSH 本地端口转发访问；包含 Windows DPAPI 一键桌面入口、只读边界、生命周期命令和 PID 安全校验。 |
 | `docs/rl/` | 强化学习算法和环境接口设计文档。 | 当前包含 GNN 状态图设计参考，后续模型搭建前优先阅读。 |
@@ -240,6 +245,12 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `watch_dqn.py`：模型可视化观看入口，用真实游戏窗口检查 checkpoint 的实际操作效果。
 - `export_training_catalog.py`：扫描被 Git 忽略的训练输出，生成配置快照、指标摘要、产物清单和跨实验索引，方便迁移后复盘训练数据。
 - `compare_physics_modes.py`：物理模式对比入口，用已有 checkpoint 或随机策略比较 accurate 与 fast 模式的速度、分数、局长、物理帧、合成频率和截断率。
+- `FruitMergeApplication`：Android 经典/对战共享表现入口；人工模式允许上一颗仍运动时
+  继续投放，AI 模式仍以稳定边界和连锁表现释放作为推理/投放门禁。
+- `DuelMatch`：不依赖 UI 或 ONNX 的双场景规则控制器；复用同一随机水果序列，
+  但为玩家和 AI 保留独立物理、计分、危险状态和每轮提交状态。
+- `GameProfileStore`：可注入 `Preferences` 的设置/历史仓库；设置页、结算页和
+  历史页共享同一份 clamp 后快照，结果记录和重置都会立即 flush。
 - `StateAnalysis`：worker 内的完整状态归因快照。21 位 mask 按 `action_offset`
   编位，保存 q0-q3 独立投放横坐标、真实/探针物理半径、自由空间区域、支撑/接触
   证据、伙伴分量和连锁 motif；不写入主 replay。
@@ -265,6 +276,14 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 
 - 游戏运行时直接读取 `assets/fruits/`，不再需要手动解压资源。
 - 当前默认场景固定为 `560x1120`、生成线为 `252px`；水果尺寸和物理参数不随场地缩放。
+- Android 人工投放与 AI 投放故意不共享稳定门控：人工可立即预摆下一颗，只在
+  再次投放时等待极短防误触冷却；AI 必须等待自己的物理世界稳定并满足稳定窗口，
+  不要为了代码复用重新合并。
+- AI 对战的回合倒计时使用未缩放真实时间；游戏速度只缩放 Box2D、危险线和表现
+  推进，不能让任意一方获得额外思考时间。
+- 移动端设置和历史仅保存在应用私有 `Preferences`，卸载或清除应用数据会丢失；
+  当前没有账号同步。结算“超越玩家”百分比是离线平滑估计，不是真实排行榜统计，
+  面向玩家的界面和文档不得暴露内部估计细节。
 - 正式状态分析使用 21 个投放位置。旧 15 动作 replay/mask 不兼容；同架构 checkpoint 只能通过 weights-only 初始化进入新 run。
 - `daxigua` 游戏本体不得 import `daxigua_rl`；训练、环境和模型代码只通过稳定游戏接口访问游戏。
 - `watch_dqn.py` 是视觉检查用入口，会在脚本内部懒加载 `daxigua.app.Board` 并打开真实 pygame 窗口；这不是训练路径，也不要求游戏本体 import RL。

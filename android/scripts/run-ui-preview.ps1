@@ -1,6 +1,8 @@
 param(
     [switch]$Capture,
     [switch]$Showcase,
+    [ValidateSet("default", "settings", "history", "duel")]
+    [string]$Screen = "default",
     [ValidateRange(280, 4096)]
     [int]$Width = 560,
     [ValidateRange(560, 8192)]
@@ -19,7 +21,14 @@ Push-Location $androidRoot
 try {
     if ($Capture) {
         if ([string]::IsNullOrWhiteSpace($Output)) {
-            $Output = Join-Path $projectRoot "runs\mobile_ui_preview\current.png"
+            $filename = if ($Screen -eq "default") {
+                "current.png"
+            } else {
+                "$Screen.png"
+            }
+            $Output = Join-Path `
+                $projectRoot `
+                "runs\mobile_ui_preview\$filename"
         }
         $absoluteOutput = [System.IO.Path]::GetFullPath($Output)
         $arguments = @(
@@ -27,6 +36,7 @@ try {
             ":desktop:capturePreview",
             "-PpreviewWidth=$Width",
             "-PpreviewHeight=$Height",
+            "-PpreviewScreen=$Screen",
             "-PpreviewCaptureFrames=$CaptureFrames",
             "-PpreviewOutput=$absoluteOutput"
         )
@@ -39,7 +49,8 @@ try {
             "--no-daemon",
             ":desktop:run",
             "-PpreviewWidth=$Width",
-            "-PpreviewHeight=$Height"
+            "-PpreviewHeight=$Height",
+            "-PpreviewScreen=$Screen"
         )
         if ($Showcase) {
             $arguments += "-PpreviewShowcase=true"

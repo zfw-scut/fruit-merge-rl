@@ -29,6 +29,10 @@ DEFAULT_SOURCE = (
     / "ZCOOLKuaiLe-Regular.ttf"
 )
 DEFAULT_OUTPUT = PROJECT_ROOT / "assets" / "fonts"
+JAVA_SOURCE_ROOTS = (
+    PROJECT_ROOT / "android" / "core" / "src" / "main" / "java",
+    PROJECT_ROOT / "android" / "app" / "src" / "main" / "java",
+)
 ASCII_CHARACTERS = "".join(chr(codepoint) for codepoint in range(32, 127))
 CHINESE_UI_CHARACTERS = (
     "合成大西瓜分数最高下一颗陪玩开启关闭启动中模型就绪拖动"
@@ -36,8 +40,87 @@ CHINESE_UI_CHARACTERS = (
     "暂不可用考虑位置尝试其他微调决定完成手动思考试探已结束"
     "危险线游戏本局得分未知节点变化无式，·："
 )
+
+
+def java_string_literal_characters(source_roots: tuple[Path, ...]) -> str:
+    """Collect non-ASCII glyphs from Java string literals, excluding comments.
+
+    The mobile UI changes much faster than this small hand-curated seed list.
+    Discovering literals from both Android modules makes font generation fail
+    early when a newly added Chinese label is not covered by the source font,
+    instead of shipping a square replacement glyph in the APK.
+    """
+
+    characters: dict[str, None] = {}
+    for source_root in source_roots:
+        if not source_root.is_dir():
+            continue
+        for source_path in sorted(source_root.rglob("*.java")):
+            text = source_path.read_text(encoding="utf-8")
+            index = 0
+            state = "code"
+            while index < len(text):
+                character = text[index]
+                following = text[index + 1] if index + 1 < len(text) else ""
+
+                if state == "code":
+                    if character == "/" and following == "/":
+                        state = "line_comment"
+                        index += 2
+                        continue
+                    if character == "/" and following == "*":
+                        state = "block_comment"
+                        index += 2
+                        continue
+                    if character == '"':
+                        state = "string"
+                        index += 1
+                        continue
+                    if character == "'":
+                        state = "character"
+                        index += 1
+                        continue
+                elif state == "line_comment":
+                    if character in "\r\n":
+                        state = "code"
+                elif state == "block_comment":
+                    if character == "*" and following == "/":
+                        state = "code"
+                        index += 2
+                        continue
+                elif state in {"string", "character"}:
+                    terminator = '"' if state == "string" else "'"
+                    if character == "\\":
+                        if following == "u":
+                            end = index + 2
+                            while end < len(text) and text[end] == "u":
+                                end += 1
+                            digits = text[end : end + 4]
+                            if len(digits) == 4:
+                                try:
+                                    decoded = chr(int(digits, 16))
+                                except ValueError:
+                                    decoded = ""
+                                if state == "string" and ord(decoded or "\0") > 127:
+                                    characters.setdefault(decoded, None)
+                                index = end + 4
+                                continue
+                        index += 2
+                        continue
+                    if character == terminator:
+                        state = "code"
+                    elif state == "string" and ord(character) > 127:
+                        characters.setdefault(character, None)
+
+                index += 1
+    return "".join(characters)
+
+
+JAVA_UI_CHARACTERS = java_string_literal_characters(JAVA_SOURCE_ROOTS)
 DEFAULT_CHARACTERS = "".join(
-    dict.fromkeys(ASCII_CHARACTERS + CHINESE_UI_CHARACTERS)
+    dict.fromkeys(
+        ASCII_CHARACTERS + CHINESE_UI_CHARACTERS + JAVA_UI_CHARACTERS
+    )
 )
 
 
@@ -282,6 +365,7 @@ def main() -> None:
     print(f"FONT_ATLAS={atlas_path}")
     print(f"FONT_DESCRIPTOR={fnt_path}")
     print(f"ATLAS_SIZE={args.atlas_width}x{atlas_height}")
+    print(f"GLYPH_COUNT={len(glyphs)}")
 
 
 if __name__ == "__main__":
