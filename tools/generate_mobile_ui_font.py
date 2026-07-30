@@ -33,6 +33,7 @@ JAVA_SOURCE_ROOTS = (
     PROJECT_ROOT / "android" / "core" / "src" / "main" / "java",
     PROJECT_ROOT / "android" / "app" / "src" / "main" / "java",
 )
+DIALOGUE_SOURCE_ROOT = PROJECT_ROOT / "assets" / "dialogue"
 ASCII_CHARACTERS = "".join(chr(codepoint) for codepoint in range(32, 127))
 CHINESE_UI_CHARACTERS = (
     "合成大西瓜分数最高下一颗陪玩开启关闭启动中模型就绪拖动"
@@ -117,9 +118,28 @@ def java_string_literal_characters(source_roots: tuple[Path, ...]) -> str:
 
 
 JAVA_UI_CHARACTERS = java_string_literal_characters(JAVA_SOURCE_ROOTS)
+
+
+def dialogue_characters(source_root: Path) -> str:
+    """Collect glyphs from complete authored AI dialogue assets."""
+
+    characters: dict[str, None] = {}
+    if not source_root.is_dir():
+        return ""
+    for source_path in sorted(source_root.glob("*.txt")):
+        for character in source_path.read_text(encoding="utf-8-sig"):
+            if character not in "\r\n":
+                characters.setdefault(character, None)
+    return "".join(characters)
+
+
+DIALOGUE_UI_CHARACTERS = dialogue_characters(DIALOGUE_SOURCE_ROOT)
 DEFAULT_CHARACTERS = "".join(
     dict.fromkeys(
-        ASCII_CHARACTERS + CHINESE_UI_CHARACTERS + JAVA_UI_CHARACTERS
+        ASCII_CHARACTERS
+        + CHINESE_UI_CHARACTERS
+        + JAVA_UI_CHARACTERS
+        + DIALOGUE_UI_CHARACTERS
     )
 )
 

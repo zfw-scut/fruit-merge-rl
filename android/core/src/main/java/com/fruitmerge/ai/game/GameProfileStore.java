@@ -2,13 +2,23 @@ package com.fruitmerge.ai.game;
 
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Preferences;
+import com.badlogic.gdx.utils.Base64Coder;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.zip.CRC32;
 
 /**
- * Persistent user settings and aggregate game history.
+ * Persistent user settings, aggregate bests, and recent completed games.
  *
  * <p>The store owns only durable data. Runtime screen state, the current round, and physics
  * objects deliberately stay outside this class so the same data contract can be reused by the
@@ -33,8 +43,13 @@ public final class GameProfileStore {
     public static final float MAX_RESULT_HOLD_SECONDS = 12f;
     public static final float DEFAULT_RESULT_HOLD_SECONDS = 4f;
 
-    private static final int SCHEMA_VERSION = 2;
+    private static final int SCHEMA_VERSION = 3;
+    public static final int MAX_GAME_RECORDS = 200;
+    public static final int MAX_RECORDED_SESSION_IDS = MAX_GAME_RECORDS;
     private static final int MAX_SESSION_ID_LENGTH = 256;
+    private static final int LEGACY_RECORD_BINARY_VERSION = 1;
+    private static final int RECORD_BINARY_VERSION = 2;
+    private static final int MAX_RECORD_BYTES = 2_048;
 
     private static final String KEY_SCHEMA_VERSION = "schema_version";
     private static final String KEY_SOUND_VOLUME = "settings.sound_volume";
@@ -47,6 +62,12 @@ public final class GameProfileStore {
 
     private static final String KEY_TOTAL_GAMES = "history.total_games";
     private static final String KEY_HIGH_SCORE = "history.high_score";
+    private static final String KEY_HIGHEST_SOLO_SCORE =
+            "history.highest_solo_score";
+    private static final String KEY_HIGHEST_AI_DEMO_SCORE =
+            "history.highest_ai_demo_score";
+    private static final String KEY_SOLO_GAMES = "history.solo_games";
+    private static final String KEY_AI_DEMO_GAMES = "history.ai_demo_games";
     private static final String KEY_MAX_WATERMELONS_IN_GAME =
             "history.max_watermelons_in_game";
     private static final String KEY_TOTAL_WATERMELONS = "history.total_watermelons";
@@ -56,6 +77,7 @@ public final class GameProfileStore {
     private static final String KEY_HIGHEST_VERSUS_SCORE = "history.highest_versus_score";
     private static final String KEY_RECORDED_SESSION_IDS =
             "history.recorded_session_ids";
+    private static final String KEY_GAME_RECORDS = "history.game_records";
 
     private final Preferences preferences;
 
@@ -69,6 +91,10 @@ public final class GameProfileStore {
 
     private int totalGames;
     private int highScore;
+    private int highestSoloScore;
+    private int highestAiDemoScore;
+    private int soloGames;
+    private int aiDemoGames;
     private int maxWatermelonsInGame;
     private int totalWatermelons;
     private int versusWins;
@@ -76,6 +102,7 @@ public final class GameProfileStore {
     private int versusDraws;
     private int highestVersusScore;
     private final Set<String> recordedSessionIds = new LinkedHashSet<>();
+    private final List<GameRecord> gameRecords = new ArrayList<>();
 
     /**
      * Opens the platform preference file. Call this only after libGDX has created the app.
@@ -125,6 +152,14 @@ public final class GameProfileStore {
 
         totalGames = nonNegative(preferences.getInteger(KEY_TOTAL_GAMES, 0));
         highScore = nonNegative(preferences.getInteger(KEY_HIGH_SCORE, 0));
+        highestSoloScore = nonNegative(
+                preferences.getInteger(KEY_HIGHEST_SOLO_SCORE, 0));
+        highestAiDemoScore = nonNegative(
+                preferences.getInteger(KEY_HIGHEST_AI_DEMO_SCORE, 0));
+        soloGames = nonNegative(
+                preferences.getInteger(KEY_SOLO_GAMES, 0));
+        aiDemoGames = nonNegative(
+                preferences.getInteger(KEY_AI_DEMO_GAMES, 0));
         maxWatermelonsInGame =
                 nonNegative(preferences.getInteger(KEY_MAX_WATERMELONS_IN_GAME, 0));
         totalWatermelons =
@@ -138,6 +173,35 @@ public final class GameProfileStore {
         recordedSessionIds.addAll(
                 decodeSessionIds(
                         preferences.getString(KEY_RECORDED_SESSION_IDS, "")));
+        gameRecords.clear();
+        gameRecords.addAll(
+                decodeGameRecords(
+                        preferences.getString(KEY_GAME_RECORDS, "")));
+        /*
+         * A valid detail row is itself durable proof that the session was recorded. Refresh the
+         * bounded ledger from oldest to newest so a truncated ledger cannot make a surviving
+         * terminal save count the same result twice.
+         */
+        for (int index = gameRecords.size() - 1; index >= 0; index--) {
+            String sessionId = gameRecords.get(index).sessionId();
+            recordedSessionIds.remove(sessionId);
+            recordedSessionIds.add(sessionId);
+        }
+        trimRecordedSessionIds();
+        /*
+         * v1/v2 只有 overall/versus 聚合，没有足够信息把旧最高分可靠归属于单人或
+         * AI 演示。保留 overall 原值但不伪造逐局记录；可确定的非对战旧局计入单人
+         * 局数，新的分类最高分从 v3 结算开始精确累计。
+         */
+        int versusGames = saturatedAdd(
+                saturatedAdd(versusWins, versusLosses),
+                versusDraws
+        );
+        if (!preferences.contains(KEY_SOLO_GAMES)
+                && !preferences.contains(KEY_AI_DEMO_GAMES)) {
+            soloGames = Math.max(0, totalGames - versusGames);
+            aiDemoGames = 0;
+        }
         repairHistoryInvariants();
     }
 
@@ -156,12 +220,24 @@ public final class GameProfileStore {
         return new History(
                 totalGames,
                 highScore,
+                highestSoloScore,
+                highestAiDemoScore,
+                soloGames,
+                aiDemoGames,
                 maxWatermelonsInGame,
                 totalWatermelons,
                 versusWins,
                 versusLosses,
                 versusDraws,
                 highestVersusScore);
+    }
+
+    /**
+     * Returns newest-first immutable recent results.
+     */
+    public synchronized List<GameRecord> gameRecords() {
+        return Collections.unmodifiableList(
+                new ArrayList<>(gameRecords));
     }
 
     public synchronized GameProfileStore setSoundVolume(float value) {
@@ -224,6 +300,12 @@ public final class GameProfileStore {
                 .putFloat(KEY_RESULT_HOLD_SECONDS, resultHoldSeconds)
                 .putInteger(KEY_TOTAL_GAMES, totalGames)
                 .putInteger(KEY_HIGH_SCORE, highScore)
+                .putInteger(KEY_HIGHEST_SOLO_SCORE, highestSoloScore)
+                .putInteger(
+                        KEY_HIGHEST_AI_DEMO_SCORE,
+                        highestAiDemoScore)
+                .putInteger(KEY_SOLO_GAMES, soloGames)
+                .putInteger(KEY_AI_DEMO_GAMES, aiDemoGames)
                 .putInteger(KEY_MAX_WATERMELONS_IN_GAME, maxWatermelonsInGame)
                 .putInteger(KEY_TOTAL_WATERMELONS, totalWatermelons)
                 .putInteger(KEY_VERSUS_WINS, versusWins)
@@ -232,7 +314,10 @@ public final class GameProfileStore {
                 .putInteger(KEY_HIGHEST_VERSUS_SCORE, highestVersusScore)
                 .putString(
                         KEY_RECORDED_SESSION_IDS,
-                        encodeSessionIds(recordedSessionIds));
+                        encodeSessionIds(recordedSessionIds))
+                .putString(
+                        KEY_GAME_RECORDS,
+                        encodeGameRecords(gameRecords));
         preferences.flush();
     }
 
@@ -256,20 +341,37 @@ public final class GameProfileStore {
     public synchronized void resetHistory() {
         totalGames = 0;
         highScore = 0;
+        highestSoloScore = 0;
+        highestAiDemoScore = 0;
+        soloGames = 0;
+        aiDemoGames = 0;
         maxWatermelonsInGame = 0;
         totalWatermelons = 0;
         versusWins = 0;
         versusLosses = 0;
         versusDraws = 0;
         highestVersusScore = 0;
+        gameRecords.clear();
         // 用户主动清空历史后，旧会话也不应继续占据“已结算”名单。
         recordedSessionIds.clear();
         save();
     }
 
     public synchronized void recordSoloGame(int score, int watermelonsCreated) {
-        recordCommonResult(score, watermelonsCreated);
-        save();
+        recordGame(
+                new GameRecord(
+                        anonymousSessionId(GameMode.SOLO),
+                        GameMode.SOLO,
+                        System.currentTimeMillis(),
+                        nonNegative(score),
+                        0,
+                        nonNegative(watermelonsCreated),
+                        0,
+                        0,
+                        RecordResult.COMPLETED
+                ),
+                false
+        );
     }
 
     /**
@@ -284,24 +386,106 @@ public final class GameProfileStore {
             String sessionId,
             int score,
             int watermelonsCreated) {
-        String safeSessionId = requireSessionId(sessionId);
-        if (recordedSessionIds.contains(safeSessionId)) {
-            return false;
-        }
+        return recordSoloGame(
+                sessionId,
+                score,
+                watermelonsCreated,
+                0
+        );
+    }
 
-        recordCommonResult(score, watermelonsCreated);
-        recordedSessionIds.add(safeSessionId);
-        save();
-        return true;
+    public synchronized boolean recordSoloGame(
+            String sessionId,
+            int score,
+            int watermelonsCreated,
+            int dropCount) {
+        return recordSoloGame(
+                sessionId,
+                score,
+                watermelonsCreated,
+                dropCount,
+                System.currentTimeMillis()
+        );
+    }
+
+    synchronized boolean recordSoloGame(
+            String sessionId,
+            int score,
+            int watermelonsCreated,
+            int dropCount,
+            long completedAtEpochMillis) {
+        String safeSessionId = requireSessionId(sessionId);
+        return recordGame(
+                new GameRecord(
+                        safeSessionId,
+                        GameMode.SOLO,
+                        completedAtEpochMillis,
+                        nonNegative(score),
+                        0,
+                        nonNegative(watermelonsCreated),
+                        0,
+                        nonNegative(dropCount),
+                        RecordResult.COMPLETED
+                ),
+                true
+        );
+    }
+
+    public synchronized boolean recordAiDemoGame(
+            String sessionId,
+            int score,
+            int watermelonsCreated,
+            int dropCount) {
+        return recordAiDemoGame(
+                sessionId,
+                score,
+                watermelonsCreated,
+                dropCount,
+                System.currentTimeMillis()
+        );
+    }
+
+    synchronized boolean recordAiDemoGame(
+            String sessionId,
+            int score,
+            int watermelonsCreated,
+            int dropCount,
+            long completedAtEpochMillis) {
+        return recordGame(
+                new GameRecord(
+                        requireSessionId(sessionId),
+                        GameMode.AI_DEMO,
+                        completedAtEpochMillis,
+                        nonNegative(score),
+                        0,
+                        nonNegative(watermelonsCreated),
+                        0,
+                        nonNegative(dropCount),
+                        RecordResult.COMPLETED
+                ),
+                true
+        );
     }
 
     public synchronized void recordVersusGame(
             int playerScore,
             int watermelonsCreated,
             BattleResult result) {
-        BattleResult safeResult = Objects.requireNonNull(result, "result");
-        recordVersusResult(playerScore, watermelonsCreated, safeResult);
-        save();
+        recordGame(
+                new GameRecord(
+                        anonymousSessionId(GameMode.DUEL),
+                        GameMode.DUEL,
+                        System.currentTimeMillis(),
+                        nonNegative(playerScore),
+                        0,
+                        nonNegative(watermelonsCreated),
+                        0,
+                        0,
+                        toRecordResult(
+                                Objects.requireNonNull(result, "result"))
+                ),
+                false
+        );
     }
 
     /**
@@ -312,16 +496,62 @@ public final class GameProfileStore {
             int playerScore,
             int watermelonsCreated,
             BattleResult result) {
+        return recordVersusGame(
+                sessionId,
+                playerScore,
+                0,
+                watermelonsCreated,
+                0,
+                0,
+                result
+        );
+    }
+
+    public synchronized boolean recordVersusGame(
+            String sessionId,
+            int playerScore,
+            int aiScore,
+            int playerWatermelons,
+            int aiWatermelons,
+            int playerDropCount,
+            BattleResult result) {
+        return recordVersusGame(
+                sessionId,
+                playerScore,
+                aiScore,
+                playerWatermelons,
+                aiWatermelons,
+                playerDropCount,
+                result,
+                System.currentTimeMillis()
+        );
+    }
+
+    synchronized boolean recordVersusGame(
+            String sessionId,
+            int playerScore,
+            int aiScore,
+            int playerWatermelons,
+            int aiWatermelons,
+            int playerDropCount,
+            BattleResult result,
+            long completedAtEpochMillis) {
         String safeSessionId = requireSessionId(sessionId);
         BattleResult safeResult = Objects.requireNonNull(result, "result");
-        if (recordedSessionIds.contains(safeSessionId)) {
-            return false;
-        }
-
-        recordVersusResult(playerScore, watermelonsCreated, safeResult);
-        recordedSessionIds.add(safeSessionId);
-        save();
-        return true;
+        return recordGame(
+                new GameRecord(
+                        safeSessionId,
+                        GameMode.DUEL,
+                        completedAtEpochMillis,
+                        nonNegative(playerScore),
+                        nonNegative(aiScore),
+                        nonNegative(playerWatermelons),
+                        nonNegative(aiWatermelons),
+                        nonNegative(playerDropCount),
+                        toRecordResult(safeResult)
+                ),
+                true
+        );
     }
 
     public synchronized boolean recordVersusGame(
@@ -343,11 +573,41 @@ public final class GameProfileStore {
         return recordedSessionIds.contains(requireSessionId(sessionId));
     }
 
+    private boolean recordGame(
+            GameRecord record,
+            boolean enforceIdempotency) {
+        if (enforceIdempotency
+                && recordedSessionIds.contains(record.sessionId())) {
+            return false;
+        }
+
+        recordCommonResult(
+                record.mode(),
+                record.score(),
+                record.watermelonsCreated()
+        );
+        if (record.mode() == GameMode.DUEL) {
+            recordVersusResult(
+                    record.score(),
+                    toBattleResult(record.result())
+            );
+        }
+        gameRecords.add(0, record);
+        while (gameRecords.size() > MAX_GAME_RECORDS) {
+            gameRecords.remove(gameRecords.size() - 1);
+        }
+        if (enforceIdempotency) {
+            recordedSessionIds.remove(record.sessionId());
+            recordedSessionIds.add(record.sessionId());
+            trimRecordedSessionIds();
+        }
+        save();
+        return true;
+    }
+
     private void recordVersusResult(
             int playerScore,
-            int watermelonsCreated,
             BattleResult result) {
-        recordCommonResult(playerScore, watermelonsCreated);
         switch (result) {
             case WIN:
                 versusWins = saturatedIncrement(versusWins);
@@ -382,10 +642,31 @@ public final class GameProfileStore {
     }
 
     private void recordCommonResult(int score, int watermelonsCreated) {
+        recordCommonResult(
+                GameMode.SOLO,
+                score,
+                watermelonsCreated
+        );
+    }
+
+    private void recordCommonResult(
+            GameMode mode,
+            int score,
+            int watermelonsCreated) {
         int safeScore = nonNegative(score);
         int safeWatermelons = nonNegative(watermelonsCreated);
         totalGames = saturatedIncrement(totalGames);
         highScore = Math.max(highScore, safeScore);
+        if (mode == GameMode.SOLO) {
+            soloGames = saturatedIncrement(soloGames);
+            highestSoloScore = Math.max(highestSoloScore, safeScore);
+        } else if (mode == GameMode.AI_DEMO) {
+            aiDemoGames = saturatedIncrement(aiDemoGames);
+            highestAiDemoScore = Math.max(
+                    highestAiDemoScore,
+                    safeScore
+            );
+        }
         maxWatermelonsInGame = Math.max(maxWatermelonsInGame, safeWatermelons);
         totalWatermelons = saturatedAdd(totalWatermelons, safeWatermelons);
         repairHistoryInvariants();
@@ -395,8 +676,69 @@ public final class GameProfileStore {
         int versusGames = saturatedAdd(
                 saturatedAdd(versusWins, versusLosses), versusDraws);
         totalGames = Math.max(totalGames, versusGames);
+        totalGames = Math.max(
+                totalGames,
+                saturatedAdd(
+                        saturatedAdd(soloGames, aiDemoGames),
+                        versusGames
+                )
+        );
         totalWatermelons = Math.max(totalWatermelons, maxWatermelonsInGame);
-        highScore = Math.max(highScore, highestVersusScore);
+        highScore = Math.max(
+                highScore,
+                Math.max(
+                        highestVersusScore,
+                        Math.max(highestSoloScore, highestAiDemoScore)
+                )
+        );
+    }
+
+    private String anonymousSessionId(GameMode mode) {
+        return "anonymous:"
+                + mode.name().toLowerCase(java.util.Locale.ROOT)
+                + ":"
+                + System.currentTimeMillis()
+                + ":"
+                + totalGames;
+    }
+
+    private void trimRecordedSessionIds() {
+        while (recordedSessionIds.size() > MAX_RECORDED_SESSION_IDS) {
+            java.util.Iterator<String> iterator =
+                    recordedSessionIds.iterator();
+            if (!iterator.hasNext()) {
+                return;
+            }
+            iterator.next();
+            iterator.remove();
+        }
+    }
+
+    private static RecordResult toRecordResult(BattleResult result) {
+        switch (result) {
+            case WIN:
+                return RecordResult.WIN;
+            case LOSS:
+                return RecordResult.LOSS;
+            case DRAW:
+                return RecordResult.DRAW;
+            default:
+                throw new IllegalStateException("unknown battle result");
+        }
+    }
+
+    private static BattleResult toBattleResult(RecordResult result) {
+        switch (result) {
+            case WIN:
+                return BattleResult.WIN;
+            case LOSS:
+                return BattleResult.LOSS;
+            case DRAW:
+                return BattleResult.DRAW;
+            default:
+                throw new IllegalArgumentException(
+                        "duel record requires win/loss/draw");
+        }
     }
 
     private static String requireSessionId(String sessionId) {
@@ -471,6 +813,217 @@ public final class GameProfileStore {
         return decoded;
     }
 
+    /**
+     * Stores every result as an independently decodable Base64 line. If the Preferences value is
+     * truncated, complete newer records before the damaged line remain readable.
+     */
+    private static String encodeGameRecords(List<GameRecord> records) {
+        StringBuilder encoded = new StringBuilder(records.size() * 120);
+        for (GameRecord record : records) {
+            if (encoded.length() > 0) {
+                encoded.append('\n');
+            }
+            encoded.append(new String(Base64Coder.encode(
+                    encodeGameRecord(record)
+            )));
+        }
+        return encoded.toString();
+    }
+
+    private static byte[] encodeGameRecord(GameRecord record) {
+        try {
+            ByteArrayOutputStream payloadBuffer =
+                    new ByteArrayOutputStream(128);
+            try (DataOutputStream output =
+                         new DataOutputStream(payloadBuffer)) {
+                output.writeInt(0x46524731);
+                output.writeInt(RECORD_BINARY_VERSION);
+                output.writeUTF(record.sessionId());
+                output.writeByte(record.mode().ordinal());
+                output.writeLong(record.completedAtEpochMillis());
+                output.writeInt(record.score());
+                output.writeInt(record.opponentScore());
+                output.writeInt(record.watermelonsCreated());
+                output.writeInt(record.opponentWatermelonsCreated());
+                output.writeInt(record.dropCount());
+                output.writeByte(record.result().ordinal());
+            }
+            byte[] payload = payloadBuffer.toByteArray();
+            CRC32 checksum = new CRC32();
+            checksum.update(payload);
+            ByteArrayOutputStream framedBuffer =
+                    new ByteArrayOutputStream(payload.length + Integer.BYTES);
+            framedBuffer.write(payload, 0, payload.length);
+            try (DataOutputStream output =
+                         new DataOutputStream(framedBuffer)) {
+                output.writeInt((int) checksum.getValue());
+            }
+            byte[] bytes = framedBuffer.toByteArray();
+            if (bytes.length > MAX_RECORD_BYTES) {
+                throw new IllegalStateException("game record is too large");
+            }
+            return bytes;
+        } catch (IOException error) {
+            throw new IllegalStateException(
+                    "unable to encode game record",
+                    error
+            );
+        }
+    }
+
+    private static List<GameRecord> decodeGameRecords(String encoded) {
+        List<GameRecord> decoded = new ArrayList<>();
+        if (encoded == null || encoded.isEmpty()) {
+            return decoded;
+        }
+        Set<String> seenSessions = new LinkedHashSet<>();
+        String[] lines = encoded
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .split("\n", -1);
+        for (String line : lines) {
+            if (line.isEmpty()) {
+                break;
+            }
+            try {
+                byte[] bytes = Base64Coder.decode(line);
+                if (bytes.length <= 0 || bytes.length > MAX_RECORD_BYTES) {
+                    break;
+                }
+                GameRecord record = decodeGameRecord(bytes);
+                if (!seenSessions.add(record.sessionId())) {
+                    continue;
+                }
+                decoded.add(record);
+                if (decoded.size() >= MAX_GAME_RECORDS) {
+                    break;
+                }
+            } catch (RuntimeException error) {
+                break;
+            }
+        }
+        return decoded;
+    }
+
+    private static GameRecord decodeGameRecord(byte[] bytes) {
+        try {
+            int payloadLength = bytes.length;
+            int recordVersion;
+            try (DataInputStream header = new DataInputStream(
+                    new ByteArrayInputStream(bytes))) {
+                if (header.readInt() != 0x46524731) {
+                    throw new IllegalArgumentException(
+                            "unsupported game record format");
+                }
+                recordVersion = header.readInt();
+            }
+            if (recordVersion == RECORD_BINARY_VERSION) {
+                if (bytes.length <= Integer.BYTES * 3) {
+                    throw new IllegalArgumentException(
+                            "game record checksum is missing");
+                }
+                payloadLength = bytes.length - Integer.BYTES;
+                int storedChecksum;
+                try (DataInputStream checksumInput =
+                             new DataInputStream(
+                                     new ByteArrayInputStream(
+                                             bytes,
+                                             payloadLength,
+                                             Integer.BYTES))) {
+                    storedChecksum = checksumInput.readInt();
+                }
+                CRC32 checksum = new CRC32();
+                checksum.update(bytes, 0, payloadLength);
+                if ((int) checksum.getValue() != storedChecksum) {
+                    throw new IllegalArgumentException(
+                            "game record checksum does not match");
+                }
+            } else if (recordVersion != LEGACY_RECORD_BINARY_VERSION) {
+                throw new IllegalArgumentException(
+                        "unsupported game record format");
+            }
+            try (DataInputStream input = new DataInputStream(
+                    new ByteArrayInputStream(
+                            bytes,
+                            0,
+                            payloadLength))) {
+                if (input.readInt() != 0x46524731
+                        || input.readInt() != recordVersion) {
+                    throw new IllegalArgumentException(
+                            "game record header changed while decoding");
+                }
+                String sessionId = requireSessionId(input.readUTF());
+                GameMode mode = enumValue(
+                        GameMode.values(),
+                        input.readUnsignedByte(),
+                        "game mode"
+                );
+                long completedAt = input.readLong();
+                int score = requireNonNegative(input.readInt(), "score");
+                int opponentScore = requireNonNegative(
+                        input.readInt(),
+                        "opponent score"
+                );
+                int watermelons = requireNonNegative(
+                        input.readInt(),
+                        "watermelons"
+                );
+                int opponentWatermelons = requireNonNegative(
+                        input.readInt(),
+                        "opponent watermelons"
+                );
+                int dropCount = requireNonNegative(
+                        input.readInt(),
+                        "drop count"
+                );
+                RecordResult result = enumValue(
+                        RecordResult.values(),
+                        input.readUnsignedByte(),
+                        "record result"
+                );
+                if (input.available() != 0) {
+                    throw new IllegalArgumentException(
+                            "game record contains trailing bytes");
+                }
+                return new GameRecord(
+                        sessionId,
+                        mode,
+                        completedAt,
+                        score,
+                        opponentScore,
+                        watermelons,
+                        opponentWatermelons,
+                        dropCount,
+                        result
+                );
+            }
+        } catch (IOException error) {
+            throw new IllegalArgumentException(
+                    "unable to decode game record",
+                    error
+            );
+        }
+    }
+
+    private static int requireNonNegative(int value, String field) {
+        if (value < 0) {
+            throw new IllegalArgumentException(
+                    field + " must be non-negative");
+        }
+        return value;
+    }
+
+    private static <T> T enumValue(
+            T[] values,
+            int ordinal,
+            String field) {
+        if (ordinal < 0 || ordinal >= values.length) {
+            throw new IllegalArgumentException(
+                    field + " ordinal is invalid");
+        }
+        return values[ordinal];
+    }
+
     private static int calculateResultPercentile(int score) {
         int[] scoreAnchors = {0, 1_000, 2_000, 5_000, 10_000};
         float[] percentileAnchors = {4f, 50f, 70f, 90f, 99f};
@@ -531,6 +1084,113 @@ public final class GameProfileStore {
         DRAW
     }
 
+    public enum GameMode {
+        SOLO,
+        DUEL,
+        AI_DEMO
+    }
+
+    public enum RecordResult {
+        COMPLETED,
+        WIN,
+        LOSS,
+        DRAW
+    }
+
+    public static final class GameRecord {
+        private final String sessionId;
+        private final GameMode mode;
+        private final long completedAtEpochMillis;
+        private final int score;
+        private final int opponentScore;
+        private final int watermelonsCreated;
+        private final int opponentWatermelonsCreated;
+        private final int dropCount;
+        private final RecordResult result;
+
+        private GameRecord(
+                String sessionId,
+                GameMode mode,
+                long completedAtEpochMillis,
+                int score,
+                int opponentScore,
+                int watermelonsCreated,
+                int opponentWatermelonsCreated,
+                int dropCount,
+                RecordResult result) {
+            this.sessionId = requireSessionId(sessionId);
+            this.mode = Objects.requireNonNull(mode, "mode");
+            this.completedAtEpochMillis = Math.max(
+                    0L,
+                    completedAtEpochMillis
+            );
+            this.score = requireNonNegative(score, "score");
+            this.opponentScore = requireNonNegative(
+                    opponentScore,
+                    "opponent score"
+            );
+            this.watermelonsCreated = requireNonNegative(
+                    watermelonsCreated,
+                    "watermelons"
+            );
+            this.opponentWatermelonsCreated = requireNonNegative(
+                    opponentWatermelonsCreated,
+                    "opponent watermelons"
+            );
+            this.dropCount = requireNonNegative(
+                    dropCount,
+                    "drop count"
+            );
+            this.result = Objects.requireNonNull(result, "result");
+            if (mode == GameMode.DUEL
+                    && result == RecordResult.COMPLETED) {
+                throw new IllegalArgumentException(
+                        "duel record requires win/loss/draw");
+            }
+            if (mode != GameMode.DUEL
+                    && result != RecordResult.COMPLETED) {
+                throw new IllegalArgumentException(
+                        "single-board record must be completed");
+            }
+        }
+
+        public String sessionId() {
+            return sessionId;
+        }
+
+        public GameMode mode() {
+            return mode;
+        }
+
+        public long completedAtEpochMillis() {
+            return completedAtEpochMillis;
+        }
+
+        public int score() {
+            return score;
+        }
+
+        public int opponentScore() {
+            return opponentScore;
+        }
+
+        public int watermelonsCreated() {
+            return watermelonsCreated;
+        }
+
+        public int opponentWatermelonsCreated() {
+            return opponentWatermelonsCreated;
+        }
+
+        public int dropCount() {
+            return dropCount;
+        }
+
+        public RecordResult result() {
+            return result;
+        }
+    }
+
     public static final class Settings {
         private final float soundVolume;
         private final boolean vibrateOnMerge;
@@ -589,6 +1249,10 @@ public final class GameProfileStore {
     public static final class History {
         private final int totalGames;
         private final int highScore;
+        private final int highestSoloScore;
+        private final int highestAiDemoScore;
+        private final int soloGames;
+        private final int aiDemoGames;
         private final int maxWatermelonsInGame;
         private final int totalWatermelons;
         private final int versusWins;
@@ -599,6 +1263,10 @@ public final class GameProfileStore {
         private History(
                 int totalGames,
                 int highScore,
+                int highestSoloScore,
+                int highestAiDemoScore,
+                int soloGames,
+                int aiDemoGames,
                 int maxWatermelonsInGame,
                 int totalWatermelons,
                 int versusWins,
@@ -607,6 +1275,10 @@ public final class GameProfileStore {
                 int highestVersusScore) {
             this.totalGames = totalGames;
             this.highScore = highScore;
+            this.highestSoloScore = highestSoloScore;
+            this.highestAiDemoScore = highestAiDemoScore;
+            this.soloGames = soloGames;
+            this.aiDemoGames = aiDemoGames;
             this.maxWatermelonsInGame = maxWatermelonsInGame;
             this.totalWatermelons = totalWatermelons;
             this.versusWins = versusWins;
@@ -621,6 +1293,22 @@ public final class GameProfileStore {
 
         public int highScore() {
             return highScore;
+        }
+
+        public int highestSoloScore() {
+            return highestSoloScore;
+        }
+
+        public int highestAiDemoScore() {
+            return highestAiDemoScore;
+        }
+
+        public int soloGames() {
+            return soloGames;
+        }
+
+        public int aiDemoGames() {
+            return aiDemoGames;
         }
 
         public int maxWatermelonsInGame() {

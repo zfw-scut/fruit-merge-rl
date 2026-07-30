@@ -25,6 +25,7 @@ import com.badlogic.gdx.utils.viewport.FitViewport;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Random;
 
@@ -86,10 +87,14 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private static final String CONTROL_OVERLAY_CLOSE = "overlay.close";
     private static final String CONTROL_SETTINGS_RESET = "settings.reset";
     private static final String CONTROL_HISTORY_RESET = "history.reset";
+    private static final String CONTROL_HISTORY_PREVIOUS =
+            "history.previous";
+    private static final String CONTROL_HISTORY_NEXT = "history.next";
     private static final String CONTROL_EXIT_SAVE = "exit.save";
     private static final String CONTROL_EXIT_ABANDON = "exit.abandon";
     private static final String CONTROL_EXIT_CANCEL = "exit.cancel";
     private static final String CONTROL_NEW_CONFIRM = "new.confirm";
+    private static final String CONTROL_NEW_RESUME = "new.resume";
     private static final String CONTROL_NEW_CANCEL = "new.cancel";
     private static final String CONTROL_SETTINGS_SOUND_MINUS =
             "settings.sound.minus";
@@ -121,6 +126,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private static final float SCORE_TARGET_X = 280f;
     private static final float SCORE_TARGET_Y = 101f;
     private static final float POPUP_FONT_SCALE = 0.50f;
+    private static final int HISTORY_RECORDS_PER_PAGE = 4;
 
     /*
      * “暖色果园”主题只负责外围表现。水果仍从原来的 01.png～11.png 加载，
@@ -184,6 +190,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
             new Color(0.67f, 0.16f, 0.18f, 1f);
     private static final Color AI_SCORE_DARK =
             new Color(0.10f, 0.30f, 0.66f, 1f);
+    private static final Color AI_BUBBLE_CARD =
+            new Color(1f, 0.92f, 0.76f, 0.99f);
     private static final Color OVERLAY_DIM =
             new Color(0.25f, 0.12f, 0.07f, 0.62f);
 
@@ -196,6 +204,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             new StatefulQueueRandom();
     private final Random motionRandom = new Random();
     private final Random effectRandom = new Random();
+    private final Random dialogueRandom = new Random();
     private final IntArray queue = new IntArray();
     private final Array<Particle> particles = new Array<>();
     private final Array<Ring> rings = new Array<>();
@@ -215,6 +224,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private ShapeRenderer shapes;
     private Texture uiFontTexture;
     private BitmapFont smallFont;
+    private BitmapFont reactionFont;
     private BitmapFont normalFont;
     private BitmapFont titleFont;
     private BitmapFont popupFont;
@@ -258,6 +268,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private int soloPercentile;
     private long decisionEpoch;
     private float historyResetConfirmSeconds;
+    private int historyPageIndex;
     private float modeSwitchConfirmSeconds;
     private float autosaveRemaining;
     private float screenEnterSeconds;
@@ -281,7 +292,13 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private long currentSessionId;
     private int duelPercentile;
     private String duelResultReason = "";
+    private int duelPlayerReactionRound = -1;
+    private int duelAiReactionRound = -1;
     private AiReaction aiReaction;
+    private AiEmotionPulse aiEmotionPulse;
+    private AiDialogueDirector dialogueDirector;
+    private float aiBubbleOcclusion;
+    private boolean aiDangerReactionArmed = true;
     private GameMode pendingNewMode;
     private AiState aiState = AiState.OBSERVING;
     private String aiDetail = "启动中";
@@ -316,6 +333,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 Texture.TextureFilter.Linear
         );
         smallFont = createFont(0.25f);
+        reactionFont = createFont(0.31f);
         normalFont = createFont(0.38f);
         titleFont = createFont(0.47f);
         popupFont = createFont(POPUP_FONT_SCALE);
@@ -324,8 +342,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         loadAudio();
         profileStore = GameProfileStore.open();
         settings = profileStore.settings();
-        bestScore = profileStore.history().highScore();
+        bestScore = modeHighScore(GameMode.SOLO);
         sessionStore = GameSessionStore.open();
+        dialogueDirector = loadDialogueDirector();
 
         physics = new FruitPhysicsWorld();
         Gdx.input.setCatchKey(Input.Keys.BACK, true);
@@ -430,6 +449,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         if (smallFont != null) {
             smallFont.dispose();
         }
+        if (reactionFont != null) {
+            reactionFont.dispose();
+        }
         if (normalFont != null) {
             normalFont.dispose();
         }
@@ -471,6 +493,31 @@ public final class FruitMergeApplication extends ApplicationAdapter
         return font;
     }
 
+    private AiDialogueDirector loadDialogueDirector() {
+        EnumMap<AiDialogueDirector.Mood, String> texts =
+                new EnumMap<>(AiDialogueDirector.Mood.class);
+        try {
+            for (AiDialogueDirector.Mood mood
+                    : AiDialogueDirector.Mood.values()) {
+                texts.put(
+                        mood,
+                        Gdx.files.internal(mood.assetPath())
+                                .readString("UTF-8")
+                );
+            }
+            return new AiDialogueDirector(texts, dialogueRandom);
+        } catch (RuntimeException error) {
+            if (Gdx.app != null) {
+                Gdx.app.error(
+                        "FruitMerge",
+                        "AI dialogue catalog rejected; using safety fallback",
+                        error
+                );
+            }
+            return AiDialogueDirector.fallback(dialogueRandom);
+        }
+    }
+
     private void loadAudio() {
         mergePopSound = Gdx.audio.newSound(
                 Gdx.files.internal("audio/merge-pop.ogg")
@@ -507,6 +554,25 @@ public final class FruitMergeApplication extends ApplicationAdapter
         return gameMode == GameMode.AI_DEMO;
     }
 
+    /**
+     * Keeps the in-game "best" card scoped to the current mode. In particular, an autonomous
+     * AI demo score must never be presented as the player's solo best.
+     */
+    private int modeHighScore(GameMode mode) {
+        GameProfileStore.History history = profileStore.history();
+        switch (mode) {
+            case SOLO:
+            case CLASSIC:
+                return history.highestSoloScore();
+            case AI_DEMO:
+                return history.highestAiDemoScore();
+            case DUEL:
+                return history.highestVersusScore();
+            default:
+                throw new IllegalStateException("unknown game mode " + mode);
+        }
+    }
+
     private void requestStartMode(GameMode requestedMode) {
         if (requestedMode == null) {
             return;
@@ -520,6 +586,34 @@ public final class FruitMergeApplication extends ApplicationAdapter
         startNewMode(requestedMode);
     }
 
+    private void continueSavedSession() {
+        pendingNewMode = null;
+        overlayPage = OverlayPage.NONE;
+        activeDragPointer = -1;
+        uiMotion.cancelAll();
+        if (inMemorySession && currentSessionId > 0L) {
+            appScreen = AppScreen.GAME;
+            screenEnterSeconds = 0f;
+            if (dialogueDirector != null) {
+                dialogueDirector.resetPacing();
+            }
+            if (gameMode != GameMode.SOLO) {
+                showAiReactionImmediately(
+                        AiMood.WELCOME,
+                        2.0f,
+                        4
+                );
+            }
+            return;
+        }
+        appScreen = AppScreen.HOME;
+        resumeSavedSession();
+        if (appScreen != AppScreen.GAME) {
+            overlayPage = OverlayPage.NONE;
+            inMemorySession = false;
+        }
+    }
+
     private void startNewMode(GameMode requestedMode) {
         pendingNewMode = null;
         sessionStore.clear();
@@ -529,15 +623,20 @@ public final class FruitMergeApplication extends ApplicationAdapter
         activeDragPointer = -1;
         uiMotion.cancelAll();
         aiReaction = null;
+        aiEmotionPulse = null;
+        aiBubbleOcclusion = 0f;
+        aiDangerReactionArmed = true;
+        if (dialogueDirector != null) {
+            dialogueDirector.resetPacing();
+        }
         gameMode = requestedMode;
         appScreen = AppScreen.GAME;
         screenEnterSeconds = 0f;
         if (requestedMode == GameMode.DUEL) {
             aiEnabled = true;
             resetDuelGame();
-            showAiReaction(
-                    "来吧，公平地比一局！",
-                    AiMood.READY,
+            showAiReactionImmediately(
+                    AiMood.WELCOME,
                     2.6f,
                     4
             );
@@ -546,9 +645,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
             aiEnabled = requestedMode == GameMode.AI_DEMO;
             resetGame();
             if (requestedMode == GameMode.AI_DEMO) {
-                showAiReaction(
-                        "交给我吧，来看看能合到多大！",
-                        AiMood.READY,
+                showAiReactionImmediately(
+                        AiMood.WELCOME,
                         3.0f,
                         3
                 );
@@ -565,6 +663,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
         activeDragPointer = -1;
         uiMotion.cancelAll();
         aiReaction = null;
+        aiEmotionPulse = null;
+        aiBubbleOcclusion = 0f;
         overlayPage = OverlayPage.NONE;
         appScreen = AppScreen.HOME;
         inMemorySession = true;
@@ -586,6 +686,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
             queue.clear();
         }
         aiReaction = null;
+        aiEmotionPulse = null;
+        aiBubbleOcclusion = 0f;
         activeDragPointer = -1;
         uiMotion.cancelAll();
         overlayPage = OverlayPage.NONE;
@@ -609,6 +711,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
             queue.clear();
         }
         aiReaction = null;
+        aiEmotionPulse = null;
+        aiBubbleOcclusion = 0f;
         activeDragPointer = -1;
         uiMotion.cancelAll();
         overlayPage = OverlayPage.NONE;
@@ -788,6 +892,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         try {
             cancelPendingDecision("正在恢复");
             invalidateDuelDecision();
+            if (dialogueDirector != null) {
+                dialogueDirector.resetPacing();
+            }
             currentSessionId = session.sessionId();
             if (session.mode() == GameSessionStore.Mode.DUEL) {
                 restoreDuelSession(session.duel());
@@ -825,7 +932,12 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     private void ensureRestoredResultRecorded() {
         if (isSingleBoardMode()) {
-            if (alive || soloResultRecorded) {
+            if (alive) {
+                return;
+            }
+            if (soloResultRecorded
+                    && profileStore.hasRecordedSession(
+                            currentSessionKey())) {
                 return;
             }
             soloPercentile = profileStore.resultPercentile(score);
@@ -833,7 +945,15 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 profileStore.recordSoloGame(
                         currentSessionKey(),
                         score,
-                        currentWatermelons
+                        currentWatermelons,
+                        stepCount
+                );
+            } else {
+                profileStore.recordAiDemoGame(
+                        currentSessionKey(),
+                        score,
+                        currentWatermelons,
+                        stepCount
                 );
             }
             soloResultRecorded = true;
@@ -841,17 +961,23 @@ public final class FruitMergeApplication extends ApplicationAdapter
             if (duelMatch == null
                     || duelMatch.outcome()
                     == DuelMatch.Outcome.IN_PROGRESS
-                    || duelResultRecorded) {
+                    || (duelResultRecorded
+                    && profileStore.hasRecordedSession(
+                            currentSessionKey()))) {
                 return;
             }
             DuelMatch.Lane player = duelMatch.playerLane();
+            DuelMatch.Lane ai = duelMatch.aiLane();
             duelPercentile = profileStore.resultPercentile(
                     player.score()
             );
             profileStore.recordVersusGame(
                     currentSessionKey(),
                     player.score(),
+                    ai.score(),
                     player.watermelonCount(),
+                    ai.watermelonCount(),
+                    player.stepCount(),
                     toStoredBattleResult(duelMatch.outcome())
             );
             duelResultRecorded = true;
@@ -882,15 +1008,13 @@ public final class FruitMergeApplication extends ApplicationAdapter
         currentLevel = state.currentLevel();
         score = state.score();
         lastScore = state.lastScore();
-        bestScore = profileStore.history().highScore();
+        bestScore = modeHighScore(restoredMode);
         /*
          * 浮分、飞行 token 与滚分队列是瞬态表现，不写入存档。恢复时直接让 HUD
          * 追平逻辑分数，避免恰好在吸分动画中保存后出现永久少显示的分数。
          */
         displayedScore = score;
-        displayedBestScore = restoredMode == GameMode.AI_DEMO
-                ? score
-                : Math.max(bestScore, score);
+        displayedBestScore = Math.max(bestScore, score);
         stepCount = state.stepCount();
         currentWatermelons = state.watermelonCount();
         previewX = state.previewX();
@@ -898,6 +1022,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         dropCooldown = state.dropCooldownSeconds();
         stableSeconds = state.stableSeconds();
         dangerSeconds = state.dangerSeconds();
+        aiDangerReactionArmed = dangerSeconds < 0.9f;
         aiLoadingSeconds = state.aiLoadingSeconds();
         waiting = state.waiting();
         alive = state.alive();
@@ -914,9 +1039,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 : "等待确认结算";
         clearTransientPresentation();
         if (aiEnabled && alive) {
-            showAiReaction(
-                    "回来啦，我们继续！",
-                    AiMood.HAPPY,
+            showAiReactionImmediately(
+                    AiMood.WELCOME,
                     2.0f,
                     4
             );
@@ -951,13 +1075,12 @@ public final class FruitMergeApplication extends ApplicationAdapter
         duelAiArmedX = state.aiArmedX();
         duelAiRequestInFlight = false;
         duelAiMotionPlan = null;
+        duelPlayerReactionRound = -1;
+        duelAiReactionRound = -1;
         activeDragPointer = -1;
         clearTransientPresentation();
-        showAiReaction(
-                duelAiArmed
-                        ? "我还在这里等你一起放哦"
-                        : "对战继续，来吧！",
-                duelAiArmed ? AiMood.READY : AiMood.HAPPY,
+        showAiReactionImmediately(
+                duelAiArmed ? AiMood.READY : AiMood.WELCOME,
                 2.0f,
                 4
         );
@@ -979,6 +1102,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         scoreRollStart = displayedScore;
         scoreRollTarget = displayedScore;
         nextScoreSequenceId = 0;
+        aiReaction = null;
+        aiEmotionPulse = null;
+        aiBubbleOcclusion = 0f;
     }
 
     private long createSessionId() {
@@ -1001,16 +1127,15 @@ public final class FruitMergeApplication extends ApplicationAdapter
         physics.clear();
         queue.clear();
         fillQueue();
-        bestScore = profileStore.history().highScore();
+        bestScore = modeHighScore(gameMode);
         score = 0;
         displayedScore = 0;
-        displayedBestScore = gameMode == GameMode.AI_DEMO
-                ? 0
-                : bestScore;
+        displayedBestScore = bestScore;
         lastScore = 0;
         stepCount = 0;
         stableSeconds = 0f;
         dangerSeconds = 0f;
+        aiDangerReactionArmed = true;
         aiLoadingSeconds = 0f;
         dropCooldown = 0.18f;
         previewX = FruitRules.BOARD_WIDTH / 2f;
@@ -1069,6 +1194,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
         duelResultRecorded = false;
         duelPercentile = 0;
         duelResultReason = "";
+        duelPlayerReactionRound = -1;
+        duelAiReactionRound = -1;
         currentSessionId = createSessionId();
         duelAiArmed = false;
         duelAiArmedX = FruitRules.BOARD_WIDTH / 2f;
@@ -1196,6 +1323,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private void consumeDuelMergeEvents() {
         boolean aiSceneChanged = false;
         int playerMergeCount = 0;
+        int aiMergeCount = 0;
+        int maxPlayerMergeLevel = 0;
+        int maxAiMergeLevel = 0;
         for (DuelMatch.MergeVisualEvent event
                 : duelMatch.drainMergeVisualEvents()) {
             if (event.side() == DuelMatch.Side.AI) {
@@ -1248,41 +1378,46 @@ public final class FruitMergeApplication extends ApplicationAdapter
             }
             if (event.side() == DuelMatch.Side.PLAYER) {
                 playerMergeCount += 1;
+                maxPlayerMergeLevel = Math.max(
+                        maxPlayerMergeLevel,
+                        event.level()
+                );
                 vibrateIf(
                         settings.vibrateOnMerge(),
                         event.level() >= 8 ? 36 : 18
                 );
-                if (event.level() >= 6) {
-                    showAiReaction(
-                            event.level() >= 9
-                                    ? "哇！这一下也太厉害了！"
-                                    : "漂亮的连锁，我得认真了！",
-                            AiMood.SURPRISED,
-                            2.2f,
-                            event.level() >= 9 ? 6 : 5
-                    );
-                }
             } else {
-                showAiReaction(
-                        event.level() >= 7
-                                ? "嘿嘿，连起来啦！"
-                                : "稳稳拿分～",
-                        AiMood.HAPPY,
-                        1.7f,
-                        event.level() >= 7 ? 5 : 3
+                aiMergeCount += 1;
+                maxAiMergeLevel = Math.max(
+                        maxAiMergeLevel,
+                        event.level()
                 );
             }
             scorePulse = 1f;
             markSessionDirty();
         }
-        if (playerMergeCount >= 2) {
+        boolean impressivePlayerMerge = playerMergeCount >= 2
+                || maxPlayerMergeLevel >= 6;
+        int reactionRound = duelMatch.roundIndex();
+        if (impressivePlayerMerge
+                && duelPlayerReactionRound != reactionRound) {
+            duelPlayerReactionRound = reactionRound;
             showAiReaction(
-                    playerMergeCount >= 4
-                            ? "这么长的连锁！我都看呆了！"
-                            : "连续合成？你很会铺垫嘛！",
                     AiMood.SURPRISED,
                     2.4f,
-                    playerMergeCount >= 4 ? 7 : 6
+                    playerMergeCount >= 4 || maxPlayerMergeLevel >= 9
+                            ? 7
+                            : 6
+            );
+        } else if (aiMergeCount > 0
+                && duelAiReactionRound != reactionRound) {
+            duelAiReactionRound = reactionRound;
+            boolean majorAiMerge = aiMergeCount >= 2
+                    || maxAiMergeLevel >= 7;
+            showAiReaction(
+                    AiMood.HAPPY,
+                    majorAiMerge ? 2.2f : 1.8f,
+                    majorAiMerge ? 6 : 3
             );
         }
         if (aiSceneChanged) {
@@ -1290,7 +1425,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     && !duelMatch.aiLane().submittedThisRound()) {
                 duelAiArmed = false;
                 showAiReaction(
-                        "局面又动了，我重新看看！",
                         AiMood.THINKING,
                         1.7f,
                         4
@@ -1373,7 +1507,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         duelAiRequestInFlight = true;
         showAiReaction(
-                "让我看看哪边更合适……",
                 AiMood.THINKING,
                 1.8f,
                 2
@@ -1439,7 +1572,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     : decision;
             if (decision == null) {
                 showAiReaction(
-                        "嗯……先走稳妥的一步",
                         AiMood.HESITATING,
                         1.8f,
                         3
@@ -1513,7 +1645,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
             profileStore.recordVersusGame(
                     currentSessionKey(),
                     player.score(),
+                    ai.score(),
                     player.watermelonCount(),
+                    ai.watermelonCount(),
+                    player.stepCount(),
                     toStoredBattleResult(duelMatch.outcome())
             );
         }
@@ -1670,8 +1805,33 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return;
         }
         if ("history".equals(normalized)) {
+            profileStore.recordSoloGame(
+                    "preview:history:solo",
+                    2_680,
+                    1,
+                    54,
+                    1_753_884_600_000L
+            );
+            profileStore.recordVersusGame(
+                    "preview:history:duel",
+                    3_420,
+                    3_180,
+                    2,
+                    1,
+                    67,
+                    GameProfileStore.BattleResult.WIN,
+                    1_753_888_200_000L
+            );
+            profileStore.recordAiDemoGame(
+                    "preview:history:demo",
+                    4_150,
+                    3,
+                    78,
+                    1_753_891_800_000L
+            );
             appScreen = AppScreen.HOME;
             overlayPage = OverlayPage.HISTORY;
+            historyPageIndex = 0;
             return;
         }
         if ("solo".equals(normalized)) {
@@ -1680,6 +1840,22 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         if ("demo".equals(normalized)) {
             startNewMode(GameMode.AI_DEMO);
+            return;
+        }
+        if ("reaction".equals(normalized)
+                || "reaction-overlap".equals(normalized)) {
+            startNewMode(GameMode.AI_DEMO);
+            if ("reaction-overlap".equals(normalized)) {
+                physics.addDroppedFruit(4, 280f, 270f);
+                showAiReactionImmediately(
+                        AiMood.WORRIED,
+                        2.8f,
+                        7
+                );
+                // Deterministic visual QA: begin at the fully occluded endpoint while the fruit
+                // falls through the card, instead of depending on capture-frame timing.
+                aiBubbleOcclusion = 1f;
+            }
             return;
         }
         if ("exit".equals(normalized)) {
@@ -1771,6 +1947,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     private void consumeMergeEvents() {
         Array<FruitPhysicsWorld.MergeEvent> events = physics.drainMergeEvents();
+        int maxMergedLevel = 0;
+        ScoreSequence reactionSequence = null;
         if (events.size > 0) {
             // 合成会改变图拓扑，即使新刚体瞬时速度为零，也必须重新累计稳定窗口，
             // 并让已经发出的异步决策失效。
@@ -1778,7 +1956,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
             cancelPendingDecision("局面变化");
         }
         for (FruitPhysicsWorld.MergeEvent event : events) {
+            maxMergedLevel = Math.max(maxMergedLevel, event.level);
             ScoreSequence sequence = ensureActiveScoreSequence();
+            reactionSequence = sequence;
             lastScore = score;
             score += event.scoreDelta;
             if (event.level == FruitRules.MAX_LEVEL) {
@@ -1803,26 +1983,17 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     delay,
                     sequence
             ));
-            if (gameMode == GameMode.AI_DEMO) {
-                showAiReaction(
-                        event.level >= 8
-                                ? "好耶！大连锁成功！"
-                                : "又合成一颗，继续继续～",
-                        AiMood.HAPPY,
-                        event.level >= 8 ? 2.4f : 1.6f,
-                        event.level >= 8 ? 6 : 3
-                );
-            }
             markSessionDirty();
         }
-        if (gameMode == GameMode.AI_DEMO && events.size >= 2) {
+        if (gameMode == GameMode.AI_DEMO
+                && reactionSequence != null
+                && !reactionSequence.aiReactionOffered) {
+            reactionSequence.aiReactionOffered = true;
+            boolean majorMerge = events.size >= 2 || maxMergedLevel >= 8;
             showAiReaction(
-                    events.size >= 4
-                            ? "大连锁！这次铺垫成功啦！"
-                            : "连起来啦，太开心了！",
                     AiMood.HAPPY,
-                    2.3f,
-                    events.size >= 4 ? 7 : 5
+                    majorMerge ? 2.3f : 1.8f,
+                    majorMerge ? 6 : 3
             );
         }
     }
@@ -1850,14 +2021,18 @@ public final class FruitMergeApplication extends ApplicationAdapter
             }
         }
         dangerSeconds = danger ? dangerSeconds + delta : 0f;
+        if (!danger) {
+            aiDangerReactionArmed = true;
+        }
         if (gameMode == GameMode.AI_DEMO
+                && aiDangerReactionArmed
                 && dangerSeconds >= 0.9f) {
             showAiReaction(
-                    "有点危险……我得找条出路！",
                     AiMood.WORRIED,
                     1.8f,
-                    5
+                    7
             );
+            aiDangerReactionArmed = false;
         }
         if (dangerSeconds >= GAME_OVER_SECONDS) {
             alive = false;
@@ -1874,9 +2049,18 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     profileStore.recordSoloGame(
                             currentSessionKey(),
                             score,
-                            currentWatermelons
+                            currentWatermelons,
+                            stepCount
                     );
-                    bestScore = profileStore.history().highScore();
+                    bestScore = modeHighScore(GameMode.SOLO);
+                } else {
+                    profileStore.recordAiDemoGame(
+                            currentSessionKey(),
+                            score,
+                            currentWatermelons,
+                            stepCount
+                    );
+                    bestScore = modeHighScore(GameMode.AI_DEMO);
                 }
                 settings = profileStore.settings();
             }
@@ -1932,7 +2116,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         aiState = AiState.THINKING;
         aiDetail = aiService.isAiReady() ? "正在观察局面" : "安全策略";
         showAiReaction(
-                "让我想一想……",
                 AiMood.THINKING,
                 1.6f,
                 2
@@ -2087,9 +2270,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         aiDetail = "正在考虑位置 " + (decision.actionIndex + 1) + "/21";
         float margin = decision.normalizedChoiceMargin();
         showAiReaction(
-                margin < 0.08f
-                        ? "这两个位置都不错，好纠结呀"
-                        : "看准啦，就放这里！",
                 margin < 0.08f ? AiMood.HESITATING : AiMood.READY,
                 margin < 0.08f ? 2.0f : 1.5f,
                 margin < 0.08f ? 3 : 2
@@ -2724,56 +2904,120 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void updateAiReaction(float delta) {
-        if (aiReaction == null
-                || appScreen != AppScreen.GAME
-                || overlayPage != OverlayPage.NONE) {
-            return;
+        if (dialogueDirector != null) {
+            dialogueDirector.update(delta);
         }
-        aiReaction.age += delta;
-        if (aiReaction.age >= aiReaction.duration) {
-            aiReaction = null;
+        if (aiReaction != null) {
+            aiReaction.age += delta;
+            if (aiReaction.age >= aiReaction.duration) {
+                aiReaction = null;
+            }
         }
+        if (aiEmotionPulse != null) {
+            aiEmotionPulse.age += delta;
+            if (aiEmotionPulse.age >= aiEmotionPulse.duration) {
+                aiEmotionPulse = null;
+            }
+        }
+        float targetOcclusion = (aiReaction != null
+                || aiEmotionPulse != null)
+                && appScreen == AppScreen.GAME
+                && reactionOverlapsVisibleFruit()
+                ? 1f
+                : 0f;
+        float response = targetOcclusion > aiBubbleOcclusion ? 9f : 5f;
+        float blend = 1f - (float) Math.exp(-response * delta);
+        aiBubbleOcclusion = MathUtils.lerp(
+                aiBubbleOcclusion,
+                targetOcclusion,
+                MathUtils.clamp(blend, 0f, 1f)
+        );
     }
 
-    private void showAiReaction(
-            String text,
+    private boolean showAiReaction(
             AiMood mood,
             float duration,
             int priority) {
-        if (text == null
-                || text.isEmpty()
-                || gameMode == GameMode.SOLO) {
-            return;
+        return showAiReaction(mood, duration, priority, false);
+    }
+
+    private boolean showAiReactionImmediately(
+            AiMood mood,
+            float duration,
+            int priority) {
+        return showAiReaction(mood, duration, priority, true);
+    }
+
+    private boolean showAiReaction(
+            AiMood mood,
+            float duration,
+            int priority,
+            boolean force) {
+        if (gameMode == GameMode.SOLO) {
+            return false;
         }
-        if (aiReaction != null) {
-            boolean sameMessage = aiReaction.text.equals(text);
-            boolean minimumHoldReached = aiReaction.age >= 0.42f;
-            if (sameMessage && aiReaction.age < 1.5f) {
-                return;
-            }
-            if (priority < aiReaction.priority && !minimumHoldReached) {
-                return;
-            }
-            if (priority == aiReaction.priority && !minimumHoldReached) {
-                return;
-            }
+        int activePriority = aiReaction == null ? -1 : aiReaction.priority;
+        float activeAge = aiReaction == null ? -1f : aiReaction.age;
+        AiDialogueDirector.Mood directorMood =
+                AiDialogueDirector.Mood.valueOf(mood.name());
+        AiDialogueDirector.Line line = dialogueDirector == null
+                ? null
+                : dialogueDirector.offer(
+                        directorMood,
+                        duration,
+                        priority,
+                        force,
+                        activePriority,
+                        activeAge
+                );
+        String pulseEmoticon = line != null
+                ? line.emoticon()
+                : (dialogueDirector == null
+                ? "(o_o)"
+                : dialogueDirector.randomEmoticon(directorMood));
+        pulseAiEmotion(mood, pulseEmoticon, priority);
+        if (line == null) {
+            return false;
         }
         aiReaction = new AiReaction(
-                text,
+                line.text(),
+                line.emoticon(),
                 mood,
-                Math.max(0.9f, duration),
+                line.duration(),
+                line.priority()
+        );
+        return true;
+    }
+
+    private void pulseAiEmotion(
+            AiMood mood,
+            String emoticon,
+            int priority) {
+        if (aiEmotionPulse != null
+                && aiEmotionPulse.age < 0.22f
+                && priority < aiEmotionPulse.priority) {
+            return;
+        }
+        aiEmotionPulse = new AiEmotionPulse(
+                emoticon,
+                mood,
+                MathUtils.clamp(0.66f + priority * 0.035f, 0.66f, 0.94f),
                 priority
         );
     }
 
     private void drawAiReaction() {
-        if (aiReaction == null
+        if ((aiReaction == null && aiEmotionPulse == null)
                 || appScreen != AppScreen.GAME
                 || currentResultVisible()
                 || (gameMode == GameMode.DUEL
                 && duelMatch != null
                 && duelMatch.outcome()
                 != DuelMatch.Outcome.IN_PROGRESS)) {
+            return;
+        }
+        if (aiReaction == null) {
+            drawAiEmotionPulseChip();
             return;
         }
         float enter = MathUtils.clamp(aiReaction.age / 0.18f, 0f, 1f);
@@ -2785,110 +3029,300 @@ public final class FruitMergeApplication extends ApplicationAdapter
         float alpha = Math.min(enter, leave);
         float pop = 0.84f
                 + (1f - (float) Math.pow(1f - enter, 3f)) * 0.16f;
-        float bob = MathUtils.sin(elapsedSeconds * 4.2f) * 1.7f;
-        float width = 404f * pop;
-        float height = 66f * pop;
-        float left = 90f + (404f - width) * 0.5f;
-        float top = 272f + (66f - height) * 0.5f + bob;
+        float bob = MathUtils.sin(elapsedSeconds * 3.6f) * 1.25f;
+        float width = 512f * pop;
+        float height = 90f * pop;
+        float left = 24f + (512f - width) * 0.5f;
+        float top = 270f + (90f - height) * 0.5f + bob;
+        boolean pulsing = aiEmotionPulse != null;
+        AiMood faceMood = pulsing
+                ? aiEmotionPulse.mood
+                : aiReaction.mood;
+        String faceEmoticon = pulsing
+                ? aiEmotionPulse.emoticon
+                : aiReaction.emoticon;
+        float facePulse = pulsing
+                ? 1f + 0.10f * (float) Math.sin(
+                MathUtils.clamp(
+                        aiEmotionPulse.age / aiEmotionPulse.duration,
+                        0f,
+                        1f
+                ) * MathUtils.PI)
+                : 1f;
         Color accent = reactionAccent(aiReaction.mood);
+        Color faceAccent = reactionAccent(faceMood);
+        Color foreground = reactionForeground(aiReaction.mood);
+        Color faceForeground = reactionForeground(faceMood);
+        float panelAlpha = alpha * (1f - 0.42f * aiBubbleOcclusion);
+        float contentAlpha = alpha * (1f - 0.06f * aiBubbleOcclusion);
 
+        // ShapeRenderer does not own blend state. Re-enable it here because several sprite/effect
+        // passes run between drawGame()'s initial setup and this late overlay.
+        Gdx.gl.glEnable(GL20.GL_BLEND);
+        Gdx.gl.glBlendFunc(
+                GL20.GL_SRC_ALPHA,
+                GL20.GL_ONE_MINUS_SRC_ALPHA
+        );
         shapes.begin(ShapeRenderer.ShapeType.Filled);
         scratchColor.set(CARD_SHADOW);
-        scratchColor.a *= alpha;
+        scratchColor.a = 0.34f * panelAlpha;
+        roundedRectTop(
+                left,
+                top + 7f,
+                width,
+                height,
+                24f * pop,
+                scratchColor
+        );
+        scratchColor.set(accent);
+        scratchColor.a = 0.96f * panelAlpha;
+        roundedRectTop(
+                left,
+                top,
+                width,
+                height,
+                24f * pop,
+                scratchColor
+        );
+        scratchColor.set(AI_BUBBLE_CARD);
+        scratchColor.a = 0.98f * panelAlpha;
+        roundedRectTop(
+                left + 3f,
+                top + 3f,
+                width - 6f,
+                height - 6f,
+                21f * pop,
+                scratchColor
+        );
+        scratchColor.set(faceAccent);
+        scratchColor.lerp(AI_BUBBLE_CARD, 0.68f);
+        scratchColor.a = 0.98f * panelAlpha;
+        roundedRectTop(
+                left + 12f,
+                top + 13f,
+                108f * pop,
+                height - 26f,
+                17f * pop,
+                scratchColor
+        );
+        shapes.end();
+
+        batch.begin();
+        normalFont.setColor(
+                faceForeground.r,
+                faceForeground.g,
+                faceForeground.b,
+                contentAlpha
+        );
+        drawTextInBox(
+                normalFont,
+                fitText(
+                        normalFont,
+                        faceEmoticon,
+                        98f * pop * facePulse
+                ),
+                left + 17f - 4f * (facePulse - 1f),
+                top + 14f - 3f * (facePulse - 1f),
+                98f * pop * facePulse,
+                (height - 28f) * facePulse,
+                Align.center
+        );
+        smallFont.setColor(
+                foreground.r,
+                foreground.g,
+                foreground.b,
+                contentAlpha
+        );
+        drawTextInBox(
+                smallFont,
+                reactionLabel(aiReaction.mood),
+                left + 136f,
+                top + 8f,
+                width - 154f,
+                28f,
+                Align.left
+        );
+        reactionFont.setColor(
+                TEXT_PRIMARY.r,
+                TEXT_PRIMARY.g,
+                TEXT_PRIMARY.b,
+                contentAlpha
+        );
+        drawWrappedTextInBox(
+                reactionFont,
+                aiReaction.text,
+                left + 136f,
+                top + 34f,
+                width - 154f,
+                height - 40f,
+                Align.left
+        );
+        batch.end();
+    }
+
+    /**
+     * Silent emotion channel: an event can change the kaomoji immediately even when the text
+     * scheduler deliberately refuses another sentence.
+     */
+    private void drawAiEmotionPulseChip() {
+        AiEmotionPulse pulse = aiEmotionPulse;
+        if (pulse == null) {
+            return;
+        }
+        float enter = MathUtils.clamp(pulse.age / 0.10f, 0f, 1f);
+        float leave = MathUtils.clamp(
+                (pulse.duration - pulse.age) / 0.18f,
+                0f,
+                1f
+        );
+        float alpha = Math.min(enter, leave);
+        float pop = 0.82f
+                + (1f - (float) Math.pow(1f - enter, 3f)) * 0.18f;
+        float width = 132f * pop;
+        float height = 66f * pop;
+        float left = 24f + (132f - width) * 0.5f;
+        float top = 282f + (66f - height) * 0.5f;
+        Color accent = reactionAccent(pulse.mood);
+        Color foreground = reactionForeground(pulse.mood);
+        float panelAlpha = alpha * (1f - 0.42f * aiBubbleOcclusion);
+        float contentAlpha = alpha * (1f - 0.06f * aiBubbleOcclusion);
+
+        Gdx.gl.glEnable(GL20.GL_BLEND);
+        Gdx.gl.glBlendFunc(
+                GL20.GL_SRC_ALPHA,
+                GL20.GL_ONE_MINUS_SRC_ALPHA
+        );
+        shapes.begin(ShapeRenderer.ShapeType.Filled);
+        scratchColor.set(CARD_SHADOW);
+        scratchColor.a = 0.32f * panelAlpha;
         roundedRectTop(
                 left,
                 top + 5f,
                 width,
                 height,
-                23f * pop,
+                21f * pop,
                 scratchColor
         );
-        scratchColor.set(SCORE_CARD);
-        scratchColor.a = 0.95f * alpha;
+        scratchColor.set(accent);
+        scratchColor.a = 0.96f * panelAlpha;
         roundedRectTop(
                 left,
                 top,
                 width,
                 height,
-                23f * pop,
+                21f * pop,
                 scratchColor
         );
-        scratchColor.set(accent);
-        scratchColor.a = alpha;
-        shapes.triangle(
-                left + 12f,
-                toRenderY(top + height * 0.58f),
-                left - 12f,
-                toRenderY(top + height * 0.78f),
-                left + 12f,
-                toRenderY(top + height * 0.88f)
-        );
-        shapes.circle(60f, toRenderY(top + height * 0.5f), 28f * pop, 32);
-        drawAiFace(
-                60f,
-                top + height * 0.5f,
-                aiReaction.mood,
-                alpha
+        scratchColor.set(AI_BUBBLE_CARD);
+        scratchColor.a = 0.98f * panelAlpha;
+        roundedRectTop(
+                left + 3f,
+                top + 3f,
+                width - 6f,
+                height - 6f,
+                18f * pop,
+                scratchColor
         );
         shapes.end();
 
         batch.begin();
-        smallFont.setColor(
-                TEXT_PRIMARY.r,
-                TEXT_PRIMARY.g,
-                TEXT_PRIMARY.b,
-                alpha
+        normalFont.setColor(
+                foreground.r,
+                foreground.g,
+                foreground.b,
+                contentAlpha
         );
         drawTextInBox(
-                smallFont,
-                fitText(smallFont, aiReaction.text, width - 36f),
-                left + 18f,
-                top,
-                width - 36f,
-                height,
+                normalFont,
+                fitText(normalFont, pulse.emoticon, width - 18f),
+                left + 9f,
+                top + 5f,
+                width - 18f,
+                height - 10f,
                 Align.center
         );
         batch.end();
     }
 
-    private void drawAiFace(
-            float centerX,
-            float centerTopY,
-            AiMood mood,
-            float alpha) {
-        float centerY = toRenderY(centerTopY);
-        shapes.setColor(1f, 1f, 1f, alpha);
-        if (mood == AiMood.SURPRISED) {
-            shapes.circle(centerX - 8f, centerY + 5f, 3.8f, 14);
-            shapes.circle(centerX + 8f, centerY + 5f, 3.8f, 14);
-            shapes.circle(centerX, centerY - 8f, 5.5f, 18);
-            return;
-        }
-        if (mood == AiMood.WORRIED) {
-            shapes.circle(centerX - 8f, centerY + 4f, 2.8f, 12);
-            shapes.circle(centerX + 8f, centerY + 4f, 2.8f, 12);
-            shapes.rect(centerX - 7f, centerY - 9f, 14f, 2.5f);
-            return;
-        }
-        if (mood == AiMood.THINKING
-                || mood == AiMood.HESITATING) {
-            shapes.rect(centerX - 11f, centerY + 3f, 7f, 2.5f);
-            shapes.circle(centerX + 8f, centerY + 4f, 2.8f, 12);
-            shapes.circle(centerX + 6f, centerY - 9f, 2.4f, 12);
-            shapes.circle(centerX + 13f, centerY - 13f, 1.7f, 10);
-            return;
-        }
-        shapes.circle(centerX - 8f, centerY + 4f, 2.8f, 12);
-        shapes.circle(centerX + 8f, centerY + 4f, 2.8f, 12);
-        for (int dot = 0; dot < 7; dot++) {
-            float angle = MathUtils.PI * dot / 6f;
-            shapes.circle(
-                    centerX + MathUtils.cos(angle) * 10f,
-                    centerY - 5f - MathUtils.sin(angle) * 7f,
-                    1.7f,
-                    10
+    private boolean reactionOverlapsVisibleFruit() {
+        float left = 24f;
+        float top = aiReaction == null ? 282f : 270f;
+        float right = aiReaction == null ? 156f : 536f;
+        float bottom = aiReaction == null ? 348f : 360f;
+        if (gameMode == GameMode.DUEL && duelMatch != null) {
+            if (laneOverlapsReaction(
+                    duelMatch.lane(duelForeground),
+                    left,
+                    top,
+                    right,
+                    bottom
+            )) {
+                return true;
+            }
+            DuelMatch.Side background = duelForeground
+                    == DuelMatch.Side.PLAYER
+                    ? DuelMatch.Side.AI
+                    : DuelMatch.Side.PLAYER;
+            return laneOverlapsReaction(
+                    duelMatch.lane(background),
+                    left + 8f,
+                    top + 8f,
+                    right - 8f,
+                    bottom - 8f
             );
         }
+        for (FruitPhysicsWorld.FruitBody fruit : physics.fruits()) {
+            if (circleIntersectsRectangle(
+                    fruit.x(),
+                    fruit.y(),
+                    fruit.displayRadius + 4f,
+                    left,
+                    top,
+                    right,
+                    bottom
+            )) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean laneOverlapsReaction(
+            DuelMatch.Lane lane,
+            float left,
+            float top,
+            float right,
+            float bottom) {
+        for (FruitPhysicsWorld.FruitBody fruit
+                : lane.physics().fruits()) {
+            if (circleIntersectsRectangle(
+                    fruit.x(),
+                    fruit.y(),
+                    fruit.displayRadius + 4f,
+                    left,
+                    top,
+                    right,
+                    bottom
+            )) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean circleIntersectsRectangle(
+            float centerX,
+            float centerY,
+            float radius,
+            float left,
+            float top,
+            float right,
+            float bottom) {
+        float nearestX = MathUtils.clamp(centerX, left, right);
+        float nearestY = MathUtils.clamp(centerY, top, bottom);
+        float dx = centerX - nearestX;
+        float dy = centerY - nearestY;
+        return dx * dx + dy * dy <= radius * radius;
     }
 
     private Color reactionAccent(AiMood mood) {
@@ -2902,6 +3336,21 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return PLAYER_TINT;
         }
         return AI_TINT;
+    }
+
+    private Color reactionForeground(AiMood mood) {
+        if (mood == AiMood.SURPRISED
+                || mood == AiMood.WORRIED) {
+            return PLAYER_SCORE_DARK;
+        }
+        if (mood == AiMood.HAPPY) {
+            return ACCENT_DARK;
+        }
+        return AI_SCORE_DARK;
+    }
+
+    private String reactionLabel(AiMood mood) {
+        return AiDialogueDirector.Mood.valueOf(mood.name()).label();
     }
 
     private Color fruitAccent(int level) {
@@ -4786,9 +5235,18 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
         } else {
             drawAnimatedButton(
+                    CONTROL_NEW_RESUME,
+                    104f,
+                    522f,
+                    352f,
+                    64f,
+                    28f,
+                    ACCENT
+            );
+            drawAnimatedButton(
                     CONTROL_NEW_CONFIRM,
                     104f,
-                    562f,
+                    608f,
                     352f,
                     64f,
                     28f,
@@ -4796,12 +5254,12 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
             drawAnimatedButton(
                     CONTROL_NEW_CANCEL,
-                    104f,
-                    652f,
-                    352f,
-                    64f,
-                    28f,
-                    ACCENT_SOFT
+                    168f,
+                    696f,
+                    224f,
+                    48f,
+                    22f,
+                    NEXT_CARD
             );
         }
         shapes.end();
@@ -4866,24 +5324,35 @@ public final class FruitMergeApplication extends ApplicationAdapter
         } else {
             normalFont.setColor(Color.WHITE);
             drawAnimatedTextInBox(
-                    CONTROL_NEW_CONFIRM,
+                    CONTROL_NEW_RESUME,
                     normalFont,
-                    "覆盖进度并开始",
+                    "继续上次游戏",
                     104f,
-                    562f,
+                    522f,
                     352f,
                     64f,
                     Align.center
             );
-            normalFont.setColor(ACCENT_DARK);
+            normalFont.setColor(Color.WHITE);
             drawAnimatedTextInBox(
-                    CONTROL_NEW_CANCEL,
+                    CONTROL_NEW_CONFIRM,
                     normalFont,
-                    "保留上次进度",
+                    "覆盖进度并开始",
                     104f,
-                    652f,
+                    608f,
                     352f,
                     64f,
+                    Align.center
+            );
+            smallFont.setColor(TEXT_PRIMARY);
+            drawAnimatedTextInBox(
+                    CONTROL_NEW_CANCEL,
+                    smallFont,
+                    "返回大厅",
+                    168f,
+                    696f,
+                    224f,
+                    48f,
                     Align.center
             );
         }
@@ -4937,15 +5406,71 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void drawHistoryPageShapes() {
-        float[] rows = {230f, 320f, 410f, 500f, 590f, 680f};
-        for (float row : rows) {
-            roundedRectTop(62f, row + 4f, 436f, 68f, 16f, CARD_SHADOW);
-            roundedRectTop(62f, row, 436f, 68f, 16f, SCORE_CARD);
+        roundedRectTop(62f, 196f, 436f, 92f, 18f, CARD_SHADOW);
+        roundedRectTop(62f, 192f, 436f, 92f, 18f, SCORE_CARD);
+        roundedRectTop(62f, 300f, 436f, 70f, 16f, CARD_SHADOW);
+        roundedRectTop(62f, 296f, 436f, 70f, 16f, NEXT_CARD);
+
+        List<GameProfileStore.GameRecord> records =
+                profileStore.gameRecords();
+        int pageCount = historyPageCount(records.size());
+        historyPageIndex = MathUtils.clamp(
+                historyPageIndex,
+                0,
+                pageCount - 1
+        );
+        int first = historyPageIndex * HISTORY_RECORDS_PER_PAGE;
+        int visible = Math.min(
+                HISTORY_RECORDS_PER_PAGE,
+                records.size() - first
+        );
+        if (visible <= 0) {
+            roundedRectTop(62f, 424f, 436f, 164f, 18f, CARD_SHADOW);
+            roundedRectTop(62f, 420f, 436f, 164f, 18f, SCORE_CARD);
+        } else {
+            for (int row = 0; row < visible; row++) {
+                float top = 420f + row * 90f;
+                roundedRectTop(
+                        62f,
+                        top + 4f,
+                        436f,
+                        80f,
+                        16f,
+                        CARD_SHADOW
+                );
+                roundedRectTop(
+                        62f,
+                        top,
+                        436f,
+                        80f,
+                        16f,
+                        historyRecordColor(
+                                records.get(first + row).mode())
+                );
+            }
         }
+        drawAnimatedButton(
+                CONTROL_HISTORY_PREVIOUS,
+                154f,
+                798f,
+                110f,
+                48f,
+                22f,
+                NEXT_CARD
+        );
+        drawAnimatedButton(
+                CONTROL_HISTORY_NEXT,
+                296f,
+                798f,
+                110f,
+                48f,
+                22f,
+                NEXT_CARD
+        );
         drawAnimatedButton(
                 CONTROL_HISTORY_RESET,
                 158f,
-                834f,
+                900f,
                 244f,
                 58f,
                 29f,
@@ -5124,22 +5649,133 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 Align.center
         );
         GameProfileStore.History history = profileStore.history();
-        drawHistoryRow("完成局数", history.totalGames(), 230f);
-        drawHistoryRow("历史最高分", history.highScore(), 320f);
-        drawHistoryRow(
-                "单局最多大西瓜",
-                history.maxWatermelonsInGame(),
-                410f
+        smallFont.setColor(TEXT_MUTED);
+        drawTextInBox(
+                smallFont,
+                "最佳成绩",
+                82f,
+                198f,
+                120f,
+                26f,
+                Align.left
         );
-        drawHistoryRow("累计合成大西瓜", history.totalWatermelons(), 500f);
-        drawHistoryRow(
-                "对战胜负平",
-                history.versusWins() + " / "
-                        + history.versusLosses() + " / "
-                        + history.versusDraws(),
-                590f
+        normalFont.setColor(PLAYER_SCORE_DARK);
+        drawTextInBox(
+                normalFont,
+                "全模式最高  " + history.highScore(),
+                82f,
+                220f,
+                396f,
+                34f,
+                Align.left
         );
-        drawHistoryRow("对战最高分", history.highestVersusScore(), 680f);
+        smallFont.setColor(TEXT_PRIMARY);
+        String modeBests = "单人 " + history.highestSoloScore()
+                + "  ·  对战 " + history.highestVersusScore()
+                + "  ·  演示 " + history.highestAiDemoScore();
+        drawTextInBox(
+                smallFont,
+                fitText(smallFont, modeBests, 396f),
+                82f,
+                252f,
+                396f,
+                26f,
+                Align.left
+        );
+
+        smallFont.setColor(TEXT_PRIMARY);
+        drawTextInBox(
+                smallFont,
+                "累计 " + history.totalGames()
+                        + " 局  ·  单局最多大西瓜 "
+                        + history.maxWatermelonsInGame(),
+                82f,
+                302f,
+                396f,
+                28f,
+                Align.left
+        );
+        drawTextInBox(
+                smallFont,
+                "对战  " + history.versusWins() + "胜  "
+                        + history.versusLosses() + "负  "
+                        + history.versusDraws() + "平",
+                82f,
+                332f,
+                396f,
+                26f,
+                Align.left
+        );
+
+        List<GameProfileStore.GameRecord> records =
+                profileStore.gameRecords();
+        int pageCount = historyPageCount(records.size());
+        historyPageIndex = MathUtils.clamp(
+                historyPageIndex,
+                0,
+                pageCount - 1
+        );
+        smallFont.setColor(TEXT_MUTED);
+        drawTextInBox(
+                smallFont,
+                "对局列表  " + (historyPageIndex + 1)
+                        + " / " + pageCount,
+                72f,
+                380f,
+                416f,
+                30f,
+                Align.left
+        );
+
+        int first = historyPageIndex * HISTORY_RECORDS_PER_PAGE;
+        int visible = Math.min(
+                HISTORY_RECORDS_PER_PAGE,
+                records.size() - first
+        );
+        if (visible <= 0) {
+            normalFont.setColor(TEXT_MUTED);
+            drawTextInBox(
+                    normalFont,
+                    "完成新对局后会逐条显示在这里",
+                    82f,
+                    420f,
+                    396f,
+                    164f,
+                    Align.center
+            );
+        } else {
+            for (int row = 0; row < visible; row++) {
+                drawGameRecord(
+                        records.get(first + row),
+                        420f + row * 90f
+                );
+            }
+        }
+
+        boolean hasPrevious = historyPageIndex > 0;
+        boolean hasNext = historyPageIndex + 1 < pageCount;
+        smallFont.setColor(hasPrevious ? TEXT_PRIMARY : TEXT_MUTED);
+        drawAnimatedTextInBox(
+                CONTROL_HISTORY_PREVIOUS,
+                smallFont,
+                "上一页",
+                154f,
+                798f,
+                110f,
+                48f,
+                Align.center
+        );
+        smallFont.setColor(hasNext ? TEXT_PRIMARY : TEXT_MUTED);
+        drawAnimatedTextInBox(
+                CONTROL_HISTORY_NEXT,
+                smallFont,
+                "下一页",
+                296f,
+                798f,
+                110f,
+                48f,
+                Align.center
+        );
 
         normalFont.setColor(
                 historyResetConfirmSeconds > 0f ? DANGER : TEXT_PRIMARY
@@ -5151,38 +5787,112 @@ public final class FruitMergeApplication extends ApplicationAdapter
                         ? "再次点击确认重置"
                         : "重置记录",
                 158f,
-                834f,
+                900f,
                 244f,
                 58f,
                 Align.center
         );
     }
 
-    private void drawHistoryRow(String label, int value, float top) {
-        drawHistoryRow(label, Integer.toString(value), top);
+    private int historyPageCount(int recordCount) {
+        return Math.max(
+                1,
+                (Math.max(0, recordCount) + HISTORY_RECORDS_PER_PAGE - 1)
+                        / HISTORY_RECORDS_PER_PAGE
+        );
     }
 
-    private void drawHistoryRow(String label, String value, float top) {
+    private Color historyRecordColor(GameProfileStore.GameMode mode) {
+        if (mode == GameProfileStore.GameMode.SOLO) {
+            return PLAYER_TINT_SOFT;
+        }
+        if (mode == GameProfileStore.GameMode.DUEL) {
+            return AI_TINT_SOFT;
+        }
+        return ACCENT_SOFT;
+    }
+
+    private void drawGameRecord(
+            GameProfileStore.GameRecord record,
+            float top) {
         normalFont.setColor(TEXT_PRIMARY);
         drawTextInBox(
                 normalFont,
-                label,
+                gameRecordTitle(record),
                 82f,
-                top + 10f,
-                272f,
-                48f,
+                top + 7f,
+                220f,
+                30f,
                 Align.left
         );
-        normalFont.setColor(TEXT_MUTED);
+        normalFont.setColor(
+                record.mode() == GameProfileStore.GameMode.DUEL
+                        ? AI_SCORE_DARK
+                        : PLAYER_SCORE_DARK
+        );
         drawTextInBox(
                 normalFont,
-                value,
-                350f,
-                top + 10f,
-                126f,
-                48f,
+                gameRecordScore(record),
+                306f,
+                top + 7f,
+                172f,
+                30f,
                 Align.right
         );
+        smallFont.setColor(TEXT_MUTED);
+        String detail = formatHistoryTime(
+                record.completedAtEpochMillis())
+                + "  ·  大西瓜 " + record.watermelonsCreated()
+                + "  ·  投放 " + record.dropCount();
+        drawTextInBox(
+                smallFont,
+                fitText(smallFont, detail, 396f),
+                82f,
+                top + 43f,
+                396f,
+                26f,
+                Align.left
+        );
+    }
+
+    private String gameRecordTitle(
+            GameProfileStore.GameRecord record) {
+        if (record.mode() == GameProfileStore.GameMode.SOLO) {
+            return "单人模式";
+        }
+        if (record.mode() == GameProfileStore.GameMode.AI_DEMO) {
+            return "AI演示";
+        }
+        switch (record.result()) {
+            case WIN:
+                return "挑战AI · 胜";
+            case LOSS:
+                return "挑战AI · 负";
+            case DRAW:
+                return "挑战AI · 平";
+            default:
+                return "挑战AI";
+        }
+    }
+
+    private String gameRecordScore(
+            GameProfileStore.GameRecord record) {
+        if (record.mode() == GameProfileStore.GameMode.DUEL) {
+            return record.score() + " : " + record.opponentScore();
+        }
+        return record.score() + "分";
+    }
+
+    private String formatHistoryTime(long epochMillis) {
+        if (epochMillis <= 0L) {
+            return "旧版本记录";
+        }
+        java.text.SimpleDateFormat format =
+                new java.text.SimpleDateFormat(
+                        "MM-dd HH:mm",
+                        java.util.Locale.CHINA
+                );
+        return format.format(new java.util.Date(epochMillis));
     }
 
     private String onOff(boolean value) {
@@ -5281,13 +5991,71 @@ public final class FruitMergeApplication extends ApplicationAdapter
             float radius,
             Color color) {
         float y = toRenderY(top + height);
+        float safeRadius = MathUtils.clamp(
+                radius,
+                0f,
+                Math.min(width, height) * 0.5f
+        );
         shapes.setColor(color);
-        shapes.rect(x + radius, y, width - 2f * radius, height);
-        shapes.rect(x, y + radius, width, height - 2f * radius);
-        shapes.circle(x + radius, y + radius, radius, 24);
-        shapes.circle(x + width - radius, y + radius, radius, 24);
-        shapes.circle(x + radius, y + height - radius, radius, 24);
-        shapes.circle(x + width - radius, y + height - radius, radius, 24);
+        if (safeRadius <= 0f) {
+            shapes.rect(x, y, width, height);
+            return;
+        }
+        /*
+         * These primitives meet only at their boundaries. The previous two full rectangles plus
+         * four full circles overlapped across the card, which made a nominally 60%-opaque bubble
+         * composite several times and appear almost solid.
+         */
+        shapes.rect(
+                x + safeRadius,
+                y,
+                width - 2f * safeRadius,
+                height
+        );
+        shapes.rect(
+                x,
+                y + safeRadius,
+                safeRadius,
+                height - 2f * safeRadius
+        );
+        shapes.rect(
+                x + width - safeRadius,
+                y + safeRadius,
+                safeRadius,
+                height - 2f * safeRadius
+        );
+        shapes.arc(
+                x + safeRadius,
+                y + safeRadius,
+                safeRadius,
+                180f,
+                90f,
+                10
+        );
+        shapes.arc(
+                x + width - safeRadius,
+                y + safeRadius,
+                safeRadius,
+                270f,
+                90f,
+                10
+        );
+        shapes.arc(
+                x + width - safeRadius,
+                y + height - safeRadius,
+                safeRadius,
+                0f,
+                90f,
+                10
+        );
+        shapes.arc(
+                x + safeRadius,
+                y + height - safeRadius,
+                safeRadius,
+                90f,
+                90f,
+                10
+        );
     }
 
     /**
@@ -5310,6 +6078,26 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         float visibleTop = top + (height - glyphLayout.height) * 0.5f;
         font.draw(batch, glyphLayout, x, toRenderY(visibleTop));
+    }
+
+    private void drawWrappedTextInBox(
+            BitmapFont font,
+            String text,
+            float left,
+            float top,
+            float width,
+            float height,
+            int alignment) {
+        glyphLayout.setText(
+                font,
+                text == null ? "" : text,
+                font.getColor(),
+                width,
+                alignment,
+                true
+        );
+        float visibleTop = top + (height - glyphLayout.height) * 0.5f;
+        font.draw(batch, glyphLayout, left, toRenderY(visibleTop));
     }
 
     private float toRenderY(float screenY) {
@@ -5394,6 +6182,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         overlayPage = page;
         activeDragPointer = -1;
         historyResetConfirmSeconds = 0f;
+        if (page == OverlayPage.HISTORY) {
+            historyPageIndex = 0;
+        }
         uiMotion.cancelAll();
     }
 
@@ -5489,7 +6280,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void handleHistoryTouch(float x, float y) {
-        if (!isInside(x, y, 158f, 834f, 244f, 58f)) {
+        if (!isInside(x, y, 158f, 900f, 244f, 58f)) {
             return;
         }
         if (historyResetConfirmSeconds <= 0f) {
@@ -5497,9 +6288,39 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return;
         }
         profileStore.resetHistory();
+        clearCompletedSavedSessionAfterHistoryReset();
+        historyPageIndex = 0;
         bestScore = 0;
         displayedBestScore = Math.max(displayedScore, bestScore);
         historyResetConfirmSeconds = 0f;
+    }
+
+    /**
+     * A completed draft may survive the tiny window between durable history recording and the
+     * player's result acknowledgement. Once the user explicitly resets history, retaining that
+     * draft would allow a later "continue" to recreate the deleted row and aggregates.
+     * In-progress saves remain untouched.
+     */
+    private void clearCompletedSavedSessionAfterHistoryReset() {
+        GameSessionStore.Session saved = sessionStore.load();
+        if (saved == null) {
+            return;
+        }
+        boolean completed;
+        if (saved.mode() == GameSessionStore.Mode.DUEL) {
+            completed = saved.duel().resultRecorded()
+                    || saved.duel().match().outcome()
+                    != DuelMatch.Outcome.IN_PROGRESS;
+        } else {
+            completed = saved.single().resultRecorded()
+                    || !saved.single().alive();
+        }
+        if (completed) {
+            sessionStore.clear();
+            if (saved.sessionId() == currentSessionId) {
+                inMemorySession = false;
+            }
+        }
     }
 
     private void requestModeSwitch() {
@@ -5646,7 +6467,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 spawnDuelDropFeedback(DuelMatch.Side.PLAYER);
                 spawnDuelDropFeedback(DuelMatch.Side.AI);
                 showAiReaction(
-                        "一起落下，公平较量！",
                         AiMood.READY,
                         1.6f,
                         4
@@ -5684,7 +6504,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         duelAiArmed = true;
         duelAiArmedX = target;
         showAiReaction(
-                "我准备好啦，等你一起放！",
                 AiMood.READY,
                 2.2f,
                 4
@@ -5773,11 +6592,14 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         if (overlayPage == OverlayPage.NEW_GAME_CONFIRM) {
             return beginControl(
+                    CONTROL_NEW_RESUME, pointer, x, y,
+                    104f, 522f, 352f, 64f
+            ) || beginControl(
                     CONTROL_NEW_CONFIRM, pointer, x, y,
-                    104f, 562f, 352f, 64f
+                    104f, 608f, 352f, 64f
             ) || beginControl(
                     CONTROL_NEW_CANCEL, pointer, x, y,
-                    104f, 652f, 352f, 64f
+                    168f, 696f, 224f, 48f
             );
         }
         if (overlayPage == OverlayPage.SETTINGS) {
@@ -5827,8 +6649,14 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     CONTROL_OVERLAY_CLOSE, pointer, x, y,
                     430f, 124f, 70f, 46f
             ) || beginControl(
+                    CONTROL_HISTORY_PREVIOUS, pointer, x, y,
+                    154f, 798f, 110f, 48f
+            ) || beginControl(
+                    CONTROL_HISTORY_NEXT, pointer, x, y,
+                    296f, 798f, 110f, 48f
+            ) || beginControl(
                     CONTROL_HISTORY_RESET, pointer, x, y,
-                    158f, 834f, 244f, 58f
+                    158f, 900f, 244f, 58f
             );
         }
         if (appScreen == AppScreen.HOME) {
@@ -5904,21 +6732,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         } else if (CONTROL_HOME_DEMO.equals(controlId)) {
             requestStartMode(GameMode.AI_DEMO);
         } else if (CONTROL_HOME_RESUME.equals(controlId)) {
-            if (inMemorySession && currentSessionId > 0L) {
-                appScreen = AppScreen.GAME;
-                overlayPage = OverlayPage.NONE;
-                screenEnterSeconds = 0f;
-                if (gameMode != GameMode.SOLO) {
-                    showAiReaction(
-                            "欢迎回来，我们继续吧！",
-                            AiMood.HAPPY,
-                            2.0f,
-                            4
-                    );
-                }
-            } else {
-                resumeSavedSession();
-            }
+            continueSavedSession();
         } else if (CONTROL_HOME_SETTINGS.equals(controlId)) {
             openOverlay(OverlayPage.SETTINGS);
         } else if (CONTROL_HOME_HISTORY.equals(controlId)) {
@@ -5942,12 +6756,24 @@ public final class FruitMergeApplication extends ApplicationAdapter
             if (requested != null) {
                 startNewMode(requested);
             }
+        } else if (CONTROL_NEW_RESUME.equals(controlId)) {
+            continueSavedSession();
         } else if (CONTROL_NEW_CANCEL.equals(controlId)) {
             pendingNewMode = null;
             closeOverlay();
         } else if (CONTROL_SETTINGS_RESET.equals(controlId)) {
             profileStore.resetSettings();
             settings = profileStore.settings();
+        } else if (CONTROL_HISTORY_PREVIOUS.equals(controlId)) {
+            historyPageIndex = Math.max(0, historyPageIndex - 1);
+        } else if (CONTROL_HISTORY_NEXT.equals(controlId)) {
+            int pageCount = historyPageCount(
+                    profileStore.gameRecords().size()
+            );
+            historyPageIndex = Math.min(
+                    pageCount - 1,
+                    historyPageIndex + 1
+            );
         } else if (CONTROL_HISTORY_RESET.equals(controlId)) {
             handleHistoryResetAction();
         } else {
@@ -6008,6 +6834,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return;
         }
         profileStore.resetHistory();
+        clearCompletedSavedSessionAfterHistoryReset();
+        historyPageIndex = 0;
         bestScore = 0;
         displayedBestScore = Math.max(displayedScore, bestScore);
         historyResetConfirmSeconds = 0f;
@@ -6281,6 +7109,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private enum AiMood {
         THINKING,
         HESITATING,
+        WELCOME,
         READY,
         HAPPY,
         SURPRISED,
@@ -6304,6 +7133,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     private static final class AiReaction {
         private final String text;
+        private final String emoticon;
         private final AiMood mood;
         private final float duration;
         private final int priority;
@@ -6311,10 +7141,12 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
         private AiReaction(
                 String text,
+                String emoticon,
                 AiMood mood,
                 float duration,
                 int priority) {
             this.text = text;
+            this.emoticon = emoticon;
             this.mood = mood;
             this.duration = duration;
             this.priority = priority;
@@ -6556,6 +7388,25 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
     }
 
+    private static final class AiEmotionPulse {
+        private final String emoticon;
+        private final AiMood mood;
+        private final float duration;
+        private final int priority;
+        private float age;
+
+        private AiEmotionPulse(
+                String emoticon,
+                AiMood mood,
+                float duration,
+                int priority) {
+            this.emoticon = emoticon;
+            this.mood = mood;
+            this.duration = duration;
+            this.priority = priority;
+        }
+    }
+
     private static final class ScoreSequence {
         private final int id;
         private final Color lastColor = new Color(SCORE_GLOW);
@@ -6569,6 +7420,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         private boolean released;
         private boolean rollQueued;
         private boolean forceRelease;
+        private boolean aiReactionOffered;
 
         private ScoreSequence(int id, int scoreBefore) {
             this.id = id;

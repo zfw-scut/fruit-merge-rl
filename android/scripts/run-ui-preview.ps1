@@ -7,6 +7,8 @@ param(
         "solo",
         "duel",
         "demo",
+        "reaction",
+        "reaction-overlap",
         "settings",
         "history",
         "exit",

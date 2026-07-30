@@ -1,9 +1,11 @@
 package com.fruitmerge.ai.game;
 
 import com.badlogic.gdx.Preferences;
+import com.badlogic.gdx.utils.Base64Coder;
 import org.junit.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
@@ -100,6 +102,243 @@ public final class GameProfileStoreTest {
     }
 
     @Test
+    public void recordsAllThreeModesAsNewestFirstDurableEntries() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+
+        assertTrue(store.recordSoloGame(
+                "solo:list",
+                1_200,
+                1,
+                38,
+                1_000L
+        ));
+        assertTrue(store.recordVersusGame(
+                "duel:list",
+                2_300,
+                2_050,
+                2,
+                1,
+                51,
+                GameProfileStore.BattleResult.WIN,
+                2_000L
+        ));
+        assertTrue(store.recordAiDemoGame(
+                "demo:list",
+                3_400,
+                3,
+                64,
+                3_000L
+        ));
+
+        GameProfileStore reloaded = new GameProfileStore(preferences);
+        List<GameProfileStore.GameRecord> records =
+                reloaded.gameRecords();
+        assertEquals(3, records.size());
+        assertEquals(
+                GameProfileStore.GameMode.AI_DEMO,
+                records.get(0).mode()
+        );
+        assertEquals(3_400, records.get(0).score());
+        assertEquals(64, records.get(0).dropCount());
+        assertEquals(
+                GameProfileStore.GameMode.DUEL,
+                records.get(1).mode()
+        );
+        assertEquals(2_050, records.get(1).opponentScore());
+        assertEquals(
+                GameProfileStore.RecordResult.WIN,
+                records.get(1).result()
+        );
+        assertEquals(
+                GameProfileStore.GameMode.SOLO,
+                records.get(2).mode()
+        );
+
+        GameProfileStore.History history = reloaded.history();
+        assertEquals(3, history.totalGames());
+        assertEquals(1, history.soloGames());
+        assertEquals(1, history.aiDemoGames());
+        assertEquals(1_200, history.highestSoloScore());
+        assertEquals(2_300, history.highestVersusScore());
+        assertEquals(3_400, history.highestAiDemoScore());
+        assertEquals(3_400, history.highScore());
+    }
+
+    @Test
+    public void recentListIsBoundedWithoutLosingTotalsOrBests() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        int count = GameProfileStore.MAX_GAME_RECORDS + 7;
+
+        for (int index = 0; index < count; index++) {
+            assertTrue(store.recordSoloGame(
+                    "solo:bounded:" + index,
+                    index * 10,
+                    index % 3,
+                    index,
+                    index + 1L
+            ));
+        }
+
+        GameProfileStore reloaded = new GameProfileStore(preferences);
+        assertEquals(count, reloaded.history().totalGames());
+        assertEquals((count - 1) * 10, reloaded.history().highScore());
+        assertEquals(
+                GameProfileStore.MAX_GAME_RECORDS,
+                reloaded.gameRecords().size()
+        );
+        assertEquals(
+                "solo:bounded:" + (count - 1),
+                reloaded.gameRecords().get(0).sessionId()
+        );
+        assertEquals(
+                "solo:bounded:7",
+                reloaded.gameRecords().get(
+                        GameProfileStore.MAX_GAME_RECORDS - 1
+                ).sessionId()
+        );
+        assertFalse(reloaded.hasRecordedSession("solo:bounded:0"));
+        assertTrue(reloaded.hasRecordedSession(
+                "solo:bounded:" + (count - 1)
+        ));
+    }
+
+    @Test
+    public void damagedRecordTailKeepsEarlierCompleteEntries() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        assertTrue(store.recordSoloGame(
+                "solo:older",
+                700,
+                0,
+                10,
+                10L
+        ));
+        assertTrue(store.recordAiDemoGame(
+                "demo:newer",
+                1_100,
+                1,
+                20,
+                20L
+        ));
+
+        String key = "history.game_records";
+        String encoded = preferences.getString(key);
+        preferences.putString(key, encoded + "\nnot-valid-base64");
+        GameProfileStore restored = new GameProfileStore(preferences);
+
+        assertEquals(2, restored.gameRecords().size());
+        assertEquals(
+                "demo:newer",
+                restored.gameRecords().get(0).sessionId()
+        );
+        assertEquals(1_100, restored.history().highScore());
+    }
+
+    @Test
+    public void validBase64RecordWithChangedPayloadFailsChecksum() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        assertTrue(store.recordSoloGame(
+                "solo:checksum",
+                1_700,
+                1,
+                24,
+                100L
+        ));
+
+        String key = "history.game_records";
+        byte[] bytes = Base64Coder.decode(preferences.getString(key));
+        bytes[bytes.length / 2] ^= 0x01;
+        preferences.putString(
+                key,
+                new String(Base64Coder.encode(bytes))
+        );
+
+        GameProfileStore restored = new GameProfileStore(preferences);
+        assertTrue(restored.gameRecords().isEmpty());
+    }
+
+    @Test
+    public void detailRowsRepairATruncatedIdempotencyLedger() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        String sessionId = "solo:ledger-repair";
+        assertTrue(store.recordSoloGame(sessionId, 2_100, 2));
+        preferences.putString(
+                "history.recorded_session_ids",
+                "18:truncated"
+        );
+
+        GameProfileStore restored = new GameProfileStore(preferences);
+        assertTrue(restored.hasRecordedSession(sessionId));
+        assertFalse(restored.recordSoloGame(sessionId, 9_900, 8));
+        assertEquals(1, restored.history().totalGames());
+        assertEquals(2_100, restored.history().highScore());
+    }
+
+    @Test
+    public void duelLossAndDrawDetailsRoundTrip() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        assertTrue(store.recordVersusGame(
+                "duel:loss",
+                800,
+                1_200,
+                0,
+                1,
+                21,
+                GameProfileStore.BattleResult.LOSS,
+                100L
+        ));
+        assertTrue(store.recordVersusGame(
+                "duel:draw",
+                1_400,
+                1_400,
+                2,
+                2,
+                35,
+                GameProfileStore.BattleResult.DRAW,
+                200L
+        ));
+
+        List<GameProfileStore.GameRecord> records =
+                new GameProfileStore(preferences).gameRecords();
+        assertEquals(2, records.size());
+        assertEquals(
+                GameProfileStore.RecordResult.DRAW,
+                records.get(0).result()
+        );
+        assertEquals(1_400, records.get(0).opponentScore());
+        assertEquals(2, records.get(0).opponentWatermelonsCreated());
+        assertEquals(
+                GameProfileStore.RecordResult.LOSS,
+                records.get(1).result()
+        );
+        assertEquals(1_200, records.get(1).opponentScore());
+    }
+
+    @Test
+    public void legacyAggregatesRemainWithoutInventingOldRows() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        preferences
+                .putInteger("history.total_games", 9)
+                .putInteger("history.high_score", 4_800)
+                .putInteger("history.versus_wins", 2)
+                .putInteger("history.versus_losses", 1)
+                .putInteger("history.versus_draws", 0)
+                .putInteger("history.highest_versus_score", 3_000);
+
+        GameProfileStore restored = new GameProfileStore(preferences);
+        assertEquals(9, restored.history().totalGames());
+        assertEquals(4_800, restored.history().highScore());
+        assertEquals(6, restored.history().soloGames());
+        assertEquals(0, restored.history().aiDemoGames());
+        assertTrue(restored.gameRecords().isEmpty());
+    }
+
+    @Test
     public void sessionIdIsGlobalAcrossSoloAndVersusResults() {
         MemoryPreferences preferences = new MemoryPreferences();
         GameProfileStore store = new GameProfileStore(preferences);
@@ -189,6 +428,7 @@ public final class GameProfileStoreTest {
         GameProfileStore reloaded = new GameProfileStore(preferences);
         assertEquals(0, reloaded.history().totalGames());
         assertEquals(0, reloaded.history().highScore());
+        assertTrue(reloaded.gameRecords().isEmpty());
         assertEquals(0.25f, reloaded.settings().soundVolume(), 0.0001f);
         assertEquals(1.5f, reloaded.settings().gameSpeed(), 0.0001f);
     }

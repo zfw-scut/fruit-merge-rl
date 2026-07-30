@@ -82,6 +82,7 @@ dependencies {
 def generatedFruitAssets = layout.projectDirectory.dir("src/main/assets/fruits")
 def generatedFontAssets = layout.projectDirectory.dir("src/main/assets/fonts")
 def generatedAudioAssets = layout.projectDirectory.dir("src/main/assets/audio")
+def generatedDialogueAssets = layout.projectDirectory.dir("src/main/assets/dialogue")
 def generatedLicenseAssets = layout.projectDirectory.dir("src/main/assets/licenses")
 def generatedModelAssets = layout.projectDirectory.dir("src/main/assets/model")
 def generatedNativeLibs = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
@@ -145,6 +146,67 @@ tasks.register("syncGameAudioAssets", Sync) {
                         "Shared game audio asset has the wrong SHA256: "
                                 + "${filename}: ${actualSha256}"
                 )
+            }
+        }
+    }
+}
+
+def dialogueFiles = [
+        "thinking.txt",
+        "hesitating.txt",
+        "welcome.txt",
+        "ready.txt",
+        "happy.txt",
+        "surprised.txt",
+        "worried.txt"
+]
+
+tasks.register("syncAiDialogueAssets", Sync) {
+    description = "Validates and copies the complete authored AI dialogue catalogs."
+    group = "fruit merge"
+    from(rootProject.layout.projectDirectory.dir("../assets/dialogue")) {
+        include(dialogueFiles)
+    }
+    into(generatedDialogueAssets)
+    doLast {
+        def uniqueAcrossDialogue = new LinkedHashSet<String>()
+        dialogueFiles.each { filename ->
+            def dialogueFile = generatedDialogueAssets.file(filename).asFile
+            if (!dialogueFile.isFile() || dialogueFile.length() <= 0L) {
+                throw new GradleException(
+                        "AI dialogue asset is missing or empty: ${dialogueFile}"
+                )
+            }
+            def lines = dialogueFile.readLines("UTF-8")
+            if (lines.size() < 1000) {
+                throw new GradleException(
+                        "AI dialogue requires at least 1000 complete lines: "
+                                + "${filename}: ${lines.size()}"
+                )
+            }
+            def unique = new LinkedHashSet<String>()
+            lines.eachWithIndex { rawLine, index ->
+                def line = rawLine.trim()
+                def codePoints = line.codePointCount(0, line.length())
+                if (line.isEmpty()
+                        || line != rawLine
+                        || codePoints < 4
+                        || codePoints > 32
+                        || line.contains("\t")) {
+                    throw new GradleException(
+                            "Invalid AI dialogue line ${index + 1} in ${filename}"
+                    )
+                }
+                if (!unique.add(line)) {
+                    throw new GradleException(
+                            "Duplicate AI dialogue line in ${filename}: ${line}"
+                    )
+                }
+                if (!uniqueAcrossDialogue.add(line)) {
+                    throw new GradleException(
+                            "AI dialogue line is duplicated across moods: ${line}"
+                    )
+                }
             }
         }
     }
@@ -255,6 +317,7 @@ tasks.named("preBuild").configure {
             "syncFruitAssets",
             "syncUiFontAssets",
             "syncGameAudioAssets",
+            "syncAiDialogueAssets",
             "syncThirdPartyLicenses",
             "syncMobileModel",
             "extractLibGdxAndroidNatives",
