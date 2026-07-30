@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$BootstrapSdk
+    [switch]$BootstrapSdk,
+    [switch]$RerunTasks
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,7 +19,12 @@ if (-not (Test-Path -LiteralPath $GradleWrapper)) {
 $env:GRADLE_USER_HOME = Join-Path $AndroidRoot ".gradle-user-home"
 Push-Location $AndroidRoot
 try {
-    & $GradleWrapper --no-daemon :app:assembleDebug
+    $GradleArguments = @("--no-daemon", "--offline")
+    if ($RerunTasks) {
+        $GradleArguments += "--rerun-tasks"
+    }
+    $GradleArguments += ":app:assembleDebug"
+    & $GradleWrapper @GradleArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Android build failed with exit code $LASTEXITCODE"
     }

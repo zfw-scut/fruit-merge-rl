@@ -23,9 +23,9 @@ public final class DuelMatch {
 
     private static final float MAX_PHYSICS_DELTA_SECONDS = 0.1f;
 
-    private final Random queueRandom;
-    private final float roundDurationSeconds;
-    private final float nextRoundDelaySeconds;
+    private final StatefulRandom queueRandom;
+    private float roundDurationSeconds;
+    private float nextRoundDelaySeconds;
     private final IntArray queue = new IntArray(FruitRules.QUEUE_LENGTH);
     private final Array<MergeVisualEvent> mergeVisualEvents = new Array<>();
     private final Lane player;
@@ -43,7 +43,7 @@ public final class DuelMatch {
     /** 使用非确定种子的默认对局。 */
     public DuelMatch() {
         this(
-                new Random(),
+                new StatefulRandom(new Random().nextLong()),
                 DEFAULT_ROUND_SECONDS,
                 DEFAULT_NEXT_ROUND_DELAY_SECONDS
         );
@@ -52,7 +52,7 @@ public final class DuelMatch {
     /** 使用固定种子的默认对局，主要用于可复现的本地演示和测试。 */
     public DuelMatch(long seed) {
         this(
-                new Random(seed),
+                new StatefulRandom(seed),
                 DEFAULT_ROUND_SECONDS,
                 DEFAULT_NEXT_ROUND_DELAY_SECONDS
         );
@@ -70,7 +70,7 @@ public final class DuelMatch {
             float roundDurationSeconds,
             float nextRoundDelaySeconds) {
         this(
-                new Random(seed),
+                new StatefulRandom(seed),
                 roundDurationSeconds,
                 nextRoundDelaySeconds
         );
@@ -78,6 +78,20 @@ public final class DuelMatch {
 
     DuelMatch(
             Random queueRandom,
+            float roundDurationSeconds,
+            float nextRoundDelaySeconds) {
+        this(
+                new StatefulRandom(Objects.requireNonNull(
+                        queueRandom,
+                        "queueRandom"
+                ).nextLong()),
+                roundDurationSeconds,
+                nextRoundDelaySeconds
+        );
+    }
+
+    private DuelMatch(
+            StatefulRandom queueRandom,
             float roundDurationSeconds,
             float nextRoundDelaySeconds) {
         this.queueRandom = Objects.requireNonNull(
@@ -170,6 +184,45 @@ public final class DuelMatch {
     }
 
     /**
+     * 在同一个规则边界原子提交玩家与 AI 的当前水果。
+     *
+     * <p>该入口用于 AI 已提前完成决策、但为了表现同步而只移动预览水果等待玩家的
+     * 情况。只有双方都仍可提交时才会修改任一场景；不会出现玩家成功而 AI 因状态
+     * 变化失败的半提交。本方法也只推进一次回合关闭逻辑，因此即使下一轮延迟为零，
+     * 两颗水果仍会使用完全相同的当前等级。</p>
+     */
+    public boolean dropBoth(float playerX, float aiX) {
+        return dropBoth(playerX, aiX, false);
+    }
+
+    /**
+     * 倒计时归零时原子提交双方的预览位置。
+     *
+     * <p>与分别调用两个 timeout 方法相比，这个入口能保证损坏或重复回调不会只给
+     * 一方投下水果。只要任一方已经提交，本方法就保持双方原状态并返回 false。</p>
+     */
+    public boolean timeoutBoth() {
+        return dropBoth(player.previewX, ai.previewX, true);
+    }
+
+    /** 倒计时归零时，以指定位置原子提交双方。 */
+    public boolean timeoutBoth(float playerX, float aiX) {
+        return dropBoth(playerX, aiX, true);
+    }
+
+    private boolean dropBoth(float playerX, float aiX, boolean timeout) {
+        requireUsable();
+        if (!canDrop(player, timeout) || !canDrop(ai, timeout)) {
+            return false;
+        }
+
+        addDrop(player, playerX);
+        addDrop(ai, aiX);
+        closeRoundIfComplete();
+        return true;
+    }
+
+    /**
      * 回合超时后，以玩家当前预览位置自动投放。
      *
      * <p>控制器只提供确定性触发点，不自行决定调用时机；界面层看到
@@ -220,6 +273,79 @@ public final class DuelMatch {
                 new Array<>(mergeVisualEvents);
         mergeVisualEvents.clear();
         return drained;
+    }
+
+    /**
+     * 导出可持久化的完整规则快照。
+     *
+     * <p>快照包含共享随机序列的内部状态，因此恢复后的第五轮及更远期水果也会与
+     * 原对局一致，而不只是复制当前可见的四颗队列。合成爆浆等表现层事件不属于
+     * 规则快照；恢复时会清空，避免把保存前已经播放过的反馈重复播放。</p>
+     */
+    public Snapshot snapshot() {
+        requireUsable();
+        int[] queueLevels = new int[queue.size];
+        for (int index = 0; index < queue.size; index++) {
+            queueLevels[index] = queue.get(index);
+        }
+        return new Snapshot(
+                queueRandom.state(),
+                roundDurationSeconds,
+                nextRoundDelaySeconds,
+                queueLevels,
+                currentLevel,
+                roundIndex,
+                matchGeneration,
+                roundRemainingSeconds,
+                nextRoundRemainingSeconds,
+                roundOpen,
+                outcome,
+                laneSnapshot(player),
+                laneSnapshot(ai)
+        );
+    }
+
+    /**
+     * 从完整规则快照恢复双方场景。
+     *
+     * <p>恢复会使 {@link #matchGeneration()} 至少递增一次，以拒绝保存或切换场景前
+     * 尚未返回的异步 AI 决策。除这个纯粹用于验票的代数外，队列、计时、统计与
+     * Box2D 状态均按快照精确恢复。</p>
+     */
+    public void restore(Snapshot snapshot) {
+        requireUsable();
+        Objects.requireNonNull(snapshot, "snapshot");
+
+        /*
+         * Snapshot 构造器已完成不变量校验，两个物理快照也都是不可变值对象。
+         * 先恢复物理世界，再发布规则字段，调用方不会在方法返回前观察到半恢复。
+         */
+        player.physics.restore(snapshot.player.physics);
+        ai.physics.restore(snapshot.ai.physics);
+
+        queueRandom.restoreState(snapshot.queueRandomState);
+        roundDurationSeconds = snapshot.roundDurationSeconds;
+        nextRoundDelaySeconds = snapshot.nextRoundDelaySeconds;
+        queue.clear();
+        for (int level : snapshot.queueLevels) {
+            queue.add(level);
+        }
+        currentLevel = snapshot.currentLevel;
+        roundIndex = snapshot.roundIndex;
+        matchGeneration = Math.max(
+                matchGeneration,
+                snapshot.matchGeneration
+        );
+        if (matchGeneration < Long.MAX_VALUE) {
+            matchGeneration += 1L;
+        }
+        roundRemainingSeconds = snapshot.roundRemainingSeconds;
+        nextRoundRemainingSeconds = snapshot.nextRoundRemainingSeconds;
+        roundOpen = snapshot.roundOpen;
+        outcome = snapshot.outcome;
+        restoreLane(player, snapshot.player);
+        restoreLane(ai, snapshot.ai);
+        mergeVisualEvents.clear();
     }
 
     /**
@@ -338,20 +464,28 @@ public final class DuelMatch {
 
     private boolean drop(Lane lane, float x, boolean timeout) {
         requireUsable();
+        if (!canDrop(lane, timeout)) {
+            return false;
+        }
+
+        addDrop(lane, x);
+        closeRoundIfComplete();
+        return true;
+    }
+
+    private boolean canDrop(Lane lane, boolean timeout) {
         if (outcome != Outcome.IN_PROGRESS
                 || !roundOpen
                 || !lane.alive
                 || lane.submittedThisRound) {
             return false;
         }
-        if (timeout) {
-            if (roundRemainingSeconds > 0f) {
-                return false;
-            }
-        } else if (roundRemainingSeconds <= 0f) {
-            return false;
-        }
+        return timeout
+                ? roundRemainingSeconds <= 0f
+                : roundRemainingSeconds > 0f;
+    }
 
+    private void addDrop(Lane lane, float x) {
         lane.previewX = FruitRules.clampDropX(x, currentLevel);
         lane.physics.addDroppedFruit(
                 currentLevel,
@@ -360,7 +494,9 @@ public final class DuelMatch {
         );
         lane.stepCount += 1;
         lane.submittedThisRound = true;
+    }
 
+    private void closeRoundIfComplete() {
         if (player.submittedThisRound && ai.submittedThisRound) {
             roundOpen = false;
             nextRoundRemainingSeconds = nextRoundDelaySeconds;
@@ -368,7 +504,6 @@ public final class DuelMatch {
                 advanceRound();
             }
         }
-        return true;
     }
 
     private boolean setPreviewX(Lane lane, float x) {
@@ -409,6 +544,31 @@ public final class DuelMatch {
                                     - FruitRules.SPAWN_MIN_LEVEL + 1)
             );
         }
+    }
+
+    private LaneSnapshot laneSnapshot(Lane lane) {
+        return new LaneSnapshot(
+                lane.score,
+                lane.lastScore,
+                lane.stepCount,
+                lane.watermelonCount,
+                lane.dangerSeconds,
+                lane.previewX,
+                lane.alive,
+                lane.submittedThisRound,
+                lane.physics.snapshot()
+        );
+    }
+
+    private void restoreLane(Lane lane, LaneSnapshot snapshot) {
+        lane.score = snapshot.score;
+        lane.lastScore = snapshot.lastScore;
+        lane.stepCount = snapshot.stepCount;
+        lane.watermelonCount = snapshot.watermelonCount;
+        lane.dangerSeconds = snapshot.dangerSeconds;
+        lane.previewX = snapshot.previewX;
+        lane.alive = snapshot.alive;
+        lane.submittedThisRound = snapshot.submittedThisRound;
     }
 
     private void consumeMergeEvents(Lane lane) {
@@ -501,6 +661,14 @@ public final class DuelMatch {
         }
     }
 
+    private static void requireNonNegative(int value, String name) {
+        if (value < 0) {
+            throw new IllegalArgumentException(
+                    name + " must be >= 0"
+            );
+        }
+    }
+
     public enum Side {
         PLAYER,
         AI
@@ -511,6 +679,252 @@ public final class DuelMatch {
         PLAYER_WIN,
         AI_WIN,
         DRAW
+    }
+
+    /**
+     * 可序列化为 JSON/Preferences 的对战规则快照。
+     *
+     * <p>所有数组都会防御性复制。构造器公开是为了让移动端持久化层可以从磁盘字段
+     * 重建值对象，而不需要访问 DuelMatch 的私有状态。</p>
+     */
+    public static final class Snapshot {
+        private final long queueRandomState;
+        private final float roundDurationSeconds;
+        private final float nextRoundDelaySeconds;
+        private final int[] queueLevels;
+        private final int currentLevel;
+        private final int roundIndex;
+        private final long matchGeneration;
+        private final float roundRemainingSeconds;
+        private final float nextRoundRemainingSeconds;
+        private final boolean roundOpen;
+        private final Outcome outcome;
+        private final LaneSnapshot player;
+        private final LaneSnapshot ai;
+
+        public Snapshot(
+                long queueRandomState,
+                float roundDurationSeconds,
+                float nextRoundDelaySeconds,
+                int[] queueLevels,
+                int currentLevel,
+                int roundIndex,
+                long matchGeneration,
+                float roundRemainingSeconds,
+                float nextRoundRemainingSeconds,
+                boolean roundOpen,
+                Outcome outcome,
+                LaneSnapshot player,
+                LaneSnapshot ai) {
+            requireFinitePositive(
+                    roundDurationSeconds,
+                    "roundDurationSeconds"
+            );
+            requireFiniteNonNegative(
+                    nextRoundDelaySeconds,
+                    "nextRoundDelaySeconds"
+            );
+            requireNonNegative(roundIndex, "roundIndex");
+            if (matchGeneration < 0L) {
+                throw new IllegalArgumentException(
+                        "matchGeneration must be >= 0"
+                );
+            }
+            if ((queueRandomState & ~StatefulRandom.MASK) != 0L) {
+                throw new IllegalArgumentException(
+                        "queueRandomState must fit in 48 bits"
+                );
+            }
+            requireFiniteNonNegative(
+                    roundRemainingSeconds,
+                    "roundRemainingSeconds"
+            );
+            requireFiniteNonNegative(
+                    nextRoundRemainingSeconds,
+                    "nextRoundRemainingSeconds"
+            );
+            this.outcome = Objects.requireNonNull(outcome, "outcome");
+            this.player = Objects.requireNonNull(player, "player");
+            this.ai = Objects.requireNonNull(ai, "ai");
+            Objects.requireNonNull(queueLevels, "queueLevels");
+            if (queueLevels.length != FruitRules.QUEUE_LENGTH) {
+                throw new IllegalArgumentException(
+                        "queueLevels must contain exactly "
+                                + FruitRules.QUEUE_LENGTH + " levels"
+                );
+            }
+            for (int level : queueLevels) {
+                if (level < FruitRules.SPAWN_MIN_LEVEL
+                        || level > FruitRules.SPAWN_MAX_LEVEL) {
+                    throw new IllegalArgumentException(
+                            "queue level is outside spawn range: " + level
+                    );
+                }
+            }
+            if (currentLevel != queueLevels[0]) {
+                throw new IllegalArgumentException(
+                        "currentLevel must equal the queue head"
+                );
+            }
+            if (outcome != Outcome.IN_PROGRESS && roundOpen) {
+                throw new IllegalArgumentException(
+                        "a finished match cannot have an open round"
+                );
+            }
+            if (roundOpen && nextRoundRemainingSeconds > 0f) {
+                throw new IllegalArgumentException(
+                        "an open round cannot have a next-round delay"
+                );
+            }
+
+            this.queueRandomState = queueRandomState;
+            this.roundDurationSeconds = roundDurationSeconds;
+            this.nextRoundDelaySeconds = nextRoundDelaySeconds;
+            this.queueLevels = queueLevels.clone();
+            this.currentLevel = currentLevel;
+            this.roundIndex = roundIndex;
+            this.matchGeneration = matchGeneration;
+            this.roundRemainingSeconds = roundRemainingSeconds;
+            this.nextRoundRemainingSeconds = nextRoundRemainingSeconds;
+            this.roundOpen = roundOpen;
+        }
+
+        public long queueRandomState() {
+            return queueRandomState;
+        }
+
+        public float roundDurationSeconds() {
+            return roundDurationSeconds;
+        }
+
+        public float nextRoundDelaySeconds() {
+            return nextRoundDelaySeconds;
+        }
+
+        public int[] queueLevels() {
+            return queueLevels.clone();
+        }
+
+        public int currentLevel() {
+            return currentLevel;
+        }
+
+        public int roundIndex() {
+            return roundIndex;
+        }
+
+        public long matchGeneration() {
+            return matchGeneration;
+        }
+
+        public float roundRemainingSeconds() {
+            return roundRemainingSeconds;
+        }
+
+        public float nextRoundRemainingSeconds() {
+            return nextRoundRemainingSeconds;
+        }
+
+        public boolean roundOpen() {
+            return roundOpen;
+        }
+
+        public Outcome outcome() {
+            return outcome;
+        }
+
+        public LaneSnapshot player() {
+            return player;
+        }
+
+        public LaneSnapshot ai() {
+            return ai;
+        }
+    }
+
+    /** 单方对战状态的不可变快照。 */
+    public static final class LaneSnapshot {
+        private final int score;
+        private final int lastScore;
+        private final int stepCount;
+        private final int watermelonCount;
+        private final float dangerSeconds;
+        private final float previewX;
+        private final boolean alive;
+        private final boolean submittedThisRound;
+        private final FruitPhysicsWorld.Snapshot physics;
+
+        public LaneSnapshot(
+                int score,
+                int lastScore,
+                int stepCount,
+                int watermelonCount,
+                float dangerSeconds,
+                float previewX,
+                boolean alive,
+                boolean submittedThisRound,
+                FruitPhysicsWorld.Snapshot physics) {
+            requireNonNegative(score, "score");
+            requireNonNegative(lastScore, "lastScore");
+            requireNonNegative(stepCount, "stepCount");
+            requireNonNegative(watermelonCount, "watermelonCount");
+            requireFiniteNonNegative(dangerSeconds, "dangerSeconds");
+            if (!Float.isFinite(previewX)) {
+                throw new IllegalArgumentException(
+                        "previewX must be finite"
+                );
+            }
+            if (lastScore > score) {
+                throw new IllegalArgumentException(
+                        "lastScore cannot exceed score"
+                );
+            }
+            this.score = score;
+            this.lastScore = lastScore;
+            this.stepCount = stepCount;
+            this.watermelonCount = watermelonCount;
+            this.dangerSeconds = dangerSeconds;
+            this.previewX = previewX;
+            this.alive = alive;
+            this.submittedThisRound = submittedThisRound;
+            this.physics = Objects.requireNonNull(physics, "physics");
+        }
+
+        public int score() {
+            return score;
+        }
+
+        public int lastScore() {
+            return lastScore;
+        }
+
+        public int stepCount() {
+            return stepCount;
+        }
+
+        public int watermelonCount() {
+            return watermelonCount;
+        }
+
+        public float dangerSeconds() {
+            return dangerSeconds;
+        }
+
+        public float previewX() {
+            return previewX;
+        }
+
+        public boolean alive() {
+            return alive;
+        }
+
+        public boolean submittedThisRound() {
+            return submittedThisRound;
+        }
+
+        public FruitPhysicsWorld.Snapshot physics() {
+            return physics;
+        }
     }
 
     /** 单方场景的只读局内状态与物理入口。 */
@@ -641,6 +1055,57 @@ public final class DuelMatch {
 
         public int scoreDelta() {
             return scoreDelta;
+        }
+    }
+
+    /**
+     * 与 {@link java.util.Random} 相同的 48 位 LCG，但显式暴露内部状态给规则快照。
+     *
+     * <p>这样固定 seed 的既有水果序列保持不变，同时不依赖反射访问 JDK 私有字段。</p>
+     */
+    private static final class StatefulRandom {
+        private static final long MULTIPLIER = 0x5DEECE66DL;
+        private static final long ADDEND = 0xBL;
+        private static final long MASK = (1L << 48) - 1L;
+
+        private long state;
+
+        private StatefulRandom(long seed) {
+            state = (seed ^ MULTIPLIER) & MASK;
+        }
+
+        private long state() {
+            return state;
+        }
+
+        private void restoreState(long state) {
+            if ((state & ~MASK) != 0L) {
+                throw new IllegalArgumentException(
+                        "queue random state must fit in 48 bits"
+                );
+            }
+            this.state = state;
+        }
+
+        private int next(int bits) {
+            state = (state * MULTIPLIER + ADDEND) & MASK;
+            return (int) (state >>> (48 - bits));
+        }
+
+        private int nextInt(int bound) {
+            if (bound <= 0) {
+                throw new IllegalArgumentException("bound must be positive");
+            }
+            if ((bound & -bound) == bound) {
+                return (int) ((bound * (long) next(31)) >> 31);
+            }
+            int bits;
+            int value;
+            do {
+                bits = next(31);
+                value = bits % bound;
+            } while (bits - value + (bound - 1) < 0);
+            return value;
         }
     }
 }

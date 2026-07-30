@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 public final class GameProfileStoreTest {
@@ -74,6 +75,107 @@ public final class GameProfileStoreTest {
         assertEquals(1, history.versusLosses());
         assertEquals(1, history.versusDraws());
         assertEquals(2_300, history.highestVersusScore());
+    }
+
+    @Test
+    public void sessionAwareSoloResultIsIdempotentAcrossReload() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        String sessionId = "solo:2026-07-30:alpha";
+
+        assertTrue(store.recordSoloGame(sessionId, 1_250, 2));
+        assertFalse(store.recordSoloGame(sessionId, 9_999, 8));
+        assertEquals(1, preferences.flushCount);
+
+        GameProfileStore restored = new GameProfileStore(preferences);
+        assertTrue(restored.hasRecordedSession(sessionId));
+        assertFalse(restored.recordSoloGame(sessionId, 7_500, 6));
+        assertEquals(1, preferences.flushCount);
+
+        GameProfileStore.History history = restored.history();
+        assertEquals(1, history.totalGames());
+        assertEquals(1_250, history.highScore());
+        assertEquals(2, history.maxWatermelonsInGame());
+        assertEquals(2, history.totalWatermelons());
+    }
+
+    @Test
+    public void sessionIdIsGlobalAcrossSoloAndVersusResults() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        String firstSession = "duel:shared-session";
+
+        assertTrue(
+                store.recordVersusGame(
+                        firstSession,
+                        2_400,
+                        1,
+                        GameProfileStore.BattleResult.WIN));
+
+        GameProfileStore restored = new GameProfileStore(preferences);
+        assertFalse(
+                restored.recordVersusGame(
+                        firstSession,
+                        100,
+                        0,
+                        GameProfileStore.BattleResult.LOSS));
+        assertFalse(restored.recordSoloGame(firstSession, 8_000, 9));
+        assertTrue(
+                restored.recordVersusGame(
+                        "duel:second-session",
+                        1_500,
+                        2,
+                        GameProfileStore.BattleResult.DRAW));
+
+        GameProfileStore.History history =
+                new GameProfileStore(preferences).history();
+        assertEquals(2, history.totalGames());
+        assertEquals(1, history.versusWins());
+        assertEquals(0, history.versusLosses());
+        assertEquals(1, history.versusDraws());
+        assertEquals(2_400, history.highestVersusScore());
+        assertEquals(3, history.totalWatermelons());
+    }
+
+    @Test
+    public void resettingHistoryAlsoClearsIdempotencyLedger() {
+        MemoryPreferences preferences = new MemoryPreferences();
+        GameProfileStore store = new GameProfileStore(preferences);
+        String sessionId = "solo:resettable";
+
+        assertTrue(store.recordSoloGame(sessionId, 4_000, 3));
+        store.resetHistory();
+        assertFalse(store.hasRecordedSession(sessionId));
+        assertTrue(store.recordSoloGame(sessionId, 900, 1));
+
+        GameProfileStore.History history =
+                new GameProfileStore(preferences).history();
+        assertEquals(1, history.totalGames());
+        assertEquals(900, history.highScore());
+        assertEquals(1, history.totalWatermelons());
+    }
+
+    @Test
+    public void invalidSessionIdsCannotMutateHistory() {
+        GameProfileStore store = new GameProfileStore(new MemoryPreferences());
+
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> store.recordSoloGame(null, 1_000, 1));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> store.recordSoloGame("   ", 1_000, 1));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> store.recordSoloGame("bad\nsession", 1_000, 1));
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> store.recordVersusGame(
+                        "x".repeat(257),
+                        1_000,
+                        1,
+                        GameProfileStore.BattleResult.WIN));
+        assertEquals(0, store.history().totalGames());
     }
 
     @Test

@@ -3,7 +3,9 @@ package com.fruitmerge.ai.game;
 import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Preferences;
 
+import java.util.LinkedHashSet;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Persistent user settings and aggregate game history.
@@ -31,7 +33,8 @@ public final class GameProfileStore {
     public static final float MAX_RESULT_HOLD_SECONDS = 12f;
     public static final float DEFAULT_RESULT_HOLD_SECONDS = 4f;
 
-    private static final int SCHEMA_VERSION = 1;
+    private static final int SCHEMA_VERSION = 2;
+    private static final int MAX_SESSION_ID_LENGTH = 256;
 
     private static final String KEY_SCHEMA_VERSION = "schema_version";
     private static final String KEY_SOUND_VOLUME = "settings.sound_volume";
@@ -51,6 +54,8 @@ public final class GameProfileStore {
     private static final String KEY_VERSUS_LOSSES = "history.versus_losses";
     private static final String KEY_VERSUS_DRAWS = "history.versus_draws";
     private static final String KEY_HIGHEST_VERSUS_SCORE = "history.highest_versus_score";
+    private static final String KEY_RECORDED_SESSION_IDS =
+            "history.recorded_session_ids";
 
     private final Preferences preferences;
 
@@ -70,6 +75,7 @@ public final class GameProfileStore {
     private int versusLosses;
     private int versusDraws;
     private int highestVersusScore;
+    private final Set<String> recordedSessionIds = new LinkedHashSet<>();
 
     /**
      * Opens the platform preference file. Call this only after libGDX has created the app.
@@ -128,6 +134,10 @@ public final class GameProfileStore {
         versusDraws = nonNegative(preferences.getInteger(KEY_VERSUS_DRAWS, 0));
         highestVersusScore =
                 nonNegative(preferences.getInteger(KEY_HIGHEST_VERSUS_SCORE, 0));
+        recordedSessionIds.clear();
+        recordedSessionIds.addAll(
+                decodeSessionIds(
+                        preferences.getString(KEY_RECORDED_SESSION_IDS, "")));
         repairHistoryInvariants();
     }
 
@@ -219,7 +229,10 @@ public final class GameProfileStore {
                 .putInteger(KEY_VERSUS_WINS, versusWins)
                 .putInteger(KEY_VERSUS_LOSSES, versusLosses)
                 .putInteger(KEY_VERSUS_DRAWS, versusDraws)
-                .putInteger(KEY_HIGHEST_VERSUS_SCORE, highestVersusScore);
+                .putInteger(KEY_HIGHEST_VERSUS_SCORE, highestVersusScore)
+                .putString(
+                        KEY_RECORDED_SESSION_IDS,
+                        encodeSessionIds(recordedSessionIds));
         preferences.flush();
     }
 
@@ -249,6 +262,8 @@ public final class GameProfileStore {
         versusLosses = 0;
         versusDraws = 0;
         highestVersusScore = 0;
+        // 用户主动清空历史后，旧会话也不应继续占据“已结算”名单。
+        recordedSessionIds.clear();
         save();
     }
 
@@ -257,13 +272,83 @@ public final class GameProfileStore {
         save();
     }
 
+    /**
+     * 幂等记录一局单人游戏。
+     *
+     * <p>自动存档可能在“历史已经写入、草稿尚未来得及删除”之间被系统终止。恢复
+     * 后结算流程会再次到达这里，因此 sessionId 与历史聚合必须在同一次 Preferences
+     * flush 中落盘。返回 {@code true} 表示本次首次计入，{@code false} 表示该会话
+     * 已结算，调用方可以安全地继续删除残留草稿而不重复累计。</p>
+     */
+    public synchronized boolean recordSoloGame(
+            String sessionId,
+            int score,
+            int watermelonsCreated) {
+        String safeSessionId = requireSessionId(sessionId);
+        if (recordedSessionIds.contains(safeSessionId)) {
+            return false;
+        }
+
+        recordCommonResult(score, watermelonsCreated);
+        recordedSessionIds.add(safeSessionId);
+        save();
+        return true;
+    }
+
     public synchronized void recordVersusGame(
             int playerScore,
             int watermelonsCreated,
             BattleResult result) {
-        recordCommonResult(playerScore, watermelonsCreated);
         BattleResult safeResult = Objects.requireNonNull(result, "result");
-        switch (safeResult) {
+        recordVersusResult(playerScore, watermelonsCreated, safeResult);
+        save();
+    }
+
+    /**
+     * 幂等记录一局 AI 对战；同一个 sessionId 在单人和对战入口之间也只允许写一次。
+     */
+    public synchronized boolean recordVersusGame(
+            String sessionId,
+            int playerScore,
+            int watermelonsCreated,
+            BattleResult result) {
+        String safeSessionId = requireSessionId(sessionId);
+        BattleResult safeResult = Objects.requireNonNull(result, "result");
+        if (recordedSessionIds.contains(safeSessionId)) {
+            return false;
+        }
+
+        recordVersusResult(playerScore, watermelonsCreated, safeResult);
+        recordedSessionIds.add(safeSessionId);
+        save();
+        return true;
+    }
+
+    public synchronized boolean recordVersusGame(
+            String sessionId,
+            int playerScore,
+            int watermelonsCreated,
+            boolean playerWon) {
+        return recordVersusGame(
+                sessionId,
+                playerScore,
+                watermelonsCreated,
+                playerWon ? BattleResult.WIN : BattleResult.LOSS);
+    }
+
+    /**
+     * 查询某局是否已经进入聚合历史，不修改 Preferences。
+     */
+    public synchronized boolean hasRecordedSession(String sessionId) {
+        return recordedSessionIds.contains(requireSessionId(sessionId));
+    }
+
+    private void recordVersusResult(
+            int playerScore,
+            int watermelonsCreated,
+            BattleResult result) {
+        recordCommonResult(playerScore, watermelonsCreated);
+        switch (result) {
             case WIN:
                 versusWins = saturatedIncrement(versusWins);
                 break;
@@ -276,7 +361,6 @@ public final class GameProfileStore {
         }
         highestVersusScore = Math.max(highestVersusScore, nonNegative(playerScore));
         repairHistoryInvariants();
-        save();
     }
 
     public synchronized void recordVersusGame(
@@ -313,6 +397,78 @@ public final class GameProfileStore {
         totalGames = Math.max(totalGames, versusGames);
         totalWatermelons = Math.max(totalWatermelons, maxWatermelonsInGame);
         highScore = Math.max(highScore, highestVersusScore);
+    }
+
+    private static String requireSessionId(String sessionId) {
+        if (sessionId == null) {
+            throw new IllegalArgumentException("session id must not be null");
+        }
+        String normalized = sessionId.trim();
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException("session id must not be blank");
+        }
+        if (normalized.length() > MAX_SESSION_ID_LENGTH) {
+            throw new IllegalArgumentException("session id is too long");
+        }
+        for (int index = 0; index < normalized.length(); index++) {
+            if (Character.isISOControl(normalized.charAt(index))) {
+                throw new IllegalArgumentException(
+                        "session id must not contain control characters");
+            }
+        }
+        return normalized;
+    }
+
+    /**
+     * 采用长度前缀而不是换行或逗号分隔，sessionId 即便包含分隔符也能无歧义恢复。
+     * 格式为重复的 {@code 字符数:原文}；遇到损坏尾部时保留此前完整条目并停止解析。
+     */
+    private static String encodeSessionIds(Set<String> sessionIds) {
+        StringBuilder encoded = new StringBuilder();
+        for (String sessionId : sessionIds) {
+            encoded.append(sessionId.length())
+                    .append(':')
+                    .append(sessionId);
+        }
+        return encoded.toString();
+    }
+
+    private static Set<String> decodeSessionIds(String encoded) {
+        Set<String> decoded = new LinkedHashSet<>();
+        if (encoded == null || encoded.isEmpty()) {
+            return decoded;
+        }
+
+        int cursor = 0;
+        while (cursor < encoded.length()) {
+            int colon = encoded.indexOf(':', cursor);
+            if (colon <= cursor) {
+                break;
+            }
+            int length;
+            try {
+                length = Integer.parseInt(encoded.substring(cursor, colon));
+            } catch (NumberFormatException ignored) {
+                break;
+            }
+            if (length <= 0 || length > MAX_SESSION_ID_LENGTH) {
+                break;
+            }
+            int valueStart = colon + 1;
+            int valueEnd = valueStart + length;
+            if (valueEnd < valueStart || valueEnd > encoded.length()) {
+                break;
+            }
+            String sessionId = encoded.substring(valueStart, valueEnd);
+            try {
+                decoded.add(requireSessionId(sessionId));
+            } catch (IllegalArgumentException ignored) {
+                // 单条非法即视为存档尾部损坏，避免后续字符被错位解释为新长度。
+                break;
+            }
+            cursor = valueEnd;
+        }
+        return decoded;
     }
 
     private static int calculateResultPercentile(int score) {

@@ -1,8 +1,19 @@
 param(
     [switch]$Capture,
     [switch]$Showcase,
-    [ValidateSet("default", "settings", "history", "duel")]
-    [string]$Screen = "default",
+    [ValidateSet(
+        "default",
+        "home",
+        "solo",
+        "duel",
+        "demo",
+        "settings",
+        "history",
+        "exit",
+        "new",
+        "result"
+    )]
+    [string]$Screen = "home",
     [ValidateRange(280, 4096)]
     [int]$Width = 560,
     [ValidateRange(560, 8192)]
@@ -16,12 +27,13 @@ $ErrorActionPreference = "Stop"
 $androidRoot = Split-Path -Parent $PSScriptRoot
 $projectRoot = Split-Path -Parent $androidRoot
 $gradlew = Join-Path $androidRoot "gradlew.bat"
+$env:GRADLE_USER_HOME = Join-Path $androidRoot ".gradle-user-home"
 
 Push-Location $androidRoot
 try {
     if ($Capture) {
         if ([string]::IsNullOrWhiteSpace($Output)) {
-            $filename = if ($Screen -eq "default") {
+            $filename = if ($Screen -eq "default" -or $Screen -eq "home") {
                 "current.png"
             } else {
                 "$Screen.png"
@@ -33,6 +45,7 @@ try {
         $absoluteOutput = [System.IO.Path]::GetFullPath($Output)
         $arguments = @(
             "--no-daemon",
+            "--offline",
             ":desktop:capturePreview",
             "-PpreviewWidth=$Width",
             "-PpreviewHeight=$Height",
@@ -47,6 +60,7 @@ try {
     } else {
         $arguments = @(
             "--no-daemon",
+            "--offline",
             ":desktop:run",
             "-PpreviewWidth=$Width",
             "-PpreviewHeight=$Height",
