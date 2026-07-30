@@ -24,6 +24,8 @@ tasks.withType(JavaExec).configureEach {
     workingDir = rootProject.file("../assets")
     jvmArgs "-DfruitMerge.previewWidth=${providers.gradleProperty("previewWidth").orElse("560").get()}"
     jvmArgs "-DfruitMerge.previewHeight=${providers.gradleProperty("previewHeight").orElse("1120").get()}"
+    jvmArgs "-DfruitMerge.previewShowcase=${providers.gradleProperty("previewShowcase").orElse("false").get()}"
+    jvmArgs "-DfruitMerge.previewCaptureFrames=${providers.gradleProperty("previewCaptureFrames").orElse("12").get()}"
 }
 
 tasks.register("capturePreview", JavaExec) {

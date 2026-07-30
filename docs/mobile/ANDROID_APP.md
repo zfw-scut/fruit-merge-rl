@@ -16,12 +16,21 @@
 
 ## 游戏行为
 
-- 默认开启 AI 陪玩；点击右上角 `AI ON / AI OFF` 可随时切换。
+- 默认开启 AI 陪玩；点击右上角中文 AI 状态开关可随时切换。
 - 手动模式下拖动顶部水果，抬手投放。
 - AI 只在水果堆连续稳定 `0.2s` 后读取一次局面，不会在上一颗水果仍运动时抢投。
 - 模型输出仍是 21 个离散动作。界面上的短暂停顿、备选位置试探、回拉和轻微颤动
   只负责模拟人的手势；最终投放会严格回到模型选中的规范动作坐标。
-- 合成、投放、危险线和游戏结束有轻量动效与触觉反馈。
+- 拟人轨迹使用围绕固定锚点的低频相关偏移，不再逐帧累加漂移，也不再每隔几十
+  毫秒硬切一次抖动值；视觉试探不会改变模型的规范投放列。
+- 每次合成会在结果位置按水果等级显示不同颜色的爆浆、冲击环、立体 `+分值`，
+  并播放两层短促合成音效。一次投放触发的多个事件会按约 `0.105s` 错峰弹出。
+- 连锁层级由“源水果 ID -> 结果水果 ID”真实追踪：只有前一次结果继续参与下一次
+  合成才算连锁，同次投放中互不相关的合成不会虚增连锁强度。
+- 当 Box2D 确认本次连锁稳定后，同组分值会一起加速吸入左上角“分数”卡；卡片
+  发光、播放奖励音并将显示分数快速滚动到已经即时结算的真实分数。动画只属于
+  表现层，不延迟规则计分、模型快照或奖励逻辑。
+- 投放、危险线和游戏结束继续提供轻量动效与触觉反馈。
 
 ## 界面主题与修改入口
 
@@ -39,18 +48,24 @@ XML。这样计分、AI 状态、触摸命中区和 `FitViewport` 始终使用�
 - 文件顶部的 `Color` 常量负责主题调色板；
 - `drawBackground()` 负责渐变和果园装饰；
 - `drawPanels()` 负责计分卡、下一颗提示、AI 状态板、棋盘底色和提示线；
-- `drawText()`、`drawOutlines()`、`drawGameOverOverlay()` 负责文字、描边和结束弹层。
+- `drawEffects()`、`drawScoreTokens()` 负责爆浆、连锁分值与吸附表现；
+- `drawText()`、`drawGameOverOverlay()` 负责中文文字和结束弹层。
 
 水果表现与主题明确隔离：`loadFruitTextures()`、`drawFruitBodies()`、
 `drawPreviewAndQueue()`、`drawFruit()` 继续使用项目原有 `assets/fruits/01.png`
 至 `11.png`。场内和待投水果的尺寸、位置、透明度、Box2D 物理和模型输入均未
 改变；顶部三颗队列预览只重新排入新的提示槽，贴图、尺寸和透明度保持不变。
 
-文字不再使用 libGDX 内置的 15px 字体。Android 与 Windows 预览共同加载
-`assets/fonts/ui-nunito.fnt` 和 `ui-nunito.png`：它们由 OFL 1.1 授权的 Nunito
-源字体生成 64px 高分辨率图集，再在运行时向下采样。所有卡片文字通过
-`GlyphLayout` 按实际字形宽高居中或截断，避免不同字体度量与硬编码 baseline
-重新产生穿线、重叠和模糊。
+文字不再使用英文 Nunito 或 libGDX 内置的 15px 字体。Android 与 Windows 预览
+共同加载 `assets/fonts/ui-cute.fnt` 和 `ui-cute.png`：它们由 OFL 1.1 授权的
+站酷快乐体生成 64px 中文 UI 字表图集，再在运行时向下采样。标题、计分卡、
+下一颗、AI 状态、操作提示与结束弹层均改为中文；浮动分值也使用同一 Q 版数字，
+以一层紧凑暗色阴影和亮色正文绘成立体字。四个运行字号共享同一张 1024² 图集纹理。
+
+所有卡片文字继续通过 `GlyphLayout` 按实际字形宽高居中或截断，避免不同字体度量
+与硬编码 baseline 重新产生穿线、重叠和模糊。字体 OFL 和 Kenney Impact Sounds
+的 CC0 原始许可证会随 APK 一同放入 `assets/licenses/`；音效来源记录位于
+`assets/audio/README.md`。
 
 ## Windows 本地 UI 预览
 
@@ -81,6 +96,23 @@ powershell -ExecutionPolicy Bypass -File `
   -Width 1156 -Height 2990 `
   -Output runs\mobile_ui_preview\phone-1156x2990.png
 ```
+
+截图模式使用目标宽高的离屏 FrameBuffer，不受 Windows 桌面工作区对隐藏窗口尺寸
+的限制；保存前会核对 FBO 与像素数，保存后还会读取 PNG IHDR 复核实际宽高。
+
+检查真实共享渲染器中的爆浆、连锁浮分与吸附阶段：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  android\scripts\run-ui-preview.ps1 -Capture -Showcase `
+  -CaptureFrames 18 `
+  -Output runs\mobile_ui_preview\merge-burst.png
+```
+
+`-CaptureFrames` 可设为 `1..600`；在 60 FPS 左右时，约 18 帧可见错峰爆浆，
+约 48 帧可见三组分值共同加速飞向计分卡。游戏按真实帧间隔推进，因此这些帧数
+只是便捷观察点，不是严格的时间测试门禁。`-Showcase` 只向桌面预览排入视觉事件，
+不创建 Box2D 水果，Android 正常入口不会调用它。
 
 桌面入口能提前发现字体、卡片、水果预览和绘制顺序问题，但不能代替 Android
 状态栏、刘海、安全区、触觉和真机持续帧率测试。

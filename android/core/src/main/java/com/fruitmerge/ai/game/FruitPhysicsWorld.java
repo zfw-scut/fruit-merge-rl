@@ -278,6 +278,8 @@ public final class FruitPhysicsWorld implements ContactListener {
             );
             mergeEvents.add(new MergeEvent(
                     result.id,
+                    first.id,
+                    second.id,
                     resultingLevel,
                     result.x(),
                     result.y(),
@@ -358,6 +360,8 @@ public final class FruitPhysicsWorld implements ContactListener {
 
     public static final class MergeEvent {
         public final int fruitId;
+        public final int sourceFruitIdA;
+        public final int sourceFruitIdB;
         public final int level;
         public final float x;
         public final float y;
@@ -365,11 +369,15 @@ public final class FruitPhysicsWorld implements ContactListener {
 
         private MergeEvent(
                 int fruitId,
+                int sourceFruitIdA,
+                int sourceFruitIdB,
                 int level,
                 float x,
                 float y,
                 int scoreDelta) {
             this.fruitId = fruitId;
+            this.sourceFruitIdA = sourceFruitIdA;
+            this.sourceFruitIdB = sourceFruitIdB;
             this.level = level;
             this.x = x;
             this.y = y;

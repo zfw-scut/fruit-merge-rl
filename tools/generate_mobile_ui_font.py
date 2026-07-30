@@ -1,8 +1,10 @@
-"""Generate the shared high-resolution libGDX UI bitmap font.
+"""Generate the shared high-resolution Chinese libGDX UI bitmap font.
 
 The Android and LWJGL3 preview renderers deliberately load the same `.fnt` and
 PNG files.  This keeps font metrics deterministic across both platforms and
 avoids enlarging libGDX's tiny built-in bitmap font on high-density phones.
+Only the glyphs used by the mobile UI are packed, so a playful CJK font does
+not turn into a multi-megabyte runtime atlas.
 """
 
 from __future__ import annotations
@@ -19,9 +21,24 @@ from PIL import Image, ImageDraw, ImageFont
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SOURCE = PROJECT_ROOT / "assets" / "fonts" / "source" / "Nunito[wght].ttf"
+DEFAULT_SOURCE = (
+    PROJECT_ROOT
+    / "assets"
+    / "fonts"
+    / "source"
+    / "ZCOOLKuaiLe-Regular.ttf"
+)
 DEFAULT_OUTPUT = PROJECT_ROOT / "assets" / "fonts"
-DEFAULT_CHARACTERS = "".join(chr(codepoint) for codepoint in range(32, 127))
+ASCII_CHARACTERS = "".join(chr(codepoint) for codepoint in range(32, 127))
+CHINESE_UI_CHARACTERS = (
+    "合成大西瓜分数最高下一颗陪玩开启关闭启动中模型就绪拖动"
+    "水果松手投放点击重新开始等待稳定正在加载观察局面安全策略"
+    "暂不可用考虑位置尝试其他微调决定完成手动思考试探已结束"
+    "危险线游戏本局得分未知节点变化无式，·："
+)
+DEFAULT_CHARACTERS = "".join(
+    dict.fromkeys(ASCII_CHARACTERS + CHINESE_UI_CHARACTERS)
+)
 
 
 @dataclass(frozen=True)
@@ -47,22 +64,40 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--font-size", type=int, default=64)
     parser.add_argument("--weight", type=float, default=750.0)
     parser.add_argument("--atlas-width", type=int, default=1024)
+    parser.add_argument("--output-name", default="ui-cute")
+    parser.add_argument("--face-name", default="ZCOOL KuaiLe UI")
     return parser.parse_args()
 
 
 def load_font(source: Path, font_size: int, weight: float) -> tuple[ImageFont.FreeTypeFont, io.BytesIO]:
-    """Instantiate the requested variable-font weight entirely in memory."""
+    """Load a static font or instantiate a requested variable-font weight."""
 
-    variable = TTFont(source)
-    static = instantiateVariableFont(
-        variable,
-        {"wght": weight},
-        inplace=False,
-    )
+    source_font = TTFont(source)
+    if "fvar" in source_font:
+        rendered_font = instantiateVariableFont(
+            source_font,
+            {"wght": weight},
+            inplace=False,
+        )
+    else:
+        rendered_font = source_font
     buffer = io.BytesIO()
-    static.save(buffer)
+    rendered_font.save(buffer)
     buffer.seek(0)
     return ImageFont.truetype(buffer, font_size), buffer
+
+
+def validate_character_coverage(source: Path, characters: str) -> None:
+    """Fail before atlas generation if a requested UI glyph is absent."""
+
+    cmap = TTFont(source).getBestCmap() or {}
+    missing = [character for character in characters if ord(character) not in cmap]
+    if missing:
+        escaped = " ".join(
+            f"{character!r}(U+{ord(character):04X})"
+            for character in missing
+        )
+        raise ValueError(f"font is missing requested UI glyphs: {escaped}")
 
 
 def next_power_of_two(value: int) -> int:
@@ -159,6 +194,7 @@ def kerning_pairs(
 def write_fnt(
     output: Path,
     page_filename: str,
+    face_name: str,
     glyphs: list[Glyph],
     kernings: list[tuple[int, int, int]],
     font_size: int,
@@ -169,10 +205,10 @@ def write_fnt(
 ) -> None:
     lines = [
         (
-            'info face="Nunito UI" size={size} bold=1 italic=0 charset="" '
+            'info face="{face}" size={size} bold=0 italic=0 charset="" '
             "unicode=1 stretchH=100 smooth=1 aa=1 padding=0,0,0,0 "
             "spacing=1,1"
-        ).format(size=font_size),
+        ).format(face=face_name, size=font_size),
         (
             "common lineHeight={line_height} base={base} "
             "scaleW={width} scaleH={height} pages=1 packed=0"
@@ -215,6 +251,7 @@ def main() -> None:
     if not source.is_file():
         raise FileNotFoundError(f"font source not found: {source}")
     output_dir.mkdir(parents=True, exist_ok=True)
+    validate_character_coverage(source, DEFAULT_CHARACTERS)
 
     font, font_buffer = load_font(source, args.font_size, args.weight)
     # Keep the BytesIO alive while Pillow reads glyph tables lazily.
@@ -227,12 +264,13 @@ def main() -> None:
         ascent,
     )
     atlas = render_atlas(font, glyphs, args.atlas_width, atlas_height)
-    atlas_path = output_dir / "ui-nunito.png"
-    fnt_path = output_dir / "ui-nunito.fnt"
+    atlas_path = output_dir / f"{args.output_name}.png"
+    fnt_path = output_dir / f"{args.output_name}.fnt"
     atlas.save(atlas_path, optimize=True)
     write_fnt(
         fnt_path,
         atlas_path.name,
+        args.face_name,
         glyphs,
         kerning_pairs(font, DEFAULT_CHARACTERS),
         args.font_size,

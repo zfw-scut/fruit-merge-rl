@@ -81,6 +81,8 @@ dependencies {
 
 def generatedFruitAssets = layout.projectDirectory.dir("src/main/assets/fruits")
 def generatedFontAssets = layout.projectDirectory.dir("src/main/assets/fonts")
+def generatedAudioAssets = layout.projectDirectory.dir("src/main/assets/audio")
+def generatedLicenseAssets = layout.projectDirectory.dir("src/main/assets/licenses")
 def generatedModelAssets = layout.projectDirectory.dir("src/main/assets/model")
 def generatedNativeLibs = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
 def generatedPythonSources = layout.projectDirectory.dir("src/main/python_generated")
@@ -97,15 +99,76 @@ tasks.register("syncUiFontAssets", Sync) {
     description = "Copies the validated shared UI bitmap font into Android assets."
     group = "fruit merge"
     from(rootProject.layout.projectDirectory.dir("../assets/fonts")) {
-        include("ui-nunito.fnt", "ui-nunito.png")
+        include("ui-cute.fnt", "ui-cute.png")
     }
     into(generatedFontAssets)
     doLast {
-        ["ui-nunito.fnt", "ui-nunito.png"].each { filename ->
+        ["ui-cute.fnt", "ui-cute.png"].each { filename ->
             def fontFile = generatedFontAssets.file(filename).asFile
             if (!fontFile.isFile() || fontFile.length() <= 0L) {
                 throw new GradleException(
                         "Shared UI font asset is missing or empty: ${fontFile}"
+                )
+            }
+        }
+    }
+}
+
+def reviewedGameAudioSha256 = [
+        "merge-pop.ogg": "f0e982611e97512fee5f777986b67e8b435434b601f94992ec044f7e89fb5acb",
+        "merge-soft.ogg": "7d3ba0bb5e60a11b5d3e558c141303dcf494256675fbf753c0d252d2cf0481e3",
+        "score-collect.ogg": "49fe4fafa2001bd0d312976796824571ca8429851f285997e1327d17bb34fd00"
+]
+
+tasks.register("syncGameAudioAssets", Sync) {
+    description = "Copies the reviewed CC0 game audio into Android assets."
+    group = "fruit merge"
+    from(rootProject.layout.projectDirectory.dir("../assets/audio")) {
+        include("merge-pop.ogg", "merge-soft.ogg", "score-collect.ogg")
+    }
+    into(generatedAudioAssets)
+    doLast {
+        reviewedGameAudioSha256.each { filename, expectedSha256 ->
+            def audioFile = generatedAudioAssets.file(filename).asFile
+            if (!audioFile.isFile() || audioFile.length() <= 0L) {
+                throw new GradleException(
+                        "Shared game audio asset is missing or empty: ${audioFile}"
+                )
+            }
+            def actualSha256 = java.security.MessageDigest
+                    .getInstance("SHA-256")
+                    .digest(audioFile.bytes)
+                    .encodeHex()
+                    .toString()
+            if (actualSha256 != expectedSha256) {
+                throw new GradleException(
+                        "Shared game audio asset has the wrong SHA256: "
+                                + "${filename}: ${actualSha256}"
+                )
+            }
+        }
+    }
+}
+
+tasks.register("syncThirdPartyLicenses", Sync) {
+    description = "Bundles the font and audio redistribution licenses in the APK."
+    group = "fruit merge"
+    from(rootProject.layout.projectDirectory.dir("../assets/fonts/source")) {
+        include("ZCOOLKuaiLe-OFL.txt")
+    }
+    from(rootProject.layout.projectDirectory.dir("../assets/audio")) {
+        include("KENNEY-IMPACT-SOUNDS-CC0.txt")
+    }
+    into(generatedLicenseAssets)
+    doLast {
+        [
+                "ZCOOLKuaiLe-OFL.txt",
+                "KENNEY-IMPACT-SOUNDS-CC0.txt"
+        ].each { filename ->
+            def licenseFile = generatedLicenseAssets.file(filename).asFile
+            if (!licenseFile.isFile() || licenseFile.length() <= 0L) {
+                throw new GradleException(
+                        "Redistribution license is missing or empty: ${licenseFile}"
                 )
             }
         }
@@ -191,6 +254,8 @@ tasks.named("preBuild").configure {
     dependsOn(
             "syncFruitAssets",
             "syncUiFontAssets",
+            "syncGameAudioAssets",
+            "syncThirdPartyLicenses",
             "syncMobileModel",
             "extractLibGdxAndroidNatives",
             "syncMobilePythonSources"

@@ -61,9 +61,10 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/scripts/compare_physics_modes.py` | accurate/fast headless 物理模式对比工具。可显式选择场地几何，用于测试物理参数的速度收益与游戏分布偏移。 | `--checkpoint ...`、几何参数；输出指标和对比图。 |
 | `src/daxigua_mobile/` | Android/Chaquopy 使用的纯 Python 状态桥。把普通局面 JSON 复用为 `StateAnalyzer -> GraphBuilder` 图输入，不依赖 pygame、pymunk 或 torch。 | `build_mobile_graph()`、`build_mobile_graph_json()`；固定 21 动作、62/47 特征 ABI。 |
 | `src/daxigua_rl/models/mobile_export.py` | 把结构感知 GNN-Q 包装为五个普通张量输入，供动态 N/E 的 ONNX 导出。 | `MobileGNNQNetwork`、`export_mobile_onnx()`。 |
-| `android/` | Android AI 陪玩版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理；外围 UI 使用暖色果园主题，原有水果贴图和绘制链保持独立。 | `scripts/build-debug-apk.ps1`；主题入口为 `core/.../FruitMergeApplication.java`，最低 API 24，当前仅 arm64-v8a。 |
-| `android/desktop/` | Windows 本地 UI 预览模块。通过 LWJGL3 直接复用 Android 的 `FruitMergeApplication`、Box2D、共享字体和 canonical 水果素材，可交互运行或自动保存 framebuffer PNG；不加载 ONNX。 | `scripts/run-ui-preview.ps1`；支持自定义宽高模拟手机截图比例，输出默认位于 `runs/mobile_ui_preview/`。 |
-| `assets/fonts/` | Android 与 Windows 预览共用的高分辨率 Nunito BitmapFont、上游可变字体和 OFL 1.1 许可证。 | `ui-nunito.fnt/png` 为 APK 实际资源；由 `tools/generate_mobile_ui_font.py` 重新生成。 |
+| `android/` | Android AI 陪玩版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理；外围 UI 使用暖色果园主题，并实现错峰爆浆、连锁浮分、分值吸附和滚分表现，原有水果贴图与物理保持独立。 | `scripts/build-debug-apk.ps1`；主题与合成表现入口为 `core/.../FruitMergeApplication.java`，最低 API 24，当前仅 arm64-v8a。 |
+| `android/desktop/` | Windows 本地 UI 预览模块。通过 LWJGL3 直接复用 Android 的 `FruitMergeApplication`、Box2D、共享字体、音效和 canonical 水果素材，可交互运行、自动截图或启用合成表现验收场景；不加载 ONNX。 | `scripts/run-ui-preview.ps1`；`-Showcase -CaptureFrames N` 验收爆浆/吸附阶段，输出默认位于 `runs/mobile_ui_preview/`。 |
+| `assets/fonts/` | Android 与 Windows 预览共用的高分辨率站酷快乐体中文子集 BitmapFont、官方源字体和 OFL 1.1 许可证。 | `ui-cute.fnt/png` 为 APK 实际资源；由 `tools/generate_mobile_ui_font.py` 做 cmap 缺字门禁后生成。 |
+| `assets/audio/` | Android 与 Windows 预览共用的合成弹出、柔软冲击和计分吸附音效。 | 三个 OGG 选自 Kenney Impact Sounds；CC0 原始许可证与来源映射一并保留。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口和一个 560x1120 尺寸迁移入口。 | `train_dqn_causal_*.toml`、`train_dqn_size_transfer_560x1120_50k.toml` |
 | `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：250k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套正式阶段配置继承它。 | `train_dqn.py --config ...` |
@@ -99,7 +100,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | --- | --- | --- |
 | `tools/cuda_stress_test.py` | 独立 PyTorch CUDA 计算压力测试脚本。只做矩阵乘法和可选显存预留，并采集 GPU、系统内存、进程内存和内核 NVIDIA/Xid 日志。 | 用于判断黑屏/Xid 是否能在脱离游戏和 RL 训练代码后复现；默认输出到 `runs/cuda_stress/<时间戳>/`。 |
 | `tools/export_android_model.py` | 把可信结构感知 checkpoint 导出为 Android ONNX。用真实稳定局面比较原模型、五输入包装器与 ONNX Runtime，数值或 argmax 门禁失败时不产出模型。 | 默认读取本地 560x1120 最优推理 checkpoint；依赖见 `requirements-mobile-export.txt`。 |
-| `tools/generate_mobile_ui_font.py` | 从 OFL 授权的 Nunito 可变字体生成 64px ASCII AngelCode BMFont 图集，供 Android 与桌面预览使用相同字形和度量。 | 依赖 Pillow 与 fontTools；输出 `assets/fonts/ui-nunito.fnt/png`。 |
+| `tools/generate_mobile_ui_font.py` | 从 OFL 授权的站酷快乐体生成 64px“可打印 ASCII + 明确中文 UI 字表”AngelCode BMFont 图集，供 Android 与桌面预览使用相同字形和度量。 | 依赖 Pillow 与 fontTools；先验证 Unicode cmap，输出 `assets/fonts/ui-cute.fnt/png`。 |
 | `tools/export_training_catalog.py` | 训练实验归档工具。扫描本地 `runs/`，识别 Reward V2 task/potential 与历史 Reward V1 指标，并从配置、训练指标和文件信息生成轻量实验目录。 | 不复制 checkpoint、replay 和完整指标 CSV；运行方式见 `docs/training_runs/README.md`。 |
 | `tools/sync_cloud_training_artifacts.py` | 云端轻量训练产物同步工具。通过一次只读 SSH tar 流同步固定白名单内的配置/指标/归因 JSON 和两张训练图，在本地校验路径、类型、大小、JSON/CSV/PNG 完整性后以目录事务安装并生成 SHA-256 manifest。 | 默认只要求训练中的 config/metrics；阶段结束加 `--require-complete` 核对目标 update 和 shutdown 包。认证交给 OpenSSH，工具没有密码参数；明确不下载 checkpoint、ReplayBuffer、日志或本地旁路证据。 |
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |
