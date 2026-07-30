@@ -63,7 +63,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `src/daxigua_rl/models/mobile_export.py` | 把结构感知 GNN-Q 包装为五个普通张量输入，供动态 N/E 的 ONNX 导出。 | `MobileGNNQNetwork`、`export_mobile_onnx()`。 |
 | `android/` | Android AI 游戏版 Gradle 工程。libGDX/Box2D 负责游戏，Chaquopy 复用结构分析，ONNX Runtime 在后台线程推理；提供大厅、单人、挑战 AI、AI 演示、实时进度恢复、设置/历史、原因观察和确认结算。 | `scripts/build-debug-apk.ps1`；最低 API 24，当前仅 arm64-v8a。 |
 | `android/core/src/main/java/com/fruitmerge/ai/game/FruitMergeApplication.java` | Android 与 Windows 预览共用的应用、表现和交互入口。管理大厅/游戏页面、三种固定控制权模式、自动保存、显式退出、独占分数行、合成反馈、同步对战、AI 文字气泡和独立颜文字脉冲。 | `drawHome()`、`requestStartMode()`、`saveCurrentSession()`、`resumeSavedSession()`、`armOrDropDuelAi()`、`drawAiReaction()` |
-| `android/core/src/main/java/com/fruitmerge/ai/game/AiDialogueDirector.java` | 七类 AI 完整静态语料的严格加载、无放回抽取和统一发言节奏控制器。文字限频与颜文字抽样分离，运行时不拼接任何句子片段。 | `offer()`、`randomEmoticon()`、`resetPacing()`、`Mood` |
+| `android/core/src/main/java/com/fruitmerge/ai/game/AiDialogueDirector.java` | 七类 AI 完整静态语料的严格加载、无放回抽取和统一发言节奏控制器。文字与独立颜文字各有冷却/概率门禁，运行时不拼接任何句子片段。 | `offer()`、`offerEmoticon()`、`resetPacing()`、`Mood` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/FruitPhysicsWorld.java` | 移动端 Box2D 物理世界。除投放、固定步、接触合成外，支持保存/校验/恢复水果顺序、ID、两类半径、完整运动字段、年龄和 accumulator；旧 pending/event 不重放。 | `snapshot()`、`restore()`、`Snapshot`、`FruitState` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/DuelMatch.java` | AI 对战纯规则控制器。维护两个独立 Box2D 场景和一条共享水果序列，按真实时间管理回合，支持双方原子同步投放/超时、完整快照恢复、危险线与同帧胜负判定。 | `dropBoth()`、`timeoutBoth()`、`snapshot()`、`restore()`、`resolveOutcome()` |
 | `android/core/src/main/java/com/fruitmerge/ai/game/GameProfileStore.java` | 基于 libGDX `Preferences` 的本地设置、分类最优与最近 200 局明细仓库。三模式结果和有界 session 账本一次 flush，逐条记录带 CRC、支持损坏尾部恢复和旧聚合迁移。 | `settings()`、`history()`、`gameRecords()`、`recordSoloGame(...)`、`recordAiDemoGame(...)`、`recordVersusGame(...)`、`resetHistory()` |
@@ -263,7 +263,8 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 - `GameProfileStore`：可注入 `Preferences` 的设置/历史仓库；三模式分类最优、
   最近 200 局 CRC 明细和有界 session 防重账本在同一次 flush 中保存。
 - `AiDialogueDirector`：严格加载七类完整句语料，以无放回洗牌袋抽取并统一控制
-  普通/紧急发言间隔；颜文字可以独立响应事件，不消耗或拼接文字语料。
+  普通/紧急发言间隔；独立颜文字不消耗文字语料，但也受全局间隔、同类冷却和
+  事件优先级概率约束。
 - `GameSessionStore`：一个逻辑未完成进度槽，以 generation + SHA-256 的交替双
   bank 保存三种模式完整规则状态，最新 bank 损坏时回退上一份完整快照。
 - `UiMotionController`：大厅和弹窗控件共用的纯 Java 手势状态机；绘制层读取其

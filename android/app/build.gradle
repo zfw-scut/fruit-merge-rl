@@ -191,7 +191,7 @@ tasks.register("syncAiDialogueAssets", Sync) {
                 if (line.isEmpty()
                         || line != rawLine
                         || codePoints < 4
-                        || codePoints > 32
+                        || codePoints > 24
                         || line.contains("\t")) {
                     throw new GradleException(
                             "Invalid AI dialogue line ${index + 1} in ${filename}"

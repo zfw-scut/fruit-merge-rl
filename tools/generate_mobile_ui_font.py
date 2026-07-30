@@ -166,7 +166,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--font-size", type=int, default=64)
     parser.add_argument("--weight", type=float, default=750.0)
-    parser.add_argument("--atlas-width", type=int, default=1024)
+    # The complete dialogue corpus needs 1580+ glyphs. A 1024-wide atlas grows to 8192px high,
+    # which exceeds GL_MAX_TEXTURE_SIZE on some supported Android devices; 2048x4096 stays safe.
+    parser.add_argument("--atlas-width", type=int, default=2048)
     parser.add_argument("--output-name", default="ui-cute")
     parser.add_argument("--face-name", default="ZCOOL KuaiLe UI")
     return parser.parse_args()

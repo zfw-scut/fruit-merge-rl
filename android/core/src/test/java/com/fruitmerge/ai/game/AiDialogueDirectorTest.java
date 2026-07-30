@@ -172,6 +172,99 @@ public final class AiDialogueDirectorTest {
     }
 
     @Test
+    public void silentEmoticonsHaveTheirOwnCooldown() {
+        AiDialogueDirector director =
+                AiDialogueDirector.fallback(new ZeroRandom());
+
+        assertNotNull(director.offerEmoticon(
+                AiDialogueDirector.Mood.HAPPY,
+                3
+        ));
+        assertNull(director.offerEmoticon(
+                AiDialogueDirector.Mood.HAPPY,
+                7
+        ));
+        director.update(
+                AiDialogueDirector.HARD_EMOTION_GAP_SECONDS + 0.01f
+        );
+        assertNull(director.offerEmoticon(
+                AiDialogueDirector.Mood.SURPRISED,
+                7
+        ));
+        director.update(3f);
+        assertNotNull(director.offerEmoticon(
+                AiDialogueDirector.Mood.HAPPY,
+                3
+        ));
+    }
+
+    @Test
+    public void speakingAlsoSuppressesImmediateStandaloneExpression() {
+        AiDialogueDirector director =
+                AiDialogueDirector.fallback(new ZeroRandom());
+        assertNotNull(director.offer(
+                AiDialogueDirector.Mood.HAPPY,
+                2f,
+                3,
+                true,
+                -1,
+                -1f
+        ));
+        assertNull(director.offerEmoticon(
+                AiDialogueDirector.Mood.HAPPY,
+                7
+        ));
+    }
+
+    @Test
+    public void deferredUrgentExpressionSurvivesSoftSpeechCooldown() {
+        AiDialogueDirector director =
+                AiDialogueDirector.fallback(new ZeroRandom());
+        assertNotNull(director.offer(
+                AiDialogueDirector.Mood.THINKING,
+                2f,
+                2,
+                true,
+                -1,
+                -1f
+        ));
+        assertNull(director.offerDeferredUrgentEmoticon(
+                AiDialogueDirector.Mood.WORRIED,
+                7
+        ));
+
+        director.update(
+                AiDialogueDirector.HARD_EMOTION_GAP_SECONDS + 0.01f
+        );
+        assertNotNull(director.offerDeferredUrgentEmoticon(
+                AiDialogueDirector.Mood.WORRIED,
+                7
+        ));
+        assertNull(director.offerDeferredUrgentEmoticon(
+                AiDialogueDirector.Mood.WORRIED,
+                7
+        ));
+    }
+
+    @Test
+    public void rapidOrdinaryMergesCannotFlashAnExpressionEveryTime() {
+        AiDialogueDirector director =
+                AiDialogueDirector.fallback(new ZeroRandom());
+        int shown = 0;
+        for (int event = 0; event < 20; event++) {
+            if (director.offerEmoticon(
+                    AiDialogueDirector.Mood.HAPPY,
+                    3
+            ) != null) {
+                shown += 1;
+            }
+            director.update(0.5f);
+        }
+        assertTrue("too many rapid merge expressions: " + shown, shown <= 4);
+        assertTrue("ordinary merge expression channel went silent", shown >= 2);
+    }
+
+    @Test
     public void sameSeedProducesTheSameCompleteLineSequence() {
         EnumMap<AiDialogueDirector.Mood, String> texts =
                 completeCatalog(1_000);
@@ -277,5 +370,17 @@ public final class AiDialogueDirectorTest {
                     .append('\n');
         }
         return text.toString();
+    }
+
+    private static final class ZeroRandom extends Random {
+        @Override
+        public float nextFloat() {
+            return 0f;
+        }
+
+        @Override
+        public int nextInt(int bound) {
+            return 0;
+        }
     }
 }

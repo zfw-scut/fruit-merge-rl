@@ -45,6 +45,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private static final float GAME_OVER_SECONDS = 2f;
     private static final float AI_LOADING_FALLBACK_SECONDS = 12f;
     private static final float AUTOSAVE_INTERVAL_SECONDS = 1.5f;
+    private static final float URGENT_EMOTION_TTL_SECONDS = 4f;
     private static final float GAME_BACK_LEFT = 490f;
     private static final float GAME_BACK_TOP = 18f;
     private static final float GAME_BACK_SIZE = 42f;
@@ -296,6 +297,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private int duelAiReactionRound = -1;
     private AiReaction aiReaction;
     private AiEmotionPulse aiEmotionPulse;
+    private PendingAiEmotion pendingAiEmotion;
     private AiDialogueDirector dialogueDirector;
     private float aiBubbleOcclusion;
     private boolean aiDangerReactionArmed = true;
@@ -624,6 +626,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         uiMotion.cancelAll();
         aiReaction = null;
         aiEmotionPulse = null;
+        pendingAiEmotion = null;
         aiBubbleOcclusion = 0f;
         aiDangerReactionArmed = true;
         if (dialogueDirector != null) {
@@ -664,6 +667,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         uiMotion.cancelAll();
         aiReaction = null;
         aiEmotionPulse = null;
+        pendingAiEmotion = null;
         aiBubbleOcclusion = 0f;
         overlayPage = OverlayPage.NONE;
         appScreen = AppScreen.HOME;
@@ -687,6 +691,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         aiReaction = null;
         aiEmotionPulse = null;
+        pendingAiEmotion = null;
         aiBubbleOcclusion = 0f;
         activeDragPointer = -1;
         uiMotion.cancelAll();
@@ -712,6 +717,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         aiReaction = null;
         aiEmotionPulse = null;
+        pendingAiEmotion = null;
         aiBubbleOcclusion = 0f;
         activeDragPointer = -1;
         uiMotion.cancelAll();
@@ -1104,6 +1110,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         nextScoreSequenceId = 0;
         aiReaction = null;
         aiEmotionPulse = null;
+        pendingAiEmotion = null;
         aiBubbleOcclusion = 0f;
     }
 
@@ -1625,6 +1632,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
         duelAiArmed = false;
         activeDragPointer = -1;
         uiMotion.cancelAll();
+        aiReaction = null;
+        aiEmotionPulse = null;
+        pendingAiEmotion = null;
         duelResultHoldRemaining = settings.resultHoldSeconds();
         duelResultVisible = false;
         DuelMatch.Lane player = duelMatch.playerLane();
@@ -2919,6 +2929,42 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 aiEmotionPulse = null;
             }
         }
+        if (pendingAiEmotion != null) {
+            pendingAiEmotion.age += delta;
+            if (pendingAiEmotion.age >= URGENT_EMOTION_TTL_SECONDS
+                    || appScreen != AppScreen.GAME
+                    || currentResultVisible()) {
+                pendingAiEmotion = null;
+            } else {
+                boolean mayPreemptSpeech = aiReaction != null
+                        && pendingAiEmotion.priority >= 7
+                        && aiReaction.age >= 0.85f;
+                if ((aiReaction == null || mayPreemptSpeech)
+                        && aiEmotionPulse == null
+                        && dialogueDirector != null) {
+                    AiDialogueDirector.Mood pendingMood =
+                            AiDialogueDirector.Mood.valueOf(
+                                    pendingAiEmotion.mood.name()
+                            );
+                    String emoticon =
+                            dialogueDirector.offerDeferredUrgentEmoticon(
+                                    pendingMood,
+                                    pendingAiEmotion.priority
+                            );
+                    if (emoticon != null) {
+                        if (mayPreemptSpeech) {
+                            aiReaction = null;
+                        }
+                        pulseAiEmotion(
+                                pendingAiEmotion.mood,
+                                emoticon,
+                                pendingAiEmotion.priority
+                        );
+                        pendingAiEmotion = null;
+                    }
+                }
+            }
+        }
         float targetOcclusion = (aiReaction != null
                 || aiEmotionPulse != null)
                 && appScreen == AppScreen.GAME
@@ -2970,15 +3016,30 @@ public final class FruitMergeApplication extends ApplicationAdapter
                         activePriority,
                         activeAge
                 );
-        String pulseEmoticon = line != null
-                ? line.emoticon()
-                : (dialogueDirector == null
-                ? "(o_o)"
-                : dialogueDirector.randomEmoticon(directorMood));
-        pulseAiEmotion(mood, pulseEmoticon, priority);
         if (line == null) {
+            // Keep the face stable while a sentence is still on screen. Silent reactions are a
+            // fallback for otherwise quiet moments, not an animation layered over active speech.
+            if (aiReaction != null) {
+                queueUrgentEmotion(mood, priority);
+                return false;
+            }
+            String pulseEmoticon = dialogueDirector == null
+                    ? null
+                    : dialogueDirector.offerEmoticon(
+                            directorMood,
+                            priority
+                    );
+            if (pulseEmoticon != null) {
+                pulseAiEmotion(mood, pulseEmoticon, priority);
+            } else {
+                queueUrgentEmotion(mood, priority);
+            }
             return false;
         }
+        // The full speech bubble already carries its own face. Clearing a stale standalone pulse
+        // prevents a normal merge reaction from briefly replacing the newly spoken expression.
+        aiEmotionPulse = null;
+        pendingAiEmotion = null;
         aiReaction = new AiReaction(
                 line.text(),
                 line.emoticon(),
@@ -2987,6 +3048,16 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 line.priority()
         );
         return true;
+    }
+
+    private void queueUrgentEmotion(AiMood mood, int priority) {
+        if (priority < 6) {
+            return;
+        }
+        if (pendingAiEmotion == null
+                || priority > pendingAiEmotion.priority) {
+            pendingAiEmotion = new PendingAiEmotion(mood, priority);
+        }
     }
 
     private void pulseAiEmotion(
@@ -7403,6 +7474,17 @@ public final class FruitMergeApplication extends ApplicationAdapter
             this.emoticon = emoticon;
             this.mood = mood;
             this.duration = duration;
+            this.priority = priority;
+        }
+    }
+
+    private static final class PendingAiEmotion {
+        private final AiMood mood;
+        private final int priority;
+        private float age;
+
+        private PendingAiEmotion(AiMood mood, int priority) {
+            this.mood = mood;
             this.priority = priority;
         }
     }

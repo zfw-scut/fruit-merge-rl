@@ -17,13 +17,18 @@ import java.util.Set;
  */
 public final class AiDialogueDirector {
     public static final int MIN_LINES_PER_MOOD = 1_000;
-    public static final int MAX_LINE_CODE_POINTS = 32;
+    public static final int MAX_LINE_CODE_POINTS = 24;
     public static final float HARD_SPEECH_GAP_SECONDS = 2.2f;
+    public static final float HARD_EMOTION_GAP_SECONDS = 1.35f;
 
     private static final float MIN_SILENCE_SECONDS = 3.5f;
     private static final float MAX_SILENCE_SECONDS = 7f;
     private static final float MIN_URGENT_GAP_SECONDS = 3.2f;
     private static final float MAX_URGENT_GAP_SECONDS = 5f;
+    private static final float MIN_EMOTION_SILENCE_SECONDS = 2.6f;
+    private static final float MAX_EMOTION_SILENCE_SECONDS = 4.2f;
+    private static final float MIN_URGENT_EMOTION_GAP_SECONDS = 1.6f;
+    private static final float MAX_URGENT_EMOTION_GAP_SECONDS = 2.4f;
 
     private final EnumMap<Mood, String[]> catalog =
             new EnumMap<>(Mood.class);
@@ -31,12 +36,16 @@ public final class AiDialogueDirector {
             new EnumMap<>(Mood.class);
     private final EnumMap<Mood, Float> nextMoodSpeechAt =
             new EnumMap<>(Mood.class);
+    private final EnumMap<Mood, Float> nextMoodEmotionAt =
+            new EnumMap<>(Mood.class);
     private final Random random;
 
     private float elapsedSeconds;
     private float lastSpeechAt = -1_000f;
     private float nextSpeechAt;
     private float nextUrgentSpeechAt;
+    private float lastEmotionAt = -1_000f;
+    private float nextEmotionAt;
 
     /**
      * Creates a strict production catalog.
@@ -61,6 +70,7 @@ public final class AiDialogueDirector {
             catalog.put(mood, lines);
             bags.put(mood, new ShuffleBag(lines.length, random));
             nextMoodSpeechAt.put(mood, 0f);
+            nextMoodEmotionAt.put(mood, 0f);
         }
     }
 
@@ -69,13 +79,13 @@ public final class AiDialogueDirector {
      */
     public static AiDialogueDirector fallback(Random random) {
         EnumMap<Mood, String> texts = new EnumMap<>(Mood.class);
-        texts.put(Mood.THINKING, "让我认真看看这一步。\n我先观察一下局面。");
-        texts.put(Mood.HESITATING, "两个位置都不错呢。\n这一步让我再想想。");
-        texts.put(Mood.WELCOME, "接下来一起看看局面吧。\n我会认真陪你玩下去。");
-        texts.put(Mood.READY, "准备好了，随时出发！\n我已经看准位置啦！");
-        texts.put(Mood.HAPPY, "好耶，又顺利合成了！\n这一分拿得真漂亮！");
-        texts.put(Mood.SURPRISED, "哇，这个连锁太精彩了！\n你的铺垫让我吃了一惊！");
-        texts.put(Mood.WORRIED, "水果堆有点危险了。\n得赶紧给上面腾空间！");
+        texts.put(Mood.THINKING, "唔，我瞄瞄落哪边。\n先别急，让我瞅一眼。");
+        texts.put(Mood.HESITATING, "诶，左右都挺香呀。\n唔，这俩位置真难选。");
+        texts.put(Mood.WELCOME, "嘿，我来陪你玩啦！\n好嘞，咱们接着玩。");
+        texts.put(Mood.READY, "好，就这儿啦！\n瞄准咯，准备放！");
+        texts.put(Mood.HAPPY, "啵！合上啦，嘿嘿。\n好耶，分数到手啦！");
+        texts.put(Mood.SURPRISED, "哇，你这手真漂亮！\n嚯，这一下也太会了！");
+        texts.put(Mood.WORRIED, "呜哇，上面有点挤啦。\n诶诶，得赶紧腾地方。");
         return new AiDialogueDirector(texts, random, false);
     }
 
@@ -165,6 +175,7 @@ public final class AiDialogueDirector {
                 mood,
                 elapsedSeconds + moodCooldown(mood)
         );
+        markEmotionShown(mood, safePriority);
         return new Line(text, emoticon, mood, duration, safePriority);
     }
 
@@ -181,13 +192,48 @@ public final class AiDialogueDirector {
     }
 
     /**
-     * Samples only a visual kaomoji. This does not consume a dialogue line or change any speech
-     * gate, allowing the face to react immediately while text remains deliberately infrequent.
+     * Offers a silent visual reaction under its own pacing and probability gates.
+     *
+     * <p>A spoken line already includes a face and records the same cooldown. This channel is
+     * therefore more responsive than speech, but ordinary merges can no longer flash a new face
+     * every time.</p>
      */
-    public String randomEmoticon(Mood mood) {
-        String[] emoticons =
-                Objects.requireNonNull(mood, "mood").emoticons();
-        return emoticons[random.nextInt(emoticons.length)];
+    public String offerEmoticon(Mood mood, int priority) {
+        Objects.requireNonNull(mood, "mood");
+        int safePriority = Math.max(0, priority);
+        if (elapsedSeconds - lastEmotionAt < HARD_EMOTION_GAP_SECONDS
+                || elapsedSeconds < nextEmotionAt
+                || elapsedSeconds < nextMoodEmotionAt.get(mood)) {
+            return null;
+        }
+        if (random.nextFloat() > emotionProbability(safePriority)) {
+            return null;
+        }
+        String[] emoticons = mood.emoticons();
+        String emoticon = emoticons[random.nextInt(emoticons.length)];
+        markEmotionShown(mood, safePriority);
+        return emoticon;
+    }
+
+    /**
+     * Delivers a deferred high-priority event after the current speech bubble has gone.
+     *
+     * <p>It bypasses soft probability and mood cooldowns, but still obeys the global hard visual
+     * gap. Callers must only use this for a short-lived pending priority 6/7 event.</p>
+     */
+    public String offerDeferredUrgentEmoticon(Mood mood, int priority) {
+        Objects.requireNonNull(mood, "mood");
+        int safePriority = Math.max(0, priority);
+        if (safePriority < 6) {
+            return offerEmoticon(mood, safePriority);
+        }
+        if (elapsedSeconds - lastEmotionAt < HARD_EMOTION_GAP_SECONDS) {
+            return null;
+        }
+        String[] emoticons = mood.emoticons();
+        String emoticon = emoticons[random.nextInt(emoticons.length)];
+        markEmotionShown(mood, safePriority);
+        return emoticon;
     }
 
     private float moodCooldown(Mood mood) {
@@ -225,6 +271,68 @@ public final class AiDialogueDirector {
             return 0.62f;
         }
         return 0.84f;
+    }
+
+    private static float emotionProbability(int priority) {
+        if (priority <= 1) {
+            return 0.12f;
+        }
+        if (priority == 2) {
+            return 0.18f;
+        }
+        if (priority == 3) {
+            return 0.28f;
+        }
+        if (priority == 4) {
+            return 0.42f;
+        }
+        if (priority == 5) {
+            return 0.60f;
+        }
+        if (priority == 6) {
+            return 0.82f;
+        }
+        return 1f;
+    }
+
+    private void markEmotionShown(Mood mood, int priority) {
+        lastEmotionAt = elapsedSeconds;
+        if (priority >= 6) {
+            nextEmotionAt = elapsedSeconds + randomRange(
+                    MIN_URGENT_EMOTION_GAP_SECONDS,
+                    MAX_URGENT_EMOTION_GAP_SECONDS
+            );
+        } else {
+            nextEmotionAt = elapsedSeconds + randomRange(
+                    MIN_EMOTION_SILENCE_SECONDS,
+                    MAX_EMOTION_SILENCE_SECONDS
+            );
+        }
+        nextMoodEmotionAt.put(
+                mood,
+                elapsedSeconds + emotionMoodCooldown(mood)
+        );
+    }
+
+    private float emotionMoodCooldown(Mood mood) {
+        switch (mood) {
+            case THINKING:
+                return randomRange(4f, 6.5f);
+            case HESITATING:
+                return randomRange(4f, 6f);
+            case WELCOME:
+                return randomRange(6f, 8f);
+            case READY:
+                return randomRange(3f, 5f);
+            case HAPPY:
+                return randomRange(2.8f, 4.5f);
+            case SURPRISED:
+                return randomRange(1.8f, 3f);
+            case WORRIED:
+                return randomRange(2.5f, 4f);
+            default:
+                throw new IllegalStateException("unknown mood " + mood);
+        }
     }
 
     private float randomRange(float minimum, float maximum) {
@@ -295,13 +403,13 @@ public final class AiDialogueDirector {
     }
 
     public enum Mood {
-        THINKING("思考中", new String[]{"(._.)?", "(-_-?)", "(o_o?)"}),
-        HESITATING("有点纠结", new String[]{"(>_<)", "(._.;)", "(..;)"}),
-        WELCOME("陪你开玩", new String[]{"(^_^)/", "(o_o)/", "(^_^)"}),
-        READY("准备好了", new String[]{"(^_^)b", "(^o^)/", "(o_o)b"}),
-        HAPPY("开心得分", new String[]{"(^o^)", "(^_^)", "(*^_^*)"}),
-        SURPRISED("大吃一惊", new String[]{"(O_O)!", "(@_@)!", "(o_O)!"}),
-        WORRIED("紧张起来", new String[]{"(;_;)", "(T_T)", "(>_<;)"}),
+        THINKING("让我瞅瞅", new String[]{"(._.)?", "(-_-?)", "(o_o?)"}),
+        HESITATING("选哪边呢", new String[]{"(>_<)", "(._.;)", "(..;)"}),
+        WELCOME("来啦来啦", new String[]{"(^_^)/", "(o_o)/", "(^_^)"}),
+        READY("看准啦", new String[]{"(^_^)b", "(^o^)/", "(o_o)b"}),
+        HAPPY("合上啦", new String[]{"(^o^)", "(^_^)", "(*^_^*)"}),
+        SURPRISED("哇，真会玩", new String[]{"(O_O)!", "(@_@)!", "(o_O)!"}),
+        WORRIED("先稳住呀", new String[]{"(;_;)", "(T_T)", "(>_<;)"}),
         ;
 
         private final String label;
