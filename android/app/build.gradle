@@ -80,6 +80,7 @@ dependencies {
 }
 
 def generatedFruitAssets = layout.projectDirectory.dir("src/main/assets/fruits")
+def generatedFontAssets = layout.projectDirectory.dir("src/main/assets/fonts")
 def generatedModelAssets = layout.projectDirectory.dir("src/main/assets/model")
 def generatedNativeLibs = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
 def generatedPythonSources = layout.projectDirectory.dir("src/main/python_generated")
@@ -90,6 +91,25 @@ tasks.register("syncFruitAssets", Sync) {
     from(rootProject.layout.projectDirectory.dir("../assets/fruits"))
     into(generatedFruitAssets)
     include("*.png")
+}
+
+tasks.register("syncUiFontAssets", Sync) {
+    description = "Copies the validated shared UI bitmap font into Android assets."
+    group = "fruit merge"
+    from(rootProject.layout.projectDirectory.dir("../assets/fonts")) {
+        include("ui-nunito.fnt", "ui-nunito.png")
+    }
+    into(generatedFontAssets)
+    doLast {
+        ["ui-nunito.fnt", "ui-nunito.png"].each { filename ->
+            def fontFile = generatedFontAssets.file(filename).asFile
+            if (!fontFile.isFile() || fontFile.length() <= 0L) {
+                throw new GradleException(
+                        "Shared UI font asset is missing or empty: ${fontFile}"
+                )
+            }
+        }
+    }
 }
 
 tasks.register("syncMobileModel", Sync) {
@@ -170,6 +190,7 @@ tasks.configureEach { task ->
 tasks.named("preBuild").configure {
     dependsOn(
             "syncFruitAssets",
+            "syncUiFontAssets",
             "syncMobileModel",
             "extractLibGdxAndroidNatives",
             "syncMobilePythonSources"

@@ -43,7 +43,47 @@ XML。这样计分、AI 状态、触摸命中区和 `FitViewport` 始终使用�
 
 水果表现与主题明确隔离：`loadFruitTextures()`、`drawFruitBodies()`、
 `drawPreviewAndQueue()`、`drawFruit()` 继续使用项目原有 `assets/fruits/01.png`
-至 `11.png`，水果尺寸、位置、透明度、Box2D 物理和模型输入均未改变。
+至 `11.png`。场内和待投水果的尺寸、位置、透明度、Box2D 物理和模型输入均未
+改变；顶部三颗队列预览只重新排入新的提示槽，贴图、尺寸和透明度保持不变。
+
+文字不再使用 libGDX 内置的 15px 字体。Android 与 Windows 预览共同加载
+`assets/fonts/ui-nunito.fnt` 和 `ui-nunito.png`：它们由 OFL 1.1 授权的 Nunito
+源字体生成 64px 高分辨率图集，再在运行时向下采样。所有卡片文字通过
+`GlyphLayout` 按实际字形宽高居中或截断，避免不同字体度量与硬编码 baseline
+重新产生穿线、重叠和模糊。
+
+## Windows 本地 UI 预览
+
+`android/desktop/` 是只用于表现层验收的 LWJGL3 入口。它直接运行 Android 使用的
+同一个 `FruitMergeApplication`、Box2D 与 canonical 水果资源，不复制 UI 实现；
+仅用 stub 替换 Android ONNX/震动服务，因此不代表移动模型推理性能。
+
+打开可交互窗口：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  android\scripts\run-ui-preview.ps1
+```
+
+自动渲染、保存 PNG 并退出：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  android\scripts\run-ui-preview.ps1 -Capture
+```
+
+默认输出为 `runs/mobile_ui_preview/current.png`。可以用真实手机截图尺寸复查
+`FitViewport` 留边和高倍率字体采样：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File `
+  android\scripts\run-ui-preview.ps1 -Capture `
+  -Width 1156 -Height 2990 `
+  -Output runs\mobile_ui_preview\phone-1156x2990.png
+```
+
+桌面入口能提前发现字体、卡片、水果预览和绘制顺序问题，但不能代替 Android
+状态栏、刘海、安全区、触觉和真机持续帧率测试。
 
 ## 模型与移动契约
 

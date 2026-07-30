@@ -1,0 +1,42 @@
+plugins {
+    id "application"
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    implementation project(":core")
+    implementation "com.badlogicgames.gdx:gdx-backend-lwjgl3:$gdxVersion"
+    runtimeOnly "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-desktop"
+    runtimeOnly "com.badlogicgames.gdx:gdx-box2d-platform:$gdxVersion:natives-desktop"
+}
+
+application {
+    mainClass = "com.fruitmerge.ai.preview.DesktopPreviewLauncher"
+}
+
+tasks.withType(JavaExec).configureEach {
+    // core 继续按 Android 的内部资源路径读取 fruits/01.png～11.png；桌面预览只把
+    // 工作目录指向同一份 canonical assets，不复制或修改任何水果素材。
+    workingDir = rootProject.file("../assets")
+    jvmArgs "-DfruitMerge.previewWidth=${providers.gradleProperty("previewWidth").orElse("560").get()}"
+    jvmArgs "-DfruitMerge.previewHeight=${providers.gradleProperty("previewHeight").orElse("1120").get()}"
+}
+
+tasks.register("capturePreview", JavaExec) {
+    group = "fruit merge"
+    description = "Renders the real libGDX UI locally and writes a PNG screenshot."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = application.mainClass
+
+    def configuredOutput = providers.gradleProperty("previewOutput")
+            .orElse(rootProject.layout.projectDirectory
+                    .dir("../runs/mobile_ui_preview")
+                    .file("current.png")
+                    .asFile
+                    .absolutePath)
+    jvmArgs "-DfruitMerge.previewOutput=${configuredOutput.get()}"
+}
