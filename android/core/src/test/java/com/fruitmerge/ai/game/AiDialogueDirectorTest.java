@@ -15,7 +15,7 @@ import static org.junit.Assert.assertTrue;
 
 public final class AiDialogueDirectorTest {
     @Test
-    public void strictCatalogRequiresOneThousandCompleteUniqueLinesPerMood() {
+    public void strictCatalogRequiresOneThousandCompleteLinesPerMood() {
         EnumMap<AiDialogueDirector.Mood, String> texts =
                 completeCatalog(1_000);
         AiDialogueDirector director =
@@ -24,13 +24,10 @@ public final class AiDialogueDirectorTest {
         for (AiDialogueDirector.Mood mood
                 : AiDialogueDirector.Mood.values()) {
             assertEquals(1_000, director.lineCount(mood));
-            Set<String> unique = new HashSet<>();
             for (int index = 0; index < director.lineCount(mood); index++) {
                 String line = director.lineAt(mood, index);
-                assertTrue(line.codePointCount(0, line.length()) >= 4);
-                unique.add(line);
+                assertTrue(line.codePointCount(0, line.length()) >= 1);
             }
-            assertEquals(1_000, unique.size());
             if (mood.ordinal() > 0) {
                 director.update(
                         AiDialogueDirector.HARD_SPEECH_GAP_SECONDS
@@ -306,26 +303,32 @@ public final class AiDialogueDirectorTest {
     }
 
     @Test
-    public void duplicateOrBlankLinesAreRejected() {
+    public void duplicateAndShortLinesRemainIntentionalWeights() {
         EnumMap<AiDialogueDirector.Mood, String> duplicateCatalog =
                 completeCatalog(1_000);
         duplicateCatalog.put(
                 AiDialogueDirector.Mood.READY,
-                "准备出发啦。\n准备出发啦。\n"
+                "嗯。\n嗯。\n"
                         + catalogText(
                                 AiDialogueDirector.Mood.READY,
                                 998,
                                 10_000
                         )
         );
-        assertThrows(
-                IllegalArgumentException.class,
-                () -> new AiDialogueDirector(
-                        duplicateCatalog,
-                        new Random(2L)
-                )
+        AiDialogueDirector director = new AiDialogueDirector(
+                duplicateCatalog,
+                new Random(2L)
         );
+        assertEquals(1_000, director.lineCount(
+                AiDialogueDirector.Mood.READY));
+        assertEquals("嗯。", director.lineAt(
+                AiDialogueDirector.Mood.READY, 0));
+        assertEquals("嗯。", director.lineAt(
+                AiDialogueDirector.Mood.READY, 1));
+    }
 
+    @Test
+    public void blankLinesAreRejected() {
         EnumMap<AiDialogueDirector.Mood, String> blankCatalog =
                 completeCatalog(1_000);
         blankCatalog.put(

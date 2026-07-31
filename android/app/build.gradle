@@ -169,7 +169,6 @@ tasks.register("syncAiDialogueAssets", Sync) {
     }
     into(generatedDialogueAssets)
     doLast {
-        def uniqueAcrossDialogue = new LinkedHashSet<String>()
         dialogueFiles.each { filename ->
             def dialogueFile = generatedDialogueAssets.file(filename).asFile
             if (!dialogueFile.isFile() || dialogueFile.length() <= 0L) {
@@ -184,27 +183,15 @@ tasks.register("syncAiDialogueAssets", Sync) {
                                 + "${filename}: ${lines.size()}"
                 )
             }
-            def unique = new LinkedHashSet<String>()
             lines.eachWithIndex { rawLine, index ->
                 def line = rawLine.trim()
                 def codePoints = line.codePointCount(0, line.length())
                 if (line.isEmpty()
                         || line != rawLine
-                        || codePoints < 4
                         || codePoints > 24
                         || line.contains("\t")) {
                     throw new GradleException(
                             "Invalid AI dialogue line ${index + 1} in ${filename}"
-                    )
-                }
-                if (!unique.add(line)) {
-                    throw new GradleException(
-                            "Duplicate AI dialogue line in ${filename}: ${line}"
-                    )
-                }
-                if (!uniqueAcrossDialogue.add(line)) {
-                    throw new GradleException(
-                            "AI dialogue line is duplicated across moods: ${line}"
                     )
                 }
             }

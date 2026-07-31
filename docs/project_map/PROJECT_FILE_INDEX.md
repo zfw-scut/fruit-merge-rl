@@ -73,7 +73,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | `android/desktop/` | Windows 本地 UI 预览模块。通过 LWJGL3 直接复用 Android 的 `FruitMergeApplication`、Box2D、共享字体、音效和 canonical 水果素材，可交互运行、自动截图或启用合成表现验收场景；不加载 ONNX。 | `scripts/run-ui-preview.ps1`；`-Showcase -CaptureFrames N` 验收爆浆/吸附，`-Screen score-low/score-high` 验收分数停靠，其他页面可直接进入。 |
 | `assets/fonts/` | Android 与 Windows 预览共用的高分辨率站酷快乐体中文子集 BitmapFont、官方源字体和 OFL 1.1 许可证。 | `ui-cute.fnt/png` 为 APK 实际资源；生成器会合并手工种子与 Android Java 字符串字面量并执行 cmap/最终缺字检查。 |
 | `assets/audio/` | Android 与 Windows 预览共用的合成弹出、柔软冲击和计分吸附音效。 | 三个 OGG 选自 Kenney Impact Sounds；CC0 原始许可证与来源映射一并保留。 |
-| `assets/dialogue/` | 七类 AI 离线完整句语料，每类 1024 条；每行均为大模型预先完整构思的独立句子。 | 运行时仅做整行无放回抽取，不使用前缀/词槽/后缀拼接；`README.md` 固定每类事件语义。 |
+| `assets/dialogue/` | 七类 AI 离线完整句语料，每类以 1024 条为基础并可追加人工选定原句；重复行作为显式抽取权重。 | 运行时仅做整行无放回抽取，不使用前缀/词槽/后缀拼接；允许非空短句，单句最多 24 个 Unicode 字符；`README.md` 固定每类事件语义。 |
 | `src/daxigua_rl/dashboard/static/` | 云端训练面板的静态前端。以 HTML/CSS/原生 JavaScript 展示进度、ETA、训练/评估曲线和资源状态；只轮询只读 HTTP API，不加载外部 CDN。 | `index.html`、`styles.css`、`app.js`；由 `tools/training_dashboard.py` 服务。 |
 | `configs/` | 项目配置目录。三套首轮因果训练配置通过 `extends` 继承同一完整冻结基线；另保留一个可选 500k 延长入口和一个 560x1120 尺寸迁移入口。 | `train_dqn_causal_*.toml`、`train_dqn_size_transfer_560x1120_50k.toml` |
 | `configs/train_dqn_fast30_parallel.toml` | 结构感知 V2 完整算法/环境基线：250k、fast30、H256/L4、batch 128、16 rollout、集中式 actor、六维结构监督、Reward V2、Double DQN 3-step、冷热 replay、规则排序、预算反事实与局部 Shapley。三套正式阶段配置继承它。 | `train_dqn.py --config ...` |
@@ -109,7 +109,7 @@ PyTorch GNN-Q 的无渲染强化学习训练链路。旧实验代码和旧环境
 | --- | --- | --- |
 | `tools/cuda_stress_test.py` | 独立 PyTorch CUDA 计算压力测试脚本。只做矩阵乘法和可选显存预留，并采集 GPU、系统内存、进程内存和内核 NVIDIA/Xid 日志。 | 用于判断黑屏/Xid 是否能在脱离游戏和 RL 训练代码后复现；默认输出到 `runs/cuda_stress/<时间戳>/`。 |
 | `tools/export_android_model.py` | 把可信结构感知 checkpoint 导出为 Android ONNX。用真实稳定局面比较原模型、五输入包装器与 ONNX Runtime，数值或 argmax 门禁失败时不产出模型。 | 默认读取本地 560x1120 最优推理 checkpoint；依赖见 `requirements-mobile-export.txt`。 |
-| `tools/generate_mobile_ui_font.py` | 从 OFL 授权的站酷快乐体生成 64px AngelCode BMFont 图集，供 Android 与桌面预览使用相同字形和度量；会词法扫描 `core/app` 主 Java 源码的字符串字面量，跳过注释和字符常量，自动补入新增中文 UI 字符。 | 依赖 Pillow 与 fontTools；先验证 Unicode cmap，当前输出 `1024x1024`、266 glyph 的 `assets/fonts/ui-cute.fnt/png`。 |
+| `tools/generate_mobile_ui_font.py` | 从 OFL 授权的站酷快乐体生成 64px AngelCode BMFont 图集，供 Android 与桌面预览使用相同字形和度量；会词法扫描 `core/app` 主 Java 源码的字符串字面量，跳过注释和字符常量，自动补入新增中文 UI 字符。 | 依赖 Pillow 与 fontTools；先验证 Unicode cmap，当前输出 `2048x4096`、1585 glyph 的 `assets/fonts/ui-cute.fnt/png`。 |
 | `tools/export_training_catalog.py` | 训练实验归档工具。扫描本地 `runs/`，识别 Reward V2 task/potential 与历史 Reward V1 指标，并从配置、训练指标和文件信息生成轻量实验目录。 | 不复制 checkpoint、replay 和完整指标 CSV；运行方式见 `docs/training_runs/README.md`。 |
 | `tools/sync_cloud_training_artifacts.py` | 云端轻量训练产物同步工具。通过一次只读 SSH tar 流同步固定白名单内的配置/指标/归因 JSON 和两张训练图，在本地校验路径、类型、大小、JSON/CSV/PNG 完整性后以目录事务安装并生成 SHA-256 manifest。 | 默认只要求训练中的 config/metrics；阶段结束加 `--require-complete` 核对目标 update 和 shutdown 包。认证交给 OpenSSH，工具没有密码参数；明确不下载 checkpoint、ReplayBuffer、日志或本地旁路证据。 |
 | `tools/monitor_training_resources.py` | 训练资源旁路监控脚本。独立于训练入口，按固定间隔记录系统内存、swap、目标训练进程、NVIDIA GPU 和 GPU 计算进程。 | 用于定位长时间训练时的 OOM、显存压力、GPU 查询失败和显示栈异常；默认输出到 `runs/resource_monitor/<时间戳>/`。 |

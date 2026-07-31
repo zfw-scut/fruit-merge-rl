@@ -2,12 +2,10 @@ package com.fruitmerge.ai.game;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
-import java.util.Set;
 
 /**
  * AI 完整语料的随机抽取与发言节奏控制器。
@@ -51,7 +49,7 @@ public final class AiDialogueDirector {
      * Creates a strict production catalog.
      *
      * @param texts one UTF-8 text blob per mood, one complete sentence per line
-     * @throws IllegalArgumentException if a mood has fewer than 1000 valid unique lines
+     * @throws IllegalArgumentException if a mood has fewer than 1000 valid lines
      */
     public AiDialogueDirector(
             Map<Mood, String> texts,
@@ -360,7 +358,6 @@ public final class AiDialogueDirector {
         }
 
         List<String> parsed = new ArrayList<>(end);
-        Set<String> unique = new HashSet<>(end * 2);
         for (int index = 0; index < end; index++) {
             String line = rawLines[index].trim();
             if (line.isEmpty()) {
@@ -369,7 +366,7 @@ public final class AiDialogueDirector {
                                 + (index + 1));
             }
             int codePoints = line.codePointCount(0, line.length());
-            if (codePoints < 4 || codePoints > MAX_LINE_CODE_POINTS) {
+            if (codePoints > MAX_LINE_CODE_POINTS) {
                 throw new IllegalArgumentException(
                         mood + " dialogue line length is invalid at "
                                 + (index + 1));
@@ -377,12 +374,8 @@ public final class AiDialogueDirector {
             for (int offset = 0; offset < line.length(); offset++) {
                 if (Character.isISOControl(line.charAt(offset))) {
                     throw new IllegalArgumentException(
-                            mood + " dialogue contains a control character");
+                        mood + " dialogue contains a control character");
                 }
-            }
-            if (!unique.add(line)) {
-                throw new IllegalArgumentException(
-                        mood + " dialogue contains a duplicate line: " + line);
             }
             parsed.add(line);
         }
