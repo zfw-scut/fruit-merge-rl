@@ -1,18 +1,49 @@
-"""游戏核心逻辑包。
+"""不依赖游戏模拟器和训练框架的领域规则与状态契约。"""
 
-这里放不依赖具体训练算法的核心组件，例如水果对象、物理世界、碰撞合成和失败判断。
-表现层可以调用核心逻辑；核心逻辑不应该 import 表现层或 RL 层。
-"""
-
-from .engine import HeadlessGame
-from .state import ActionCandidate, DropResult, FruitState, GameState, PhysicsResult
-
+from .rules import (
+    FRUIT_QUEUE_LENGTH,
+    FRUIT_RADII,
+    MAX_FRUIT_LEVEL,
+    MIN_FRUIT_LEVEL,
+    SPAWN_FRUIT_MAX_LEVEL,
+    SPAWN_FRUIT_MIN_LEVEL,
+    dropped_fruit_physics_radius,
+    fruit_mass,
+    fruit_radius,
+    merge_score,
+    merge_target_level,
+    merged_fruit_physics_radius,
+    random_spawn_level,
+)
+from .state import (
+    ActionCandidate,
+    BoardGeometry,
+    DropResult,
+    FruitState,
+    GameState,
+    MergeEvent,
+    PhysicsResult,
+)
 
 __all__ = [
     'ActionCandidate',
+    'BoardGeometry',
     'DropResult',
+    'FRUIT_QUEUE_LENGTH',
+    'FRUIT_RADII',
     'FruitState',
     'GameState',
-    'HeadlessGame',
+    'MAX_FRUIT_LEVEL',
+    'MIN_FRUIT_LEVEL',
+    'MergeEvent',
     'PhysicsResult',
+    'SPAWN_FRUIT_MAX_LEVEL',
+    'SPAWN_FRUIT_MIN_LEVEL',
+    'dropped_fruit_physics_radius',
+    'fruit_mass',
+    'fruit_radius',
+    'merge_score',
+    'merge_target_level',
+    'merged_fruit_physics_radius',
+    'random_spawn_level',
 ]

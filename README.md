@@ -1,45 +1,38 @@
-# 合成大西瓜 pygame 版
+# 合成大西瓜 accelerated-v1
 
-这是一个基于 `pygame` 和 `pymunk` 的《合成大西瓜》桌面小游戏。
+这是模型与训练系统重构使用的最小基线分支。当前工作树刻意不提供可运行游戏、
+游戏模拟器、模型或训练入口。
 
-当前项目只保留游戏本体。旧实验代码和旧环境封装已经移除，后续如果需要自动游玩能力，会重新设计相关模块。
+## 当前仅保留
 
-当前手动游戏窗口为固定尺寸 `400x800`，顶部独立信息层会显示分数和待投放水果队列，方便提前规划投放顺序。
+- 水果等级、半径、合成计分等稳定领域规则；
+- 不依赖 pygame、pymunk 或 PyTorch 的状态数据契约；
+- 仓库协作规则和最小契约测试。
 
-## 运行
+保留源码全部基于 Python 标准库，因此当前没有 `requirements.txt`。
 
-先安装依赖：
+## 当前明确不包含
 
-```bash
-python -m pip install -r requirements.txt
+- 桌面或 Android 游戏；
+- HeadlessGame、物理模拟和环境封装；
+- GNN、DQN 或其他模型结构；
+- replay、rollout、trainer 和训练脚本；
+- Reward V1/V2、状态分析、因果归因、反事实或 Shapley；
+- CUDA 训练管线及未来方案的占位实现。
+
+这些能力只有在新设计被明确确认后才会逐项加入。
+
+## 最小验证
+
+PowerShell：
+
+```powershell
+$env:PYTHONPATH = 'src'
+python -m unittest discover -s tests -v
 ```
 
-启动游戏：
+## 分支来源
 
-```bash
-python Main.py
-```
-
-## 操作
-
-- 鼠标移动：调整当前水果的投放位置。
-- 鼠标左键：投放水果。
-- `A` / `Left`：向左调整投放位置。
-- `D` / `Right`：向右调整投放位置。
-- `Space` / `Enter`：投放水果。
-- `R`：重新开始。
-- `Esc`：退出。
-
-顶部 `QUEUE` 区域从左到右显示当前水果和后续 3 颗水果；每次投放后队列会向前推进，并在末尾补充新水果。该区域和当前悬浮水果处于不同高度层，避免移动水果时遮挡队列。
-
-## 项目说明
-
-- `Main.py`: 兼容旧启动方式的薄入口。
-- `src/daxigua/`: 游戏本体包。
-- `src/daxigua/app.py`: 游戏应用入口和当前表现层实现。
-- `src/daxigua/core/`: 游戏核心逻辑，负责物理世界、边界、碰撞合成、计分和水果定义。
-- `src/daxigua/core/engine.py`: 无渲染游戏引擎，供后续训练环境调用。
-- `src/daxigua_rl/`: 自动游玩/RL 相关代码，当前包含隔离的 `DaxiguaEnv` 环境壳层，不会被游戏本体反向依赖。
-- `assets/fruits/`: 水果图片资源。
-- `assets/fruits.zip`: 原始水果图片压缩包归档。
-- `docs/`: 项目文档和 Codex 修改记录。
+`codex/accelerated-v1` 从提交
+`1a95a3d9a47bc6774144061f05ef067098b43544` 分叉。完整旧训练体系和 Android 成品
+继续保留在原项目分支中，不复制到本分支。
