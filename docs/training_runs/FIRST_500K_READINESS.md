@@ -25,7 +25,7 @@ motif，GNN 使用 relation gate + attention 和 dueling 读出，同时新增�
 
 | 阶段 | 状态 | 结论 |
 | --- | --- | --- |
-| V2 源码与单元测试 | 本地及新服务器 364/364 通过 | 训练源码 commit `ddcb249`；云端 compileall 同时通过，运行前工作树 clean |
+| V2 源码与单元测试 | 本地及新服务器 364/364 通过 | 训练源码 commit：重写后 `69744b90bac2b256a89280e4cab97f267c8eeb59`（重写前 `ddcb249`）；云端 compileall 同时通过，运行前工作树 clean |
 | V2 正式配置 preflight | 新服务器通过 | RTX 5090 / 25 核 / 90 GiB 容器上 `ready=true`、无 required failure/warning |
 | V2 5k 冒烟 | 未启动 | 全新空目录、update 0；旧 V1 5k 不替代 |
 | V2 独立 10k 测试 | 已通过自身 10k 门禁 | 用户明确授权直接从 update 0 运行；`ready=true`，但它没有发生在 V2 5k 之后，不能单独补齐手册的正式顺序链 |
@@ -41,7 +41,7 @@ motif，GNN 使用 relation gate + attention 和 dueling 读出，同时新增�
 | 分支 | `codex/work-1` |
 | 目标 GPU | NVIDIA GeForce RTX 5090，32,607 MiB |
 | 目标训练环境 | Python 3.11.15、PyTorch `2.12.1+cu130`、CUDA runtime 13.0 |
-| 冻结训练 commit | `ddcb249d0b5510700c87c6eec670a188a8400e5a` |
+| 冻结训练 commit | 重写后 `69744b90bac2b256a89280e4cab97f267c8eeb59`（重写前 `ddcb249d0b5510700c87c6eec670a188a8400e5a`） |
 | 工作树 clean | preflight 与 10k 启动时均为 clean |
 | 全量测试 | 2026-07-28：本地及新服务器 364/364 通过；compileall、diff check 通过 |
 | 正式配置 SHA-256 | `08c35479ddabd1cb383cd2287a94a457ae951b80acef483c3177e64b37ed2541` |
@@ -52,8 +52,8 @@ motif，GNN 使用 relation gate + attention 和 dueling 读出，同时新增�
 | 项目 | 当前证据 |
 | --- | --- |
 | 分支 | `codex/work-1` |
-| 训练源码冻结 commit | `368cc9bd554e237fd976786180afc112ad6f816e` |
-| 云端短跑源码身份 | 分支 `codex/work-1`，commit `368cc9b`，工作树 clean |
+| 训练源码冻结 commit | 重写后 `7e6cade2be1024b25963817a7e202bb1f91fa561`（重写前 `368cc9bd554e237fd976786180afc112ad6f816e`） |
+| 云端短跑源码身份 | 分支 `codex/work-1`，commit 重写后 `7e6cade2be1024b25963817a7e202bb1f91fa561`（重写前 `368cc9b`），工作树 clean |
 | 全量测试 | 2026-07-27：本地 312/312、云端 312/312 通过 |
 | 正式配置 | `configs/train_dqn_causal_500k.toml` |
 | 正式配置 SHA-256 | `08c35479ddabd1cb383cd2287a94a457ae951b80acef483c3177e64b37ed2541` |
@@ -85,7 +85,7 @@ V2 5k，因此本节只登记为“独立 10k 技术证据”，不把它改写�
 
 | 项目 | 记录 |
 | --- | --- |
-| 训练源码 | `ddcb249d0b5510700c87c6eec670a188a8400e5a`，分支 `codex/work-1`，启动时 clean |
+| 训练源码 | 重写后 `69744b90bac2b256a89280e4cab97f267c8eeb59`（重写前 `ddcb249d0b5510700c87c6eec670a188a8400e5a`），分支 `codex/work-1`，启动时 clean |
 | 云端正式 preflight | `runs/preflight/first_500k_pre_10k_ddcb249.json`，`ready=true`、`required_failures=[]`、`warnings=[]` |
 | 配置 | `configs/train_dqn_causal_calibration_10k.toml`；H256/L4、batch 128、16 rollout、6 物理 worker、集中式 GPU actor |
 | 输出目录 | `runs/dqn_structure_v2_calibration_10k/` |
@@ -154,7 +154,8 @@ hardlink 周期 checkpoint、资源清理和失败指针生命周期。它完成
 readiness 后 `ready=true`，只有 episode 样本不足和关闭时清空 top-K 候选池两项预期
 warning。该 run 使用诊断覆盖参数，仍然不替代正式 5k。
 
-随后在干净 commit `474cf453c559336b2e2fd8c18c994a74cd016fb2` 上执行
+随后在干净 commit（重写后 `a73236a3b5b408ff26ac4c591e348ae25194857c`，重写前
+`474cf453c559336b2e2fd8c18c994a74cd016fb2`）上执行
 `runs/dqn_causal_head474cf45_probe_20/`：20/20 updates、320 warmup、正常退出，
 `failure_latest.json` 不存在；主 TD 在全部 5 个日志窗口更新，规则 batch 与物理
 反事实 batch 各在 2 个窗口进入同一次 optimizer，最大 rule batch 为 31、最大
@@ -177,7 +178,7 @@ checkpoint 的 online/target 模型、Adam 与 CPU/CUDA RNG 均通过真实恢�
 | 检查 | 当前结果 | 说明 |
 | --- | --- | --- |
 | 报告 | 已通过 | `runs/preflight/first_500k_pre_368cc9b.json` |
-| 源码身份 | 已通过 | branch `codex/work-1`，commit `368cc9b`，`dirty=false` |
+| 源码身份 | 已通过 | branch `codex/work-1`，commit 重写后 `7e6cade2be1024b25963817a7e202bb1f91fa561`（重写前 `368cc9b`），`dirty=false` |
 | 总结 | 已通过 | `ready=true`、`required_failures=[]`、`warnings=[]` |
 | 正式 500k 配置契约 | 已通过 | 500000 updates、CUDA、3 env、9 steps/update、完整 CF/Shapley |
 | CUDA 前后向 | 已通过 | Torch `2.12.1+cu126`，Tesla V100-PCIE-32GB |
@@ -201,7 +202,7 @@ checkpoint 的 online/target 模型、Adam 与 CPU/CUDA RNG 均通过真实恢�
 | 配置 | `configs/train_dqn_causal_smoke_5k.toml` |
 | 输出目录 | `runs/dqn_causal_smoke_5k_v5/` |
 | 启动/完成时间 | 2026-07-27 21:39:58 → 22:13:21（33 分 23 秒） |
-| 源码 | `368cc9bd554e237fd976786180afc112ad6f816e`，云端工作树 clean |
+| 源码 | 重写后 `7e6cade2be1024b25963817a7e202bb1f91fa561`（重写前 `368cc9bd554e237fd976786180afc112ad6f816e`），云端工作树 clean |
 | 退出码 | train / monitor / cgroup monitor / readiness = `0 / 0 / 0 / 0` |
 | 最终 update/env steps | `5000 / 46000` |
 | launcher log | `runs/launcher_logs/train_20260727_213959.log` |
@@ -256,7 +257,7 @@ GPU utilization 平均 10.41%、p95 27%、峰值 32%，显存峰值 4166 MiB；t
 | 配置 | `configs/train_dqn_causal_calibration_10k.toml` |
 | 输出目录 | `runs/dqn_causal_calibration_10k/` |
 | 启动/完成时间 | 2026-07-27 22:21:56 → 23:28:08（66 分 12 秒） |
-| commit | `368cc9bd554e237fd976786180afc112ad6f816e` |
+| commit | 重写后 `7e6cade2be1024b25963817a7e202bb1f91fa561`（重写前 `368cc9bd554e237fd976786180afc112ad6f816e`） |
 | 启动方式 | 独立空目录，从 update 0 开始；没有 `--resume`/`--overwrite-run-dir` |
 | control | `runs/cloud_stage_control/10k_368cc9b/` |
 | resource monitor | `runs/resource_monitor/dqn_causal_calibration_10k_20260727T142156Z/` |
@@ -307,7 +308,7 @@ orientation / angular velocity 最大误差为 0 / 0.0017626 / 0.0013093 /
 | GPU/Torch CUDA | Tesla V100-PCIE-32GB；Torch `2.12.1+cu126`，CUDA runtime 12.6 |
 | Python/Pymunk/Chipmunk | Python 3.11.15；Pymunk 7.3.0；Chipmunk `2.0.1-ade7ed7...` |
 | 当前提交全量 tests | 312/312 通过，随后 `compileall` 通过 |
-| 500k config 32 次 preflight | commit `368cc9b`：`ready=true`、32/32、无 warning |
+| 500k config 32 次 preflight | commit 重写后 `7e6cade2be1024b25963817a7e202bb1f91fa561`（重写前 `368cc9b`）：`ready=true`、32/32、无 warning |
 | affinity/cgroup 有效 CPU | 6 核；冻结配置为 3 rollout + 2 共享物理 worker |
 | cgroup 内存 | 上限 25 GiB；5k working set 峰值 8.574 GiB，OOM 事件增量 0 |
 | 磁盘 | preflight 时 80.608 GiB；5k 后约 70 GiB，最终 500k 前必须恢复到 ≥80 GiB |

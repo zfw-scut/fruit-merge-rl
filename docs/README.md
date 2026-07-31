@@ -10,6 +10,7 @@
 - `project_map/`: 记录项目文件构成、职责分工、可复用组件和阅读入口。
 - `training_runs/`: 记录本地与云端训练实验的轻量摘要、配置、指标统计和产物索引，供迁移后的开发者或 agent 分析。
 - `CODING_STYLE.md`: 记录项目源码注释和编码风格，当前强调教学型详细注释。
+- `GIT_WORKFLOW.md`: 记录分支、中文提交、提交前检查、历史改写和安全强推规范。
 - `rl/`: 存放后续强化学习模型、环境接口和算法方案的设计参考文档。
 
 ## 当前 RL 开发入口
@@ -77,11 +78,11 @@ checkpoint 可通过 `--init-checkpoint` 做 weights-only 尺寸迁移；这会�
 ## 建议阅读顺序
 
 1. 先读 `project_map/PROJECT_FILE_INDEX.md`，了解项目有哪些文件、各自负责什么。
-2. 再读 `rl/STRUCTURE_AWARE_GNN_V2.md`，确认当前模型、训练开关和兼容边界。
-3. 需要继续训练或分析模型时，读 `training_runs/FIRST_250K_READINESS.md`、
+2. 开始修改和提交前读 `GIT_WORKFLOW.md` 与 `CODING_STYLE.md`。
+3. 再读 `rl/STRUCTURE_AWARE_GNN_V2.md`，确认当前模型、训练开关和兼容边界。
+4. 需要继续训练或分析模型时，读 `training_runs/FIRST_250K_READINESS.md`、
    `training_runs/INDEX.md` 和目标实验的 `summary.md`。
-4. 需要实时观察云端训练时，读 `operations/TRAINING_DASHBOARD.md`。
-5. 需要构建 Android 成品时，读 `mobile/ANDROID_APP.md`。
-6. 再读 `CODING_STYLE.md`，了解源码注释和后续修改风格。
+5. 需要实时观察云端训练时，读 `operations/TRAINING_DASHBOARD.md`。
+6. 需要构建 Android 成品时，读 `mobile/ANDROID_APP.md`。
 7. 再读 `codex/` 下最新的修改记录，了解近期发生过哪些较大的结构或逻辑变化。
 8. 需要继续修改项目时，按对应目录下的 `RULES.md` 更新文档。

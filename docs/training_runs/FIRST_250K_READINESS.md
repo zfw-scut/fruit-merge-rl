@@ -20,7 +20,7 @@
 
 | 项目 | 结果 |
 | --- | --- |
-| 训练源码 commit | `ddcb249` |
+| 训练源码 commit | 重写后 `69744b90bac2b256a89280e4cab97f267c8eeb59`（重写前 `ddcb249`） |
 | 更新与启动方式 | 从 update 0 独立完成 10000 updates；不是 resume |
 | 运行时长 / 吞吐 | 55m25s；约 3.047 updates/s |
 | 完成局数 | 1175 |
@@ -70,7 +70,7 @@ segments，超过容量后删除最旧段。因此当前磁盘余量能够承载
 
 | 项目 | 实际值 |
 | --- | --- |
-| 训练源码 commit | `83026cad5b43a8d39a7e224445f28091a5f9c785`，`codex/work-1`，云端 clean |
+| 训练源码 commit | 重写后 `610e12daa381f0c9a7262f778726206cbae86fdf`（重写前 `83026cad5b43a8d39a7e224445f28091a5f9c785`），`codex/work-1`，云端 clean |
 | 本地测试 | 376 项通过，1 项仅因 Windows 无符号链接权限跳过；0 failure/error |
 | 云端测试 | 376 项全部通过；compileall 通过 |
 | preflight | `runs/preflight/first_250k_prelaunch_83026ca_20260728T000628Z.json` |
@@ -103,8 +103,9 @@ segments，超过容量后删除最旧段。因此当前磁盘余量能够承载
 根因是局部 Shapley 把含 2～12 个 `GraphTensor` 的 task 直接提交给 PyTorch
 multiprocessing。默认 `file_descriptor` 共享策略让每个 tensor storage 占一个 FD，
 可信样本又把原 graph 长期保存在因果 replay；最小复现实测每个双候选任务稳定留下
-约 10 个 FD，约 90 个任务后与固定进程句柄共同触及 1024。修复提交
-`dec106b2003135f35763259f13dfa4831f7f4863` 改为 task bytes 传输，并让启动器把
+约 10 个 FD，约 90 个任务后与固定进程句柄共同触及 1024。修复提交（重写后
+`2e68172bd0b344fdaebc8856f61b4dcd3af0ef4b`，重写前
+`dec106b2003135f35763259f13dfa4831f7f4863`）改为 task bytes 传输，并让启动器把
 soft limit 提升至 65535。
 
 恢复前完成：
@@ -123,7 +124,7 @@ soft limit 提升至 65535。
 
 | 项目 | 恢复值 |
 | --- | --- |
-| 训练源码 | `dec106b2003135f35763259f13dfa4831f7f4863`，云端 clean |
+| 训练源码 | 重写后 `2e68172bd0b344fdaebc8856f61b4dcd3af0ef4b`（重写前 `dec106b2003135f35763259f13dfa4831f7f4863`），云端 clean |
 | checkpoint | `runs/dqn_causal_structure_h256_l4_n3_250k/checkpoints/step_00040000.pt` |
 | monitor | `runs/resource_monitor/formal_250k_resume40k_dec106b_20260728T083800Z` |
 | control | `runs/stage_control/formal_250k_resume40k_dec106b_20260728T083800Z` |
