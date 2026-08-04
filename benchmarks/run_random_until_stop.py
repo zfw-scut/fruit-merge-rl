@@ -1,7 +1,6 @@
 """让一批 CUDA 环境随机投放，直到失败、技术截断或投放上限。"""
 
 import argparse
-from html import escape
 import json
 from pathlib import Path
 import sys
@@ -17,8 +16,10 @@ import torch
 
 from daxigua.simulator import (
     BatchSimulationTrace,
+    save_trace_archive,
     SimulatorConfig,
     TensorVectorSimulator,
+    write_replay_catalog,
     write_replay_html,
 )
 from daxigua.simulator.cuda_backend import load_cuda_extension
@@ -250,18 +251,9 @@ def replay_final_steps(args, config, sampled_envs, terminal_metadata):
             f'{tail_drops} 次投放回放'
         ),
     )
-    torch.save(
-        {
-            'format_version': 3,
-            'steps': [
-                {
-                    name: getattr(step_trace, name)
-                    for name in step_trace.__dataclass_fields__
-                }
-                for step_trace in combined_trace_sequence
-            ],
-        },
-        args.replay_output_dir / f'{combined_name}.pt',
+    combined_trace_path = save_trace_archive(
+        args.replay_output_dir / f'{combined_name}.pt.gz',
+        combined_trace_sequence,
     )
 
     replay_entries = []
@@ -301,9 +293,7 @@ def replay_final_steps(args, config, sampled_envs, terminal_metadata):
             'or drop cap'
         ),
         'combined_replay': str(combined_path.resolve()),
-        'combined_trace': str(
-            (args.replay_output_dir / f'{combined_name}.pt').resolve()
-        ),
+        'combined_trace': str(combined_trace_path.resolve()),
         'replays': replay_entries,
     }
     manifest_path = args.replay_output_dir / 'manifest.json'
@@ -314,40 +304,17 @@ def replay_final_steps(args, config, sampled_envs, terminal_metadata):
 
 
 def write_full_replay_index(path, entries, source_num_envs):
-    """生成轻量索引页，避免一次载入 20 条完整局导致浏览器卡顿。"""
+    """生成按需加载的单页目录，避免打开大量标签页。"""
 
-    rows = []
-    for entry in entries:
-        replay_name = Path(entry['replay']).name
-        rows.append(
-            '<tr>'
-            f'<td>{entry["env_index"]}</td>'
-            f'<td>{entry["step_count"]}</td>'
-            f'<td>{entry["score"]}</td>'
-            f'<td>{entry["physics_frames_in_replay"]}</td>'
-            f'<td><a href="{escape(replay_name)}">打开完整一局</a></td>'
-            '</tr>'
-        )
-    html = f'''<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{source_num_envs} 环境测试：20 条完整局回放</title>
-<style>
-:root{{color-scheme:light dark;font-family:system-ui,"Segoe UI",sans-serif}}
-body{{max-width:980px;margin:auto;padding:24px;line-height:1.5}}
-table{{width:100%;border-collapse:collapse;margin-top:18px}}
-th,td{{padding:9px 12px;border-bottom:1px solid #7776;text-align:right}}
-th:first-child,td:first-child{{text-align:left}}a{{font-weight:600}}
-</style></head><body>
-<h1>{source_num_envs} 环境随机测试：20 条完整局回放</h1>
-<p>每条均从第 1 次投放记录到危险线失败；每 2 个物理帧采样一次。</p>
-<table><thead><tr><th>环境</th><th>投放次数</th><th>最终分数</th>
-<th>回放物理帧</th><th>回放</th></tr></thead><tbody>
-{''.join(rows)}
-</tbody></table></body></html>'''
-    output_path = Path(path)
-    output_path.write_text(html, encoding='utf-8')
-    return output_path
+    return write_replay_catalog(
+        path,
+        entries,
+        title=f'{source_num_envs} 环境随机测试：{len(entries)} 条完整局回放',
+        description=(
+            '每条均从第 1 次投放记录到失败或投放上限。'
+            '选择左侧条目后只加载当前一局。'
+        ),
+    )
 
 
 def replay_full_episodes(args, config, sampled_envs, terminal_metadata):
@@ -452,7 +419,7 @@ def replay_full_episodes(args, config, sampled_envs, terminal_metadata):
                 f'env-{original_index}-full-episode.html'
             )
             trace_path = args.replay_output_dir / (
-                f'env-{original_index}-full-episode.pt'
+                f'env-{original_index}-full-episode.pt.gz'
             )
             write_replay_html(
                 html_path,
@@ -463,19 +430,7 @@ def replay_full_episodes(args, config, sampled_envs, terminal_metadata):
                     f'{expected["step_count"]} 次投放'
                 ),
             )
-            torch.save(
-                {
-                    'format_version': 3,
-                    'steps': [
-                        {
-                            name: getattr(step_trace, name)
-                            for name in step_trace.__dataclass_fields__
-                        }
-                        for step_trace in sequence
-                    ],
-                },
-                trace_path,
-            )
+            save_trace_archive(trace_path, sequence)
             physics_frames = sum(
                 int(step_trace.frame_numbers[
                     0, int(step_trace.record_counts[0]) - 1

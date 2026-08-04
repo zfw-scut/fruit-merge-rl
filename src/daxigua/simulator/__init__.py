@@ -6,7 +6,16 @@
 
 from .config import SimulatorConfig
 from .reward import GameScoreReward, RewardComputer, ZeroReward
-from .replay import trace_to_payload, write_replay_fragment, write_replay_html
+from .replay import (
+    DEFAULT_FRUIT_TEXTURE_DIR,
+    load_fruit_texture_data_urls,
+    load_trace_archive,
+    save_trace_archive,
+    trace_to_payload,
+    write_replay_catalog,
+    write_replay_fragment,
+    write_replay_html,
+)
 from .types import (
     BatchDropResult,
     BatchMergeEvents,
@@ -25,13 +34,18 @@ __all__ = [
     'BatchSimulationTrace',
     'BatchStepResult',
     'GameScoreReward',
+    'DEFAULT_FRUIT_TEXTURE_DIR',
+    'load_fruit_texture_data_urls',
+    'load_trace_archive',
     'RewardComputer',
     'SimulatorConfig',
     'SingleEnvAdapter',
+    'save_trace_archive',
     'TensorVectorSimulator',
     'trace_to_payload',
     'VectorEnv',
     'write_replay_fragment',
     'write_replay_html',
+    'write_replay_catalog',
     'ZeroReward',
 ]

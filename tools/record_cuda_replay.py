@@ -14,6 +14,7 @@ if str(SRC_DIR) not in sys.path:
 import torch
 
 from daxigua.simulator import (
+    save_trace_archive,
     SimulatorConfig,
     TensorVectorSimulator,
     write_replay_fragment,
@@ -38,7 +39,7 @@ def parse_args():
     parser.add_argument(
         '--trace-output',
         type=Path,
-        default=PROJECT_ROOT / 'recordings' / 'cuda-physics-trace.pt',
+        default=PROJECT_ROOT / 'recordings' / 'cuda-physics-trace.pt.gz',
     )
     parser.add_argument('--fragment-output', type=Path)
     return parser.parse_args()
@@ -127,25 +128,12 @@ def main():
         if args.fragment_output is not None
         else None
     )
-    args.trace_output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            'format_version': 3,
-            'steps': [
-                {
-                    field_name: getattr(step_trace, field_name)
-                    for field_name in step_trace.__dataclass_fields__
-                }
-                for step_trace in trace_sequence
-            ],
-        },
-        args.trace_output,
-    )
+    trace_path = save_trace_archive(args.trace_output, trace_sequence)
 
     selected = trace_sequence[0].env_indices.tolist()
     report = {
         'output': str(output_path.resolve()),
-        'trace_output': str(args.trace_output.resolve()),
+        'trace_output': str(trace_path.resolve()),
         'fragment_output': (
             str(fragment_path.resolve()) if fragment_path else None
         ),

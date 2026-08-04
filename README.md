@@ -11,7 +11,7 @@
 - 批量重置、批量动作、独立 RNG、碰撞、滚动、合成、连锁、稳定和终止；
 - 合成水果继承两颗来源水果的总线动量和关于合成中点的总角动量；
 - 零拷贝 Tensor 状态读取、Python 单环境适配器和可插拔奖励接口；
-- 指定 CUDA 环境的逐物理帧抽样录制和浏览器交互回放；
+- 指定 CUDA 环境的逐物理帧抽样录制、纹理化离线播放器和多局回放目录；
 - 按当前规则重新实现的 Pymunk 行为参考环境，只用于对照和回退。
 
 `daxigua.core` 仍只依赖 Python 标准库。模拟器的独立依赖见
@@ -61,7 +61,8 @@ simulator.reset(reset_mask)
 位置、线速度、角度和角速度，在仍运动的场景中继续投放。
 
 调试物理效果时，可以随机预热一批环境、抽取其中若干环境并记录下一次
-完整投放。输出包含可直接打开的 HTML 回放和保留完整 Tensor 的 `.pt` 文件：
+完整投放。输出包含可直接打开的 HTML 回放和保留完整 Tensor 的压缩 `.pt.gz`
+文件：
 
 ```powershell
 & $python tools\record_cuda_replay.py `
@@ -72,6 +73,24 @@ simulator.reset(reset_mask)
 训练或模型评估代码也可以直接调用
 `simulator.step_with_trace(actions, env_indices, frame_stride=2)`，只记录指定环境；
 没有启用追踪时不会分配逐帧缓冲。
+
+新版回放会内嵌 11 级水果贴图和 gzip 状态数据，生成后不需要服务器或外部资源。
+播放器提供智能浏览、真实物理时间和逐次投放三种模式，并可按投放或合成事件跳转。
+碰撞半径、角度、线速度和水果 ID 都可以独立开关；贴图按显示半径绘制，白色调试圈
+始终表示追踪中的真实物理半径。
+
+已有 `.pt` 或 `.pt.gz` 追踪无需重新运行 CUDA，可以直接升级为当前播放器。多个输入
+会同时生成一个只按需加载当前回放的目录页：
+
+```powershell
+& $python tools\render_replay_trace.py `
+    recordings\old-replays\env-1-full-episode.pt `
+    recordings\old-replays\env-2-full-episode.pt `
+    --output-dir recordings\rendered-replays
+```
+
+压缩播放器使用现代浏览器原生的 `DecompressionStream`。需要兼容不支持该接口的旧浏览器
+时，重新渲染时增加 `--no-payload-compression`；文件会更大，但物理记录完全相同。
 
 正式奖励尚未定义。需要类 Gymnasium 返回值时，必须显式为 `VectorEnv` 提供
 `RewardComputer`，不能把游戏分数静默当成 RL 奖励。
@@ -96,8 +115,9 @@ $env:PYTHONPATH = 'src'
     --replay-samples 20 --replay-full-episodes --replay-frame-stride 2
 ```
 
-完整局会分别生成独立 HTML，并提供一个轻量索引页，避免浏览器一次加载 20 条
-长轨迹。只需查看终局前短片段时，可以不传 `--replay-full-episodes`，再通过
+完整局会分别生成独立 HTML，并提供一个带筛选、排序和内嵌播放器的目录页；浏览器
+始终只加载当前选择的一局，不再需要为 20 局打开 20 个标签页。只需查看终局前短片段
+时，可以不传 `--replay-full-episodes`，再通过
 `--replay-tail-drops` 控制尾段投放数。
 
 ## 分支来源

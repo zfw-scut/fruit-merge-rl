@@ -17,6 +17,7 @@ import torch
 
 from daxigua.simulator import (
     BatchSimulationTrace,
+    save_trace_archive,
     SimulatorConfig,
     TensorVectorSimulator,
     write_replay_html,
@@ -232,13 +233,6 @@ def analyze_trace(trace, config, tail_frames):
     }
 
 
-def trace_dict(trace):
-    return {
-        field_name: getattr(trace, field_name)
-        for field_name in trace.__dataclass_fields__
-    }
-
-
 def main():
     args = parse_args()
     if not torch.cuda.is_available():
@@ -338,17 +332,14 @@ def main():
                 )
             )
             html_path = args.output_dir / f'env-{env_index}-final-step.html'
-            tensor_path = args.output_dir / f'env-{env_index}-final-step.pt'
+            tensor_path = args.output_dir / f'env-{env_index}-final-step.pt.gz'
             write_replay_html(
                 html_path,
                 single_trace,
                 config,
                 title=f'等待超时环境 {env_index} 当前投放',
             )
-            torch.save(
-                {'format_version': 1, **trace_dict(single_trace)},
-                tensor_path,
-            )
+            save_trace_archive(tensor_path, single_trace)
             analysis['replay'] = str(html_path.resolve())
             analysis['trace'] = str(tensor_path.resolve())
             diagnostics.append(analysis)
