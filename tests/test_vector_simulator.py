@@ -288,6 +288,46 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'max_fruits'):
             simulator.step(torch.tensor([3]))
 
+    def test_training_fast_profile_preserves_wait_time_scale(self):
+        config = SimulatorConfig.training_fast(max_fruits=8)
+        self.assertEqual(config.physics_fps, 30)
+        self.assertEqual(config.max_physics_frames, 180)
+        self.assertEqual(config.stable_frames, 4)
+        self.assertTrue(config.drop_fast_forward)
+        self.assertAlmostEqual(
+            config.max_physics_frames / config.physics_fps, 6.0
+        )
+        high_fidelity = SimulatorConfig.high_fidelity_fast(max_fruits=8)
+        self.assertEqual(high_fidelity.physics_fps, 120)
+        self.assertEqual(high_fidelity.max_physics_frames, 720)
+        self.assertTrue(high_fidelity.drop_fast_forward)
+
+    def test_drop_fast_forward_skips_only_stable_free_fall(self):
+        config = self._config(
+            physics_fps=30,
+            max_physics_frames=180,
+            stable_frames=4,
+            drop_fast_forward=True,
+        )
+        simulator = TensorVectorSimulator(2, config=config, device='cpu')
+        simulator.reset(
+            seeds=torch.arange(2),
+            fruit_queue=torch.ones((2, 4), dtype=torch.int64),
+        )
+        self._install_fruit(simulator, 1, 0, 1, 80, 340, 1)
+        simulator.velocities[1, 0, 0] = (
+            config.stable_velocity_epsilon + 1.0
+        )
+
+        result = simulator.step(torch.tensor([3, 6]))
+
+        self.assertGreater(int(result.physics.fast_forwarded_frames[0]), 0)
+        self.assertEqual(int(result.physics.fast_forwarded_frames[1]), 0)
+        self.assertTrue(torch.all(
+            result.physics.fast_forwarded_frames
+            <= result.physics.frames_simulated
+        ).item())
+
     def test_single_environment_adapter_preserves_python_contracts(self):
         simulator = TensorVectorSimulator(
             1, config=self._config(), device='cpu'
@@ -376,6 +416,35 @@ class CudaVectorSimulatorTest(unittest.TestCase):
                 first_result.physics.frames_simulated,
                 second_result.physics.frames_simulated,
             )
+        )
+
+    def test_cuda_drop_fast_forward_reports_skipped_semantic_frames(self):
+        config = SimulatorConfig.training_fast(max_fruits=8)
+        simulator = TensorVectorSimulator(8, config=config, device='cuda')
+        simulator.reset(
+            seeds=9,
+            fruit_queue=torch.ones((8, 4), dtype=torch.int64, device='cuda'),
+        )
+
+        result, trace = simulator.step_with_trace(
+            torch.arange(8, device='cuda').remainder(config.action_count),
+            [0],
+            frame_stride=4,
+        )
+        torch.cuda.synchronize()
+
+        self.assertTrue(
+            (result.physics.fast_forwarded_frames > 0).all().item()
+        )
+        self.assertTrue(torch.all(
+            result.physics.fast_forwarded_frames
+            <= result.physics.frames_simulated
+        ).item())
+        count = int(trace.record_counts[0])
+        self.assertEqual(int(trace.frame_numbers[0, 0]), 0)
+        self.assertEqual(
+            int(trace.frame_numbers[0, count - 1]),
+            int(result.physics.frames_simulated[0]),
         )
 
     def test_cuda_two_identical_drops_merge(self):

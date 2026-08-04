@@ -1,0 +1,53 @@
+{
+  "label": "baseline_120fps_full_4096_episodes",
+  "git_commit": "7b640e317df546b3aaaf2b48409f3bcb67f2f8e8",
+  "source": "recordings/random-4096-momentum-inheritance-20260804.json",
+  "note": "该长测在动量继承完成后生成；随后提交只重构回放，物理代码与当前基线一致。",
+  "device": "cuda",
+  "num_envs": 4096,
+  "max_drops": 1000,
+  "batch_iterations": 311,
+  "simulation_seconds": 108.03517330001341,
+  "transitions": 675432,
+  "physics_frames": 97163272,
+  "env_steps_per_second": 6251.963868510925,
+  "physics_frames_per_second": 899367.0212401829,
+  "terminated_count": 4096,
+  "truncated_count": 0,
+  "settle_timeout_interval_count": 894,
+  "environments_with_settle_timeout_count": 787,
+  "capped_count": 0,
+  "all_step_counts": {
+    "count": 4096,
+    "mean": 164.900390625,
+    "min": 75.0,
+    "p25": 146.0,
+    "median": 161.0,
+    "p75": 180.0,
+    "p90": 204.0,
+    "p95": 217.0,
+    "max": 311.0
+  },
+  "all_scores": {
+    "count": 4096,
+    "mean": 1243.5810546875,
+    "min": 291.0,
+    "p25": 1018.0,
+    "median": 1197.0,
+    "p75": 1415.0,
+    "p90": 1700.5,
+    "p95": 1867.5,
+    "max": 2847.0
+  },
+  "peak_cuda_memory_mib": 74.40185546875,
+  "config": {
+    "physics_fps": 120,
+    "max_fruits": 128,
+    "max_physics_frames": 720,
+    "stable_frames": 15,
+    "solver_iterations": 4,
+    "kinematic_rest_frames": 4,
+    "kinematic_rest_displacement_epsilon": 0.1,
+    "drop_fast_forward": false
+  }
+}

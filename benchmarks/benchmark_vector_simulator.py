@@ -23,16 +23,26 @@ def parse_args():
     parser.add_argument('--steps', type=int, default=20)
     parser.add_argument('--warmup-steps', type=int, default=2)
     parser.add_argument('--max-fruits', type=int, default=64)
+    parser.add_argument('--physics-fps', type=int, default=120)
+    parser.add_argument('--max-physics-frames', type=int, default=720)
+    parser.add_argument('--stable-frames', type=int, default=15)
     parser.add_argument('--solver-iterations', type=int, default=4)
+    parser.add_argument('--drop-fast-forward', action='store_true')
     parser.add_argument('--kinematic-rest-frames', type=int, default=4)
     parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=20260804)
     parser.add_argument('--device', default='cuda')
+    parser.add_argument('--output', type=Path)
     return parser.parse_args()
 
 
 def run_steps(simulator, steps, generator):
     total_frames = torch.zeros((), dtype=torch.int64, device=simulator.device)
+    total_fast_forwarded = torch.zeros_like(total_frames)
+    total_merges = torch.zeros_like(total_frames)
+    total_stable = torch.zeros_like(total_frames)
+    total_settle_timeouts = torch.zeros_like(total_frames)
+    total_done = torch.zeros_like(total_frames)
     reset_count = 0
     for _ in range(steps):
         actions = torch.randint(
@@ -44,11 +54,28 @@ def run_steps(simulator, steps, generator):
         )
         result = simulator.step(actions)
         total_frames += result.physics.frames_simulated.sum()
+        if result.physics.fast_forwarded_frames is not None:
+            total_fast_forwarded += (
+                result.physics.fast_forwarded_frames.sum()
+            )
+        total_merges += result.physics.merge_events.count.sum()
+        total_stable += result.physics.stable.sum()
+        if result.physics.settle_timeout is not None:
+            total_settle_timeouts += result.physics.settle_timeout.sum()
+        total_done += result.physics.done.sum()
         reset_mask = result.physics.done | result.physics.truncated
         if bool(reset_mask.any().item()):
             reset_count += int(reset_mask.sum().item())
             simulator.reset(reset_mask)
-    return total_frames, reset_count
+    return {
+        'physics_frames': total_frames,
+        'fast_forwarded_frames': total_fast_forwarded,
+        'merge_events': total_merges,
+        'stable_intervals': total_stable,
+        'settle_timeout_intervals': total_settle_timeouts,
+        'done_intervals': total_done,
+        'reset_count': reset_count,
+    }
 
 
 def main():
@@ -58,7 +85,11 @@ def main():
 
     config = SimulatorConfig(
         max_fruits=args.max_fruits,
+        physics_fps=args.physics_fps,
+        max_physics_frames=args.max_physics_frames,
+        stable_frames=args.stable_frames,
         solver_iterations=args.solver_iterations,
+        drop_fast_forward=args.drop_fast_forward,
         kinematic_rest_frames=args.kinematic_rest_frames,
         kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
     )
@@ -78,14 +109,20 @@ def main():
         torch.cuda.reset_peak_memory_stats(simulator.device)
 
     started = time.perf_counter()
-    total_frames, reset_count = run_steps(
+    totals = run_steps(
         simulator, args.steps, generator
     )
     if simulator.device.type == 'cuda':
         torch.cuda.synchronize(simulator.device)
     elapsed = time.perf_counter() - started
     transitions = args.num_envs * args.steps
+    total_frames = int(totals['physics_frames'].item())
+    fast_forwarded_frames = int(
+        totals['fast_forwarded_frames'].item()
+    )
+    executed_frames = total_frames - fast_forwarded_frames
     fruit_counts = simulator.active.sum(dim=1)
+    observation = simulator.observe()
     finite_state = bool(
         torch.isfinite(simulator.positions).all().item()
         and torch.isfinite(simulator.velocities).all().item()
@@ -97,11 +134,31 @@ def main():
         'transitions': transitions,
         'elapsed_seconds': elapsed,
         'env_steps_per_second': transitions / elapsed,
-        'physics_frames_per_second': int(total_frames.item()) / elapsed,
-        'resets': reset_count,
+        'semantic_physics_frames': total_frames,
+        'executed_physics_frames': executed_frames,
+        'fast_forwarded_frames': fast_forwarded_frames,
+        'fast_forward_ratio': (
+            fast_forwarded_frames / total_frames if total_frames else 0.0
+        ),
+        'semantic_physics_frames_per_second': total_frames / elapsed,
+        'physics_frames_per_second': total_frames / elapsed,
+        'executed_physics_frames_per_second': executed_frames / elapsed,
+        'semantic_frames_per_transition': total_frames / transitions,
+        'executed_frames_per_transition': executed_frames / transitions,
+        'merge_events': int(totals['merge_events'].item()),
+        'merge_events_per_transition': (
+            int(totals['merge_events'].item()) / transitions
+        ),
+        'stable_interval_count': int(totals['stable_intervals'].item()),
+        'settle_timeout_interval_count': int(
+            totals['settle_timeout_intervals'].item()
+        ),
+        'done_interval_count': int(totals['done_intervals'].item()),
+        'resets': totals['reset_count'],
         'mean_live_fruits': float(fruit_counts.float().mean().item()),
         'max_live_fruits': int(fruit_counts.max().item()),
         'mean_score': float(simulator.score.float().mean().item()),
+        'mean_max_height': float(observation.max_height.mean().item()),
         'finite_state': finite_state,
         'peak_cuda_memory_mib': (
             torch.cuda.max_memory_allocated(simulator.device) / 1024 ** 2
@@ -111,15 +168,21 @@ def main():
         'config': {
             'max_fruits': config.max_fruits,
             'solver_iterations': config.solver_iterations,
+            'drop_fast_forward': config.drop_fast_forward,
             'kinematic_rest_frames': config.kinematic_rest_frames,
             'kinematic_rest_displacement_epsilon': (
                 config.kinematic_rest_displacement_epsilon
             ),
             'max_physics_frames': config.max_physics_frames,
             'stable_frames': config.stable_frames,
+            'physics_fps': config.physics_fps,
         },
     }
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+    rendered = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered, encoding='utf-8')
+    print(rendered)
     if not finite_state:
         raise RuntimeError('benchmark detected non-finite simulator state')
 

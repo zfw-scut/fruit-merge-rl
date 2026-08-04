@@ -1,0 +1,64 @@
+{
+  "date": "2026-08-04",
+  "device": "RTX 4070 Laptop GPU",
+  "python_environment": "python-torch",
+  "common": {
+    "num_envs": 4096,
+    "seed": 20260804,
+    "max_fruits": 128,
+    "solver_iterations": 4
+  },
+  "short_4096x100": {
+    "baseline_120": {
+      "source": "baseline_120_current.json",
+      "env_steps_per_second": 13311.347381243291,
+      "relative_throughput": 1.0
+    },
+    "high_fidelity_120_skip": {
+      "source": "high_fidelity_120_skip.json",
+      "env_steps_per_second": 17842.487617062296,
+      "relative_throughput": 1.3403968137893936,
+      "fast_forward_ratio": 0.47959249446615637
+    },
+    "training_fast_30_skip": {
+      "source": "fast_30_skip.json",
+      "env_steps_per_second": 30864.75756488252,
+      "relative_throughput": 2.3186801967450214,
+      "fast_forward_ratio": 0.254344893008215
+    },
+    "rejected_solver2": {
+      "source": "experimental_30_skip_solver2.json",
+      "env_steps_per_second": 47769.68685167716,
+      "relative_throughput": 3.588643995497278,
+      "reason": "等待超时率和得分、合成、堆叠分布偏移过大"
+    }
+  },
+  "full_4096_episodes": {
+    "baseline_120": {
+      "source": "baseline_long.json",
+      "env_steps_per_second": 6251.963868510925,
+      "mean_drops": 164.900390625,
+      "mean_score": 1243.5810546875
+    },
+    "high_fidelity_120_skip": {
+      "source": "high_fidelity_120_skip_long.json",
+      "env_steps_per_second": 7392.809902671825,
+      "throughput_gain_percent": 18.24780274094295,
+      "mean_drops": 170.61865234375,
+      "mean_score": 1304.443603515625
+    },
+    "training_fast_30_skip": {
+      "source": "fast_30_skip_long.json",
+      "env_steps_per_second": 8007.836361952138,
+      "throughput_gain_percent": 28.08513501309504,
+      "mean_drops": 264.68896484375,
+      "mean_score": 2445.853515625,
+      "distribution_note": "30 FPS 离散语义导致局长和得分分布明显改变"
+    }
+  },
+  "decision": {
+    "default": "保持 120 FPS 且禁用快进",
+    "recommended_conservative_training": "SimulatorConfig.high_fidelity_fast()",
+    "maximum_throughput_opt_in": "SimulatorConfig.training_fast()"
+  }
+}

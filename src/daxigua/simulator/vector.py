@@ -414,6 +414,89 @@ class TensorVectorSimulator:
         self._last_drop_id.copy_(fruit_id)
         self._last_queue_after.copy_(self.fruit_queue)
 
+    def _drop_fast_forward_eligibility(self):
+        """判断投放前各环境能否安全跳过新水果的无碰撞下落。"""
+
+        if not self.config.drop_fast_forward:
+            return torch.zeros_like(self.needs_reset)
+        stable_linear = self.velocities.square().sum(dim=-1) <= (
+            self.config.stable_velocity_epsilon ** 2
+        )
+        stable_angular = self.angular_velocities.abs() <= (
+            self.config.stable_angular_velocity_epsilon
+        )
+        all_stable = ((stable_linear & stable_angular) | ~self.active).all(dim=1)
+        # 投放后，原来的最新水果也会参与顶线失败计时。该情况下跳帧会
+        # 漏掉 fail_frames 的逐帧演化，因此保守地退回完整模拟。
+        clear_of_danger_line = ~(
+            self.active
+            & (self.positions[..., 1] < float(self.config.spawn_y))
+        ).any(dim=1)
+        return all_stable & clear_of_danger_line
+
+    def _fast_forward_new_drop(self, eligible):
+        """把新水果推进到首次接触前一帧，返回跳过的语义帧数。"""
+
+        skipped = torch.zeros_like(self.score)
+        if not self.config.drop_fast_forward or not bool(eligible.any().item()):
+            return skipped
+
+        new_mask = self.active & (
+            self.fruit_ids == self._last_drop_id[:, None]
+        )
+        new_slots = new_mask.to(torch.int8).argmax(dim=1)
+        env_ids = self._env_indices
+        drop_x = self.positions[env_ids, new_slots, 0]
+        drop_y = self.positions[env_ids, new_slots, 1]
+        drop_radius = self.physics_radii[env_ids, new_slots]
+        drop_velocity_y = self.velocities[env_ids, new_slots, 1]
+
+        floor_contact_y = (
+            float(self.config.board_height - self.config.wall_width)
+            - drop_radius
+        )
+        dx = drop_x[:, None] - self.positions[..., 0]
+        radius_sum = drop_radius[:, None] + self.physics_radii
+        collision_mask = self.active & ~new_mask & (dx.abs() < radius_sum)
+        vertical_offset = (
+            radius_sum.square() - dx.square()
+        ).clamp_min(0.0).sqrt()
+        candidate_y = self.positions[..., 1] - vertical_offset
+        collision_mask &= candidate_y > drop_y[:, None]
+        candidate_y = torch.where(
+            collision_mask,
+            candidate_y,
+            torch.full_like(candidate_y, float('inf')),
+        )
+        contact_y = torch.minimum(floor_contact_y, candidate_y.min(dim=1).values)
+
+        dt = self.config.dt
+        frame_damping = float(self.config.damping) ** dt
+        advancing = eligible.clone()
+        for _ in range(self.config.max_physics_frames):
+            next_velocity_y = (
+                drop_velocity_y + self.config.gravity_y * dt
+            ) * frame_damping
+            next_y = drop_y + next_velocity_y * dt
+            can_skip = advancing & (next_y < contact_y)
+            drop_velocity_y = torch.where(
+                can_skip, next_velocity_y, drop_velocity_y
+            )
+            drop_y = torch.where(can_skip, next_y, drop_y)
+            skipped += can_skip.to(torch.int64)
+            advancing = can_skip
+            if not bool(advancing.any().item()):
+                break
+
+        self.positions[env_ids, new_slots, 1] = drop_y
+        self.velocities[env_ids, new_slots, 1] = drop_velocity_y
+        self.age_frames += self.active.to(torch.int64) * skipped[:, None]
+        self.physics_frame += skipped
+        self.fail_frames = torch.where(
+            skipped > 0, torch.zeros_like(self.fail_frames), self.fail_frames
+        )
+        return skipped
+
     def _integrate(self, running):
         active = self.active & running[:, None]
         active_float = active.to(self.float_dtype)
@@ -1160,6 +1243,7 @@ class TensorVectorSimulator:
         score_before = self.score.clone()
         self._clear_event_buffers()
         frames_simulated = torch.zeros_like(self.score)
+        fast_forwarded_frames = torch.zeros_like(self.score)
         stable_result = torch.zeros_like(self.terminated)
         done_result = torch.zeros_like(self.terminated)
         truncated_result = torch.zeros_like(self.terminated)
@@ -1248,6 +1332,7 @@ class TensorVectorSimulator:
             self._mass_table,
             self._merge_scores,
             frames_simulated,
+            fast_forwarded_frames,
             stable_result,
             done_result,
             truncated_result,
@@ -1278,6 +1363,7 @@ class TensorVectorSimulator:
             self.config.max_physics_frames,
             self.config.stable_frames,
             self.config.solver_iterations,
+            self.config.drop_fast_forward,
             self.config.kinematic_rest_frames,
             self.config.kinematic_rest_displacement_epsilon,
             self.config.gravity_y,
@@ -1306,6 +1392,7 @@ class TensorVectorSimulator:
             done=done_result,
             truncated=truncated_result,
             settle_timeout=settle_timeout_result,
+            fast_forwarded_frames=fast_forwarded_frames,
             score_delta=self.score - score_before,
             merge_events=self._merge_event_view(),
         )
@@ -1355,12 +1442,15 @@ class TensorVectorSimulator:
             return self._step_cuda_extension(actions)
         score_before = self.score.clone()
         self._clear_event_buffers()
+        fast_forward_eligible = self._drop_fast_forward_eligibility()
         self._drop(actions)
 
-        running = torch.ones(
-            self.num_envs, dtype=torch.bool, device=self.device
+        fast_forwarded_frames = self._fast_forward_new_drop(
+            fast_forward_eligible
         )
-        frames_simulated = torch.zeros_like(self.score)
+        frames_simulated = fast_forwarded_frames.clone()
+        running = frames_simulated < self.config.max_physics_frames
+        budget_exhausted = ~running
         stable_count = torch.zeros_like(self.score)
         kinematic_quiet_count = torch.zeros_like(self.levels)
         stable_result = torch.zeros_like(running)
@@ -1398,6 +1488,12 @@ class TensorVectorSimulator:
             stable_result |= newly_stable
             running &= ~newly_stable
 
+            newly_exhausted = running & (
+                frames_simulated >= self.config.max_physics_frames
+            )
+            budget_exhausted |= newly_exhausted
+            running &= ~newly_exhausted
+
             should_sync = (
                 (frame_index + 1) % self.config.sync_interval_frames == 0
                 or frame_index + 1 == self.config.max_physics_frames
@@ -1405,7 +1501,7 @@ class TensorVectorSimulator:
             if should_sync and not bool(running.any().item()):
                 break
 
-        settle_timeout = running
+        settle_timeout = budget_exhausted
         truncated = torch.zeros_like(running)
         self.terminated = done_result
         self.needs_reset = done_result | truncated
@@ -1415,6 +1511,7 @@ class TensorVectorSimulator:
             done=done_result,
             truncated=truncated,
             settle_timeout=settle_timeout,
+            fast_forwarded_frames=fast_forwarded_frames,
             score_delta=self.score - score_before,
             merge_events=self._merge_event_view(),
         )

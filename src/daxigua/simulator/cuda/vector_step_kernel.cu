@@ -301,6 +301,7 @@ __global__ void vector_step_kernel(
     const float* mass_table,
     const long long* merge_scores,
     long long* frames_simulated,
+    long long* fast_forwarded_frames,
     bool* stable_result,
     bool* done_result,
     bool* truncated_result,
@@ -332,6 +333,7 @@ __global__ void vector_step_kernel(
     int max_physics_frames,
     int stable_frames,
     int solver_iterations,
+    bool drop_fast_forward,
     int kinematic_rest_frames,
     float kinematic_rest_displacement_epsilon,
     float gravity_y,
@@ -364,16 +366,32 @@ __global__ void vector_step_kernel(
   long long score_before = score[env];
   event_count[env] = 0;
   frames_simulated[env] = 0;
+  fast_forwarded_frames[env] = 0;
   stable_result[env] = false;
   done_result[env] = false;
   truncated_result[env] = false;
 
   int free_slot = -1;
+  bool fast_forward_eligible = drop_fast_forward;
   int active_slot_upper_bound = 0;
   for (int slot = 0; slot < max_fruits; ++slot) {
-    if (!active[state.slot_index(slot)]) {
-      free_slot = slot;
-      break;
+    int index = state.slot_index(slot);
+    if (!active[index]) {
+      if (free_slot < 0) {
+        free_slot = slot;
+        if (!drop_fast_forward) break;
+      }
+      continue;
+    }
+    if (drop_fast_forward) {
+      Vec2 velocity = state.velocity(slot);
+      if (dot(velocity, velocity)
+              > stable_velocity_epsilon * stable_velocity_epsilon
+          || fabsf(angular_velocities[index])
+              > stable_angular_velocity_epsilon
+          || state.position(slot).y < static_cast<float>(spawn_y)) {
+        fast_forward_eligible = false;
+      }
     }
   }
   if (free_slot < 0) {
@@ -447,9 +465,63 @@ __global__ void vector_step_kernel(
   const float stable_velocity_squared =
       stable_velocity_epsilon * stable_velocity_epsilon;
   int consecutive_stable = 0;
-  bool running = true;
+  int skipped_frames = 0;
+  if (fast_forward_eligible) {
+    float contact_y = static_cast<float>(board_height - wall_width)
+        - drop_radius;
+    for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
+      int index = state.slot_index(slot);
+      if (!active[index] || slot == free_slot) continue;
+      Vec2 other_position = state.position(slot);
+      float dx = drop_x - other_position.x;
+      float radius_sum = drop_radius + physics_radii[index];
+      if (fabsf(dx) >= radius_sum) continue;
+      float vertical_offset = sqrtf(fmaxf(
+          radius_sum * radius_sum - dx * dx, 0.0f));
+      float candidate_y = other_position.y - vertical_offset;
+      if (candidate_y > static_cast<float>(spawn_y)
+          && candidate_y < contact_y) {
+        contact_y = candidate_y;
+      }
+    }
 
-  for (int frame = 0; frame < max_physics_frames && running; ++frame) {
+    Vec2 drop_position = state.position(free_slot);
+    Vec2 drop_velocity = state.velocity(free_slot);
+    while (skipped_frames < max_physics_frames) {
+      float next_velocity_y =
+          (drop_velocity.y + gravity_y * dt) * frame_damping;
+      float next_y = drop_position.y + next_velocity_y * dt;
+      if (next_y >= contact_y) break;
+      drop_velocity.y = next_velocity_y;
+      drop_position.y = next_y;
+      ++skipped_frames;
+    }
+    state.set_position(free_slot, drop_position);
+    state.set_velocity(free_slot, drop_velocity);
+    for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
+      int index = state.slot_index(slot);
+      if (active[index]) age_frames[index] += skipped_frames;
+    }
+    physics_frame[env] += skipped_frames;
+    if (skipped_frames > 0) fail_frames[env] = 0;
+    frames_simulated[env] = skipped_frames;
+    fast_forwarded_frames[env] = skipped_frames;
+  }
+
+  int trace_record_index = 1;
+  if (skipped_frames > 0 && trace_row >= 0 && trace_row < trace_count) {
+    record_trace_frame(
+        state, trace_row, trace_record_index++, skipped_frames, trace_capacity,
+        trace_positions, trace_velocities, trace_angles,
+        trace_angular_velocities, trace_levels, trace_physics_radii,
+        trace_fruit_ids, trace_active, trace_scores, trace_merge_counts,
+        trace_frame_numbers, trace_record_counts, score[env], 0);
+  }
+  bool running = skipped_frames < max_physics_frames;
+
+  for (int frame = skipped_frames;
+       frame < max_physics_frames && running;
+       ++frame) {
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
       int index = state.slot_index(slot);
       if (!active[index]) continue;
@@ -659,10 +731,9 @@ __global__ void vector_step_kernel(
       bool trace_interval = completed_frames % trace_stride == 0;
       if (trace_interval || !running
           || completed_frames == max_physics_frames) {
-        int record_index =
-            (completed_frames + trace_stride - 1) / trace_stride;
         record_trace_frame(
-            state, trace_row, record_index, completed_frames, trace_capacity,
+            state, trace_row, trace_record_index++, completed_frames,
+            trace_capacity,
             trace_positions, trace_velocities, trace_angles,
             trace_angular_velocities, trace_levels, trace_physics_radii,
             trace_fruit_ids, trace_active, trace_scores, trace_merge_counts,
@@ -725,6 +796,7 @@ void vector_step_cuda(
     torch::Tensor mass_table,
     torch::Tensor merge_scores,
     torch::Tensor frames_simulated,
+    torch::Tensor fast_forwarded_frames,
     torch::Tensor stable_result,
     torch::Tensor done_result,
     torch::Tensor truncated_result,
@@ -755,6 +827,7 @@ void vector_step_cuda(
     int64_t max_physics_frames,
     int64_t stable_frames,
     int64_t solver_iterations,
+    bool drop_fast_forward,
     int64_t kinematic_rest_frames,
     double kinematic_rest_displacement_epsilon,
     double gravity_y,
@@ -799,7 +872,8 @@ void vector_step_cuda(
       event_new_fruit_ids.data_ptr<long long>(), display_radii.data_ptr<float>(),
       dropped_radii.data_ptr<float>(), merged_radii.data_ptr<float>(),
       mass_table.data_ptr<float>(), merge_scores.data_ptr<long long>(),
-      frames_simulated.data_ptr<long long>(), stable_result.data_ptr<bool>(),
+      frames_simulated.data_ptr<long long>(),
+      fast_forwarded_frames.data_ptr<long long>(), stable_result.data_ptr<bool>(),
       done_result.data_ptr<bool>(), truncated_result.data_ptr<bool>(),
       trace_rows.data_ptr<long long>(), trace_positions.data_ptr<float>(),
       trace_velocities.data_ptr<float>(), trace_angles.data_ptr<float>(),
@@ -819,6 +893,7 @@ void vector_step_cuda(
       static_cast<int>(queue_length), static_cast<int>(physics_fps),
       static_cast<int>(max_physics_frames), static_cast<int>(stable_frames),
       static_cast<int>(solver_iterations),
+      drop_fast_forward,
       static_cast<int>(kinematic_rest_frames),
       static_cast<float>(kinematic_rest_displacement_epsilon),
       static_cast<float>(gravity_y),

@@ -31,8 +31,11 @@ def parse_args():
     parser.add_argument('--max-drops', type=int, default=1000)
     parser.add_argument('--seed', type=int, default=20260804)
     parser.add_argument('--max-fruits', type=int, default=64)
+    parser.add_argument('--physics-fps', type=int, default=120)
     parser.add_argument('--max-physics-frames', type=int, default=720)
+    parser.add_argument('--stable-frames', type=int, default=15)
     parser.add_argument('--solver-iterations', type=int, default=4)
+    parser.add_argument('--drop-fast-forward', action='store_true')
     parser.add_argument('--kinematic-rest-frames', type=int, default=4)
     parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
     parser.add_argument('--progress-every', type=int, default=50)
@@ -524,8 +527,11 @@ def main():
 
     config = SimulatorConfig(
         max_fruits=args.max_fruits,
+        physics_fps=args.physics_fps,
         max_physics_frames=args.max_physics_frames,
+        stable_frames=args.stable_frames,
         solver_iterations=args.solver_iterations,
+        drop_fast_forward=args.drop_fast_forward,
         kinematic_rest_frames=args.kinematic_rest_frames,
         kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
     )
@@ -547,6 +553,7 @@ def main():
     total_physics_frames = torch.zeros(
         (), dtype=torch.int64, device=simulator.device
     )
+    total_fast_forwarded_frames = torch.zeros_like(total_physics_frames)
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats(simulator.device)
@@ -564,6 +571,9 @@ def main():
         )
         result = simulator.step_masked(actions, running)
         total_physics_frames += result.physics.frames_simulated.sum()
+        total_fast_forwarded_frames += (
+            result.physics.fast_forwarded_frames.sum()
+        )
         active_settle_timeout = running & result.physics.settle_timeout
         environments_with_settle_timeout |= active_settle_timeout
         settle_timeout_intervals += active_settle_timeout.sum()
@@ -595,6 +605,8 @@ def main():
     elapsed = time.perf_counter() - started
     transitions = int(simulator.step_count.sum().item())
     physics_frames = int(total_physics_frames.item())
+    fast_forwarded_frames = int(total_fast_forwarded_frames.item())
+    executed_physics_frames = physics_frames - fast_forwarded_frames
     capped = running
     step_counts = simulator.step_count
     scores = simulator.score
@@ -612,8 +624,22 @@ def main():
         'total_wall_seconds': extension_load_seconds + elapsed,
         'transitions': transitions,
         'physics_frames': physics_frames,
+        'semantic_physics_frames': physics_frames,
+        'executed_physics_frames': executed_physics_frames,
+        'fast_forwarded_frames': fast_forwarded_frames,
+        'fast_forward_ratio': (
+            fast_forwarded_frames / physics_frames if physics_frames else 0.0
+        ),
         'env_steps_per_second': transitions / elapsed,
         'physics_frames_per_second': physics_frames / elapsed,
+        'semantic_physics_frames_per_second': physics_frames / elapsed,
+        'executed_physics_frames_per_second': (
+            executed_physics_frames / elapsed
+        ),
+        'semantic_frames_per_transition': physics_frames / transitions,
+        'executed_frames_per_transition': (
+            executed_physics_frames / transitions
+        ),
         'terminated_count': int(terminated.sum().item()),
         'truncated_count': int(truncated.sum().item()),
         'settle_timeout_interval_count': int(
@@ -635,9 +661,11 @@ def main():
         ),
         'config': {
             'max_fruits': config.max_fruits,
+            'physics_fps': config.physics_fps,
             'max_physics_frames': config.max_physics_frames,
             'stable_frames': config.stable_frames,
             'solver_iterations': config.solver_iterations,
+            'drop_fast_forward': config.drop_fast_forward,
             'kinematic_rest_frames': config.kinematic_rest_frames,
             'kinematic_rest_displacement_epsilon': (
                 config.kinematic_rest_displacement_epsilon

@@ -24,6 +24,7 @@ class SimulatorConfig:
     max_physics_frames: int = 720
     stable_frames: int = 15
     solver_iterations: int = 4
+    drop_fast_forward: bool = False
 
     gravity_y: float = 1800.0
     damping: float = 0.995
@@ -97,8 +98,9 @@ class SimulatorConfig:
             raise ValueError('kinematic_rest_frames must be non-negative')
         if self.kinematic_rest_frames > 255:
             raise ValueError('kinematic_rest_frames must be <= 255')
-        if not isinstance(self.use_cuda_extension, bool):
-            raise TypeError('use_cuda_extension must be bool')
+        for name in ('drop_fast_forward', 'use_cuda_extension'):
+            if not isinstance(getattr(self, name), bool):
+                raise TypeError(f'{name} must be bool')
         if self.cuda_threads_per_block > 1024:
             raise ValueError('cuda_threads_per_block must be <= 1024')
 
@@ -133,3 +135,28 @@ class SimulatorConfig:
     @property
     def danger_frame_limit(self):
         return int(self.physics_fps * self.danger_seconds)
+
+    @classmethod
+    def training_fast(cls, **overrides):
+        """返回面向最大吞吐的大批量训练 30 FPS 配置。
+
+        物理等待和稳定时间按秒近似保持默认语义；精确的 120 FPS 配置
+        仍是默认值。30 FPS 会改变长期局长和得分分布，调用方应显式选择。
+        """
+
+        values = {
+            'physics_fps': 30,
+            'max_physics_frames': 180,
+            'stable_frames': 4,
+            'drop_fast_forward': True,
+        }
+        values.update(overrides)
+        return cls(**values)
+
+    @classmethod
+    def high_fidelity_fast(cls, **overrides):
+        """返回保留 120 FPS 离散语义、仅跳过自由下落的加速配置。"""
+
+        values = {'drop_fast_forward': True}
+        values.update(overrides)
+        return cls(**values)
