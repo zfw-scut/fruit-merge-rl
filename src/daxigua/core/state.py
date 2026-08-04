@@ -84,12 +84,13 @@ class ActionCandidate:
 class MergeEvent:
     """一次同级水果合成事件。"""
 
-    new_level: int
+    # 两颗西瓜合成后直接消失，因此没有新等级和新水果 ID。
+    new_level: int | None
     x: float
     y: float
     score_delta: int
     source_ids: tuple
-    new_fruit_id: int
+    new_fruit_id: int | None
 
 
 @dataclass(frozen=True)
@@ -131,3 +132,5 @@ class PhysicsResult:
     truncated: bool
     score_delta: int
     merge_events: tuple = field(default_factory=tuple)
+    # 本次决策等待跑满上限但世界仍未稳定；这不是回合截断。
+    settle_timeout: bool = False

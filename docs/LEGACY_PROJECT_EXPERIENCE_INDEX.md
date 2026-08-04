@@ -62,7 +62,7 @@ git grep -n StateAnalyzer codex/work-1 -- src
 | 张量批训练 | `a2d2fb5` | `GraphBatch`、`TensorTransition` | 将多个图合并成一次 GPU 前向是正确方向。 |
 | 性能基线 | `7652538`、`81c511f813ed58a31815f674dfaff85feab622f8` | accurate/fast30 对比、并行/异步 rollout、profiling、TOML | 先测量、再优化；物理分布偏移必须与吞吐一起验证。 |
 | 因果设计规格 | `2487a2425ee77265a3f7256d6764176ab2f7cfa9` | 完整状态归因 V1 规格 | 规格覆盖面很广，但设计成立不能替代有效性和成本证据。 |
-| 正确性基线 | `1a95a3d9a47bc6774144061f05ef067098b43544` | 真实碰撞半径、连续稳定窗口、正确 truncated bootstrap | 这是 accelerated-v1 的共同基线；这些语义不得回退。 |
+| 正确性基线 | `1a95a3d9a47bc6774144061f05ef067098b43544` | 真实碰撞半径、连续稳定窗口、正确边界 bootstrap | 真实终止和技术截断仍需正确 bootstrap；物理等待上限现已单列为非边界 `settle_timeout`。 |
 | 状态塑形 | `87fab99`、`bf6aebe`、`2d48c58` | `StateAnalysis`、`StateAnalyzer`、Reward V2 | 去除存活/最高高度奖励是进步；每步重型静态分析和代理 potential 不应照搬。 |
 | 延迟归因 | `5772745`、`ca28394` | Tracker、谱系事件、确定性快照 | 事件谱系便于审计，但复杂状态机和逐步快照成本很高。 |
 | 完整因果训练 | `0cb070b`、`356263d`、`7e6cade` | Double DQN、3-step、因果 replay、反事实、局部 Shapley、恢复门禁 | 链路完整不等于有效长期监督；物理复现和资源门禁必须独立验证。 |
@@ -102,7 +102,8 @@ git grep -n StateAnalyzer codex/work-1 -- src
 
 - 水果等级、半径、合成分值属于稳定领域规则；
 - 显示半径和真实碰撞半径不能混用；
-- `terminated` 与物理 `truncated` 不能都当成禁止 bootstrap；
+- `terminated` 与技术 `truncated` 不能都当成禁止 bootstrap；物理等待上限
+  `settle_timeout` 不是回合边界，必须允许继续 bootstrap 和下一次投放；
 - 稳定状态必须满足连续稳定窗口，不能依赖最后一帧瞬时速度；
 - 游戏分值、环境 reward 和辅助监督必须分别记录。
 

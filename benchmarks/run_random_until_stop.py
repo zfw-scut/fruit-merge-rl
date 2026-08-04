@@ -1,0 +1,745 @@
+"""让一批 CUDA 环境随机投放，直到失败、技术截断或投放上限。"""
+
+import argparse
+from html import escape
+import json
+from pathlib import Path
+import sys
+import time
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SRC_DIR = PROJECT_ROOT / 'src'
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+import torch
+
+from daxigua.simulator import (
+    BatchSimulationTrace,
+    SimulatorConfig,
+    TensorVectorSimulator,
+    write_replay_html,
+)
+from daxigua.simulator.cuda_backend import load_cuda_extension
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--num-envs', type=int, default=4096)
+    parser.add_argument('--max-drops', type=int, default=1000)
+    parser.add_argument('--seed', type=int, default=20260804)
+    parser.add_argument('--max-fruits', type=int, default=64)
+    parser.add_argument('--max-physics-frames', type=int, default=720)
+    parser.add_argument('--solver-iterations', type=int, default=4)
+    parser.add_argument('--kinematic-rest-frames', type=int, default=4)
+    parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
+    parser.add_argument('--progress-every', type=int, default=50)
+    parser.add_argument('--replay-samples', type=int, default=0)
+    parser.add_argument('--replay-frame-stride', type=int, default=2)
+    parser.add_argument('--replay-tail-drops', type=int, default=5)
+    parser.add_argument(
+        '--replay-full-episodes', action='store_true'
+    )
+    parser.add_argument(
+        '--replay-output-dir',
+        type=Path,
+        default=(
+            PROJECT_ROOT / 'recordings' / 'random-4096-final-replays'
+        ),
+    )
+    parser.add_argument(
+        '--output',
+        type=Path,
+        default=PROJECT_ROOT / 'recordings' / 'random-4096-until-stop.json',
+    )
+    return parser.parse_args()
+
+
+def select_trace_row(
+        trace, row, original_env_index, *, record_count=None):
+    """提取单行追踪，并把复跑局部索引恢复成正式运行环境索引。"""
+
+    row_count = int(trace.env_indices.numel())
+    trace_capacity = int(trace.frame_numbers.shape[1])
+    if record_count is None:
+        record_count = int(trace.record_counts[row].item())
+    values = {}
+    for field_name in trace.__dataclass_fields__:
+        value = getattr(trace, field_name)
+        if (
+                isinstance(value, torch.Tensor)
+                and value.ndim
+                and value.shape[0] == row_count):
+            selected = value[row:row + 1]
+            if selected.ndim >= 2 and selected.shape[1] == trace_capacity:
+                selected = selected[:, :record_count]
+            values[field_name] = selected.detach().cpu().clone()
+        else:
+            values[field_name] = value
+    values['env_indices'] = torch.tensor(
+        [original_env_index], dtype=torch.int64
+    )
+    return BatchSimulationTrace(**values)
+
+
+def trim_trace_frames(trace, record_capacity):
+    """在复制到 CPU 前移除逐帧缓冲中未使用的尾部容量。"""
+
+    source_capacity = int(trace.frame_numbers.shape[1])
+    values = {}
+    for field_name in trace.__dataclass_fields__:
+        value = getattr(trace, field_name)
+        if (
+                isinstance(value, torch.Tensor)
+                and value.ndim >= 2
+                and value.shape[1] == source_capacity):
+            values[field_name] = value[:, :record_capacity]
+        else:
+            values[field_name] = value
+    return BatchSimulationTrace(**values).cpu()
+
+
+def combine_trace_rows(traces):
+    """把不同终局步的一行追踪组合成回放页的并列样本。"""
+
+    if not traces:
+        raise ValueError('traces must not be empty')
+    values = {}
+    for field_name in traces[0].__dataclass_fields__:
+        first = getattr(traces[0], field_name)
+        if isinstance(first, torch.Tensor) and first.ndim:
+            values[field_name] = torch.cat(
+                [getattr(trace, field_name) for trace in traces], dim=0
+            )
+        else:
+            values[field_name] = first
+    return BatchSimulationTrace(**values)
+
+
+def replay_final_steps(args, config, sampled_envs, terminal_metadata):
+    """以正式运行的 RNG/动作流确定性复现抽样环境的最后一次投放。"""
+
+    sample_count = len(sampled_envs)
+    device = torch.device('cuda')
+    local_simulator = TensorVectorSimulator(
+        sample_count, config=config, device=device
+    )
+    original_env_tensor = torch.tensor(
+        sampled_envs, dtype=torch.int64, device=device
+    )
+    seed_values = (
+        args.seed
+        + original_env_tensor * local_simulator._SEED_STRIDE
+    ) & local_simulator._RNG_MASK
+    local_simulator.reset(seeds=seed_values)
+
+    target_steps = torch.tensor(
+        [terminal_metadata[index]['step_count'] for index in sampled_envs],
+        dtype=torch.int64,
+        device=device,
+    )
+    replay_running = torch.ones(
+        sample_count, dtype=torch.bool, device=device
+    )
+    action_generator = torch.Generator(device=device)
+    action_generator.manual_seed(args.seed)
+    tail_drops = min(
+        args.replay_tail_drops, int(target_steps.min().item())
+    )
+    traces_by_original_env = {
+        original_index: [] for original_index in sampled_envs
+    }
+
+    for drop_index in range(int(target_steps.max().item())):
+        original_actions = torch.randint(
+            config.action_count,
+            (args.num_envs,),
+            dtype=torch.int64,
+            device=device,
+            generator=action_generator,
+        )
+        local_actions = original_actions[original_env_tensor]
+        current_drop = drop_index + 1
+        capture_indices = torch.nonzero(
+            replay_running
+            & (current_drop > target_steps - tail_drops)
+            & (current_drop <= target_steps),
+            as_tuple=False,
+        ).flatten()
+        if capture_indices.numel():
+            result, trace = local_simulator.step_masked_with_trace(
+                local_actions,
+                replay_running,
+                capture_indices,
+                frame_stride=args.replay_frame_stride,
+            )
+            record_counts = trace.record_counts.cpu().tolist()
+            trace = trim_trace_frames(trace, max(record_counts))
+            for trace_row, local_index in enumerate(
+                    capture_indices.cpu().tolist()):
+                original_index = sampled_envs[local_index]
+                traces_by_original_env[original_index].append(
+                    select_trace_row(
+                        trace,
+                        trace_row,
+                        original_index,
+                        record_count=record_counts[trace_row],
+                    )
+                )
+        else:
+            result = local_simulator.step_masked(
+                local_actions, replay_running
+            )
+
+        reached_target = replay_running & (
+            local_simulator.step_count >= target_steps
+        )
+        replay_running &= ~reached_target
+
+    replay_step_counts = local_simulator.step_count.cpu().tolist()
+    replay_scores = local_simulator.score.cpu().tolist()
+    replay_done = local_simulator.terminated.cpu().tolist()
+    replay_needs_reset = local_simulator.needs_reset.cpu().tolist()
+    for local_index, original_index in enumerate(sampled_envs):
+        expected = terminal_metadata[original_index]
+        actual_kind = (
+            'terminated'
+            if replay_done[local_index]
+            else (
+                'truncated'
+                if replay_needs_reset[local_index]
+                else 'capped'
+            )
+        )
+        if replay_step_counts[local_index] != expected['step_count']:
+            raise RuntimeError(
+                f'replay step mismatch for environment {original_index}'
+            )
+        if replay_scores[local_index] != expected['score']:
+            raise RuntimeError(
+                f'replay score mismatch for environment {original_index}'
+            )
+        if actual_kind != expected['end_kind']:
+            raise RuntimeError(
+                f'replay boundary mismatch for environment {original_index}'
+            )
+        if len(traces_by_original_env[original_index]) != tail_drops:
+            raise RuntimeError(
+                f'missing tail traces for environment {original_index}'
+            )
+
+    args.replay_output_dir.mkdir(parents=True, exist_ok=True)
+    ordered_trace_sequences = [
+        traces_by_original_env[index] for index in sampled_envs
+    ]
+    combined_trace_sequence = tuple(
+        combine_trace_rows([
+            traces_by_original_env[index][tail_index]
+            for index in sampled_envs
+        ])
+        for tail_index in range(tail_drops)
+    )
+    combined_name = f'final-steps-{sample_count}'
+    combined_path = write_replay_html(
+        args.replay_output_dir / f'{combined_name}.html',
+        combined_trace_sequence,
+        config,
+        title=(
+            f'{args.num_envs} 环境随机长局：{sample_count} 个终局前 '
+            f'{tail_drops} 次投放回放'
+        ),
+    )
+    torch.save(
+        {
+            'format_version': 3,
+            'steps': [
+                {
+                    name: getattr(step_trace, name)
+                    for name in step_trace.__dataclass_fields__
+                }
+                for step_trace in combined_trace_sequence
+            ],
+        },
+        args.replay_output_dir / f'{combined_name}.pt',
+    )
+
+    replay_entries = []
+    for original_index, traces in zip(
+            sampled_envs, ordered_trace_sequences):
+        metadata = terminal_metadata[original_index]
+        html_path = write_replay_html(
+            args.replay_output_dir / f'env-{original_index}-final-step.html',
+            tuple(traces),
+            config,
+            title=(
+                f'环境 {original_index} 失败前 {tail_drops} 次投放'
+            ),
+        )
+        replay_frames = sum(
+            int(trace.frame_numbers[
+                0, int(trace.record_counts[0]) - 1
+            ])
+            for trace in traces
+        )
+        replay_entries.append({
+            'env_index': original_index,
+            **metadata,
+            'drops_in_replay': tail_drops,
+            'frames_in_replay': replay_frames,
+            'replay': str(html_path.resolve()),
+        })
+
+    manifest = {
+        'seed': args.seed,
+        'source_num_envs': args.num_envs,
+        'sample_count': sample_count,
+        'frame_stride': args.replay_frame_stride,
+        'selection': 'fixed-seed uniform sample after formal run',
+        'scope': (
+            f'final {tail_drops} decision intervals before termination '
+            'or drop cap'
+        ),
+        'combined_replay': str(combined_path.resolve()),
+        'combined_trace': str(
+            (args.replay_output_dir / f'{combined_name}.pt').resolve()
+        ),
+        'replays': replay_entries,
+    }
+    manifest_path = args.replay_output_dir / 'manifest.json'
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    return manifest, manifest_path
+
+
+def write_full_replay_index(path, entries, source_num_envs):
+    """生成轻量索引页，避免一次载入 20 条完整局导致浏览器卡顿。"""
+
+    rows = []
+    for entry in entries:
+        replay_name = Path(entry['replay']).name
+        rows.append(
+            '<tr>'
+            f'<td>{entry["env_index"]}</td>'
+            f'<td>{entry["step_count"]}</td>'
+            f'<td>{entry["score"]}</td>'
+            f'<td>{entry["physics_frames_in_replay"]}</td>'
+            f'<td><a href="{escape(replay_name)}">打开完整一局</a></td>'
+            '</tr>'
+        )
+    html = f'''<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{source_num_envs} 环境测试：20 条完整局回放</title>
+<style>
+:root{{color-scheme:light dark;font-family:system-ui,"Segoe UI",sans-serif}}
+body{{max-width:980px;margin:auto;padding:24px;line-height:1.5}}
+table{{width:100%;border-collapse:collapse;margin-top:18px}}
+th,td{{padding:9px 12px;border-bottom:1px solid #7776;text-align:right}}
+th:first-child,td:first-child{{text-align:left}}a{{font-weight:600}}
+</style></head><body>
+<h1>{source_num_envs} 环境随机测试：20 条完整局回放</h1>
+<p>每条均从第 1 次投放记录到危险线失败；每 2 个物理帧采样一次。</p>
+<table><thead><tr><th>环境</th><th>投放次数</th><th>最终分数</th>
+<th>回放物理帧</th><th>回放</th></tr></thead><tbody>
+{''.join(rows)}
+</tbody></table></body></html>'''
+    output_path = Path(path)
+    output_path.write_text(html, encoding='utf-8')
+    return output_path
+
+
+def replay_full_episodes(args, config, sampled_envs, terminal_metadata):
+    """确定性复跑并分别保存抽样环境从首次投放到结束的完整一局。"""
+
+    sample_count = len(sampled_envs)
+    device = torch.device('cuda')
+    local_simulator = TensorVectorSimulator(
+        sample_count, config=config, device=device
+    )
+    original_env_tensor = torch.tensor(
+        sampled_envs, dtype=torch.int64, device=device
+    )
+    seed_values = (
+        args.seed
+        + original_env_tensor * local_simulator._SEED_STRIDE
+    ) & local_simulator._RNG_MASK
+    local_simulator.reset(seeds=seed_values)
+    target_steps = torch.tensor(
+        [terminal_metadata[index]['step_count'] for index in sampled_envs],
+        dtype=torch.int64,
+        device=device,
+    )
+    replay_running = torch.ones(
+        sample_count, dtype=torch.bool, device=device
+    )
+    action_generator = torch.Generator(device=device)
+    action_generator.manual_seed(args.seed)
+    trace_sequences = {index: [] for index in sampled_envs}
+    entries_by_env = {}
+    args.replay_output_dir.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+
+    for drop_index in range(int(target_steps.max().item())):
+        original_actions = torch.randint(
+            config.action_count,
+            (args.num_envs,),
+            dtype=torch.int64,
+            device=device,
+            generator=action_generator,
+        )
+        local_actions = original_actions[original_env_tensor]
+        capture_indices = torch.nonzero(
+            replay_running, as_tuple=False
+        ).flatten()
+        result, trace = local_simulator.step_masked_with_trace(
+            local_actions,
+            replay_running,
+            capture_indices,
+            frame_stride=args.replay_frame_stride,
+        )
+        record_counts = trace.record_counts.cpu().tolist()
+        trace = trim_trace_frames(trace, max(record_counts))
+        capture_list = capture_indices.cpu().tolist()
+        for trace_row, local_index in enumerate(capture_list):
+            original_index = sampled_envs[local_index]
+            trace_sequences[original_index].append(
+                select_trace_row(
+                    trace,
+                    trace_row,
+                    original_index,
+                    record_count=record_counts[trace_row],
+                )
+            )
+
+        reached_target = replay_running & (
+            local_simulator.step_count >= target_steps
+        )
+        reached_list = torch.nonzero(
+            reached_target, as_tuple=False
+        ).flatten().cpu().tolist()
+        for local_index in reached_list:
+            original_index = sampled_envs[local_index]
+            expected = terminal_metadata[original_index]
+            actual_score = int(local_simulator.score[local_index].item())
+            actual_done = bool(
+                local_simulator.terminated[local_index].item()
+            )
+            actual_needs_reset = bool(
+                local_simulator.needs_reset[local_index].item()
+            )
+            actual_kind = (
+                'terminated'
+                if actual_done
+                else ('truncated' if actual_needs_reset else 'capped')
+            )
+            if actual_score != expected['score']:
+                raise RuntimeError(
+                    f'replay score mismatch for environment {original_index}'
+                )
+            if actual_kind != expected['end_kind']:
+                raise RuntimeError(
+                    f'replay boundary mismatch for environment {original_index}'
+                )
+
+            sequence = tuple(trace_sequences[original_index])
+            if len(sequence) != expected['step_count']:
+                raise RuntimeError(
+                    f'replay length mismatch for environment {original_index}'
+                )
+            html_path = args.replay_output_dir / (
+                f'env-{original_index}-full-episode.html'
+            )
+            trace_path = args.replay_output_dir / (
+                f'env-{original_index}-full-episode.pt'
+            )
+            write_replay_html(
+                html_path,
+                sequence,
+                config,
+                title=(
+                    f'环境 {original_index} 完整一局：'
+                    f'{expected["step_count"]} 次投放'
+                ),
+            )
+            torch.save(
+                {
+                    'format_version': 3,
+                    'steps': [
+                        {
+                            name: getattr(step_trace, name)
+                            for name in step_trace.__dataclass_fields__
+                        }
+                        for step_trace in sequence
+                    ],
+                },
+                trace_path,
+            )
+            physics_frames = sum(
+                int(step_trace.frame_numbers[
+                    0, int(step_trace.record_counts[0]) - 1
+                ])
+                for step_trace in sequence
+            )
+            entries_by_env[original_index] = {
+                'env_index': original_index,
+                **expected,
+                'drops_in_replay': len(sequence),
+                'physics_frames_in_replay': physics_frames,
+                'replay': str(html_path.resolve()),
+                'trace': str(trace_path.resolve()),
+            }
+            trace_sequences[original_index] = []
+
+        replay_running &= ~reached_target
+        if (drop_index + 1) % 25 == 0:
+            print(json.dumps({
+                'replay_drop_iteration': drop_index + 1,
+                'replay_running': int(replay_running.sum().item()),
+                'replays_written': len(entries_by_env),
+                'elapsed_seconds': time.perf_counter() - started,
+            }, ensure_ascii=False), flush=True)
+
+    entries = [entries_by_env[index] for index in sampled_envs]
+    index_path = write_full_replay_index(
+        args.replay_output_dir / 'full-episodes-index.html',
+        entries,
+        args.num_envs,
+    )
+    manifest = {
+        'seed': args.seed,
+        'source_num_envs': args.num_envs,
+        'sample_count': sample_count,
+        'frame_stride': args.replay_frame_stride,
+        'selection': 'same fixed-seed sample as formal run',
+        'scope': 'complete episode from first drop through termination or cap',
+        'elapsed_seconds': time.perf_counter() - started,
+        'index': str(index_path.resolve()),
+        'replays': entries,
+    }
+    manifest_path = args.replay_output_dir / 'manifest.json'
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    return manifest, manifest_path
+
+
+def tensor_summary(values):
+    if values.numel() == 0:
+        return None
+    values = values.to(torch.float32)
+    quantiles = torch.quantile(
+        values,
+        torch.tensor(
+            [0.0, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0],
+            device=values.device,
+        ),
+    ).cpu().tolist()
+    return {
+        'count': int(values.numel()),
+        'mean': float(values.mean().item()),
+        'min': quantiles[0],
+        'p25': quantiles[1],
+        'median': quantiles[2],
+        'p75': quantiles[3],
+        'p90': quantiles[4],
+        'p95': quantiles[5],
+        'max': quantiles[6],
+    }
+
+
+def main():
+    args = parse_args()
+    if not torch.cuda.is_available():
+        raise RuntimeError('CUDA is not available')
+    if args.num_envs <= 0 or args.max_drops <= 0:
+        raise ValueError('num-envs and max-drops must be positive')
+    if args.replay_samples < 0 or args.replay_samples > args.num_envs:
+        raise ValueError('replay-samples must be in [0, num-envs]')
+    if args.replay_frame_stride <= 0:
+        raise ValueError('replay-frame-stride must be positive')
+    if args.replay_tail_drops <= 0:
+        raise ValueError('replay-tail-drops must be positive')
+
+    build_started = time.perf_counter()
+    load_cuda_extension()
+    torch.cuda.synchronize()
+    extension_load_seconds = time.perf_counter() - build_started
+
+    config = SimulatorConfig(
+        max_fruits=args.max_fruits,
+        max_physics_frames=args.max_physics_frames,
+        solver_iterations=args.solver_iterations,
+        kinematic_rest_frames=args.kinematic_rest_frames,
+        kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
+    )
+    simulator = TensorVectorSimulator(
+        args.num_envs, config=config, device='cuda'
+    )
+    simulator.reset(seeds=args.seed)
+    generator = torch.Generator(device=simulator.device)
+    generator.manual_seed(args.seed)
+    running = torch.ones(
+        args.num_envs, dtype=torch.bool, device=simulator.device
+    )
+    terminated = torch.zeros_like(running)
+    truncated = torch.zeros_like(running)
+    environments_with_settle_timeout = torch.zeros_like(running)
+    settle_timeout_intervals = torch.zeros(
+        (), dtype=torch.int64, device=simulator.device
+    )
+    total_physics_frames = torch.zeros(
+        (), dtype=torch.int64, device=simulator.device
+    )
+
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(simulator.device)
+    started = time.perf_counter()
+    iterations = 0
+    for drop_index in range(args.max_drops):
+        if drop_index and not bool(running.any().item()):
+            break
+        actions = torch.randint(
+            config.action_count,
+            (args.num_envs,),
+            dtype=torch.int64,
+            device=simulator.device,
+            generator=generator,
+        )
+        result = simulator.step_masked(actions, running)
+        total_physics_frames += result.physics.frames_simulated.sum()
+        active_settle_timeout = running & result.physics.settle_timeout
+        environments_with_settle_timeout |= active_settle_timeout
+        settle_timeout_intervals += active_settle_timeout.sum()
+        newly_terminated = running & result.physics.done
+        newly_truncated = running & result.physics.truncated
+        terminated |= newly_terminated
+        truncated |= newly_truncated
+        running &= ~(newly_terminated | newly_truncated)
+        iterations = drop_index + 1
+        if (
+                args.progress_every > 0
+                and iterations % args.progress_every == 0):
+            torch.cuda.synchronize()
+            print(
+                json.dumps({
+                    'drop_iteration': iterations,
+                    'running': int(running.sum().item()),
+                    'terminated': int(terminated.sum().item()),
+                    'truncated': int(truncated.sum().item()),
+                    'settle_timeout_intervals': int(
+                        settle_timeout_intervals.item()
+                    ),
+                    'elapsed_seconds': time.perf_counter() - started,
+                }, ensure_ascii=False),
+                flush=True,
+            )
+
+    torch.cuda.synchronize()
+    elapsed = time.perf_counter() - started
+    transitions = int(simulator.step_count.sum().item())
+    physics_frames = int(total_physics_frames.item())
+    capped = running
+    step_counts = simulator.step_count
+    scores = simulator.score
+    terminated_cpu = terminated.cpu()
+    truncated_cpu = truncated.cpu()
+    step_counts_cpu = step_counts.cpu()
+    scores_cpu = scores.cpu()
+    report = {
+        'device': str(simulator.device),
+        'num_envs': args.num_envs,
+        'max_drops': args.max_drops,
+        'batch_iterations': iterations,
+        'extension_load_seconds': extension_load_seconds,
+        'simulation_seconds': elapsed,
+        'total_wall_seconds': extension_load_seconds + elapsed,
+        'transitions': transitions,
+        'physics_frames': physics_frames,
+        'env_steps_per_second': transitions / elapsed,
+        'physics_frames_per_second': physics_frames / elapsed,
+        'terminated_count': int(terminated.sum().item()),
+        'truncated_count': int(truncated.sum().item()),
+        'settle_timeout_interval_count': int(
+            settle_timeout_intervals.item()
+        ),
+        'environments_with_settle_timeout_count': int(
+            environments_with_settle_timeout.sum().item()
+        ),
+        'capped_count': int(capped.sum().item()),
+        'all_step_counts': tensor_summary(step_counts),
+        'terminated_step_counts': tensor_summary(step_counts[terminated]),
+        'truncated_step_counts': tensor_summary(step_counts[truncated]),
+        'capped_step_counts': tensor_summary(step_counts[capped]),
+        'all_scores': tensor_summary(scores),
+        'terminated_scores': tensor_summary(scores[terminated]),
+        'capped_scores': tensor_summary(scores[capped]),
+        'peak_cuda_memory_mib': (
+            torch.cuda.max_memory_allocated(simulator.device) / 1024 ** 2
+        ),
+        'config': {
+            'max_fruits': config.max_fruits,
+            'max_physics_frames': config.max_physics_frames,
+            'stable_frames': config.stable_frames,
+            'solver_iterations': config.solver_iterations,
+            'kinematic_rest_frames': config.kinematic_rest_frames,
+            'kinematic_rest_displacement_epsilon': (
+                config.kinematic_rest_displacement_epsilon
+            ),
+        },
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+    if args.replay_samples:
+        selection_generator = torch.Generator(device='cpu')
+        selection_generator.manual_seed(args.seed ^ 0x5EED5EED)
+        sampled_envs = torch.randperm(
+            args.num_envs, generator=selection_generator
+        )[:args.replay_samples].tolist()
+        terminal_metadata = {}
+        for env_index in sampled_envs:
+            end_kind = (
+                'terminated'
+                if bool(terminated_cpu[env_index])
+                else (
+                    'truncated'
+                    if bool(truncated_cpu[env_index])
+                    else 'capped'
+                )
+            )
+            terminal_metadata[env_index] = {
+                'end_kind': end_kind,
+                'step_count': int(step_counts_cpu[env_index]),
+                'score': int(scores_cpu[env_index]),
+            }
+        replay_function = (
+            replay_full_episodes
+            if args.replay_full_episodes
+            else replay_final_steps
+        )
+        replay_manifest, manifest_path = replay_function(
+            args, config, sampled_envs, terminal_metadata
+        )
+        report['replay_manifest'] = str(manifest_path.resolve())
+        report['sampled_replay_envs'] = sampled_envs
+        args.output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8'
+        )
+        print(json.dumps({
+            'replay_manifest': str(manifest_path.resolve()),
+            'combined_replay': replay_manifest['combined_replay'],
+            'sampled_replay_envs': sampled_envs,
+        } if not args.replay_full_episodes else {
+            'replay_manifest': str(manifest_path.resolve()),
+            'full_episode_index': replay_manifest['index'],
+            'sampled_replay_envs': sampled_envs,
+        }, ensure_ascii=False, indent=2))
+
+
+if __name__ == '__main__':
+    main()
