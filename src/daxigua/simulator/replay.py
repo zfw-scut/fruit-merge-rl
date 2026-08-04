@@ -394,6 +394,12 @@ def write_replay_catalog(
                 entry.get('frames_in_replay', 0),
             )),
             'end_kind': str(entry.get('end_kind', 'unknown')),
+            'settle_timeout_count': int(
+                entry.get('settle_timeout_count', 0)
+            ),
+            'settle_timeout_rate': float(
+                entry.get('settle_timeout_rate', 0.0)
+            ),
             'href': _relative_replay_url(
                 entry['replay'], output_path.parent.resolve()
             ),

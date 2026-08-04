@@ -113,6 +113,8 @@ class ReplayFileTest(unittest.TestCase):
         self.assertEqual(html.count('data:image/png;base64,'), 11)
         self.assertIn('智能浏览（压缩长等待）', html)
         self.assertIn('下一合成', html)
+        self.assertIn('下一超时', html)
+        self.assertIn('jumpTimeout', html)
         self.assertIn('线速度向量', html)
         self.assertTrue(payload['compact_records'])
 
@@ -151,6 +153,8 @@ class ReplayFileTest(unittest.TestCase):
                     'score': 456,
                     'physics_frames_in_replay': 789,
                     'end_kind': 'terminated',
+                    'settle_timeout_count': 12,
+                    'settle_timeout_rate': 0.25,
                     'replay': replay_path,
                 }],
                 title='完整局目录',
@@ -160,6 +164,9 @@ class ReplayFileTest(unittest.TestCase):
         self.assertIn('sample%20replay.html', html)
         self.assertEqual(html.count('<iframe'), 1)
         self.assertIn('只加载一个长局回放', html)
+        self.assertIn('超时次数：多到少', html)
+        self.assertIn('超时 ${entry.settle_timeout_count} 次', html)
+        self.assertIn('"settle_timeout_count":12', html)
 
 
 if __name__ == '__main__':

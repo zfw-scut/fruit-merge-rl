@@ -1156,7 +1156,9 @@ class TensorVectorSimulator:
         trace_capacity = (
             (self.config.max_physics_frames + frame_stride - 1)
             // frame_stride
-            + 1
+            # 初始帧 + 快进落点帧 + 周期/最终采样。未快进时会多留一格，
+            # 避免热路径为不同环境计算可变容量。
+            + 2
         )
         fruit_shape = (
             trace_count,

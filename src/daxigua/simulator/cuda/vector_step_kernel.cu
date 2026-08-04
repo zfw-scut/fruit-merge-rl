@@ -232,6 +232,7 @@ __device__ inline void record_trace_frame(
     long long* trace_record_counts,
     long long score,
     long long merge_count) {
+  if (record_index < 0 || record_index >= trace_capacity) return;
   int frame_index = trace_row * trace_capacity + record_index;
   int fruit_base = frame_index * state.capacity;
   for (int slot = 0; slot < state.capacity; ++slot) {

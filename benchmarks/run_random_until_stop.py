@@ -40,6 +40,11 @@ def parse_args():
     parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
     parser.add_argument('--progress-every', type=int, default=50)
     parser.add_argument('--replay-samples', type=int, default=0)
+    parser.add_argument(
+        '--replay-selection',
+        choices=('uniform', 'most-timeouts', 'timeout-rate-stratified'),
+        default='uniform',
+    )
     parser.add_argument('--replay-frame-stride', type=int, default=2)
     parser.add_argument('--replay-tail-drops', type=int, default=5)
     parser.add_argument(
@@ -53,11 +58,67 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        '--replay-from-plan',
+        type=Path,
+        help='跳过正式运行，按先前保存的 replay-plan.json 复跑完整局',
+    )
+    parser.add_argument(
         '--output',
         type=Path,
         default=PROJECT_ROOT / 'recordings' / 'random-4096-until-stop.json',
     )
     return parser.parse_args()
+
+
+def select_replay_environments(
+        selection, sample_count, seed, settle_timeout_counts, step_counts):
+    """按指定策略选择正式运行中的环境编号。"""
+
+    timeout_values = settle_timeout_counts.detach().cpu().tolist()
+    step_values = step_counts.detach().cpu().tolist()
+    environment_count = len(timeout_values)
+    if sample_count < 0 or sample_count > environment_count:
+        raise ValueError('sample_count is outside the environment range')
+    if sample_count == 0:
+        return []
+    if selection == 'uniform':
+        generator = torch.Generator(device='cpu')
+        generator.manual_seed(seed ^ 0x5EED5EED)
+        return torch.randperm(
+            environment_count, generator=generator
+        )[:sample_count].tolist()
+
+    timeout_rates = [
+        count / max(1, steps)
+        for count, steps in zip(timeout_values, step_values)
+    ]
+    if selection == 'most-timeouts':
+        return sorted(
+            range(environment_count),
+            key=lambda index: (
+                timeout_values[index],
+                timeout_rates[index],
+                step_values[index],
+                -index,
+            ),
+            reverse=True,
+        )[:sample_count]
+    if selection == 'timeout-rate-stratified':
+        ordered = sorted(
+            range(environment_count),
+            key=lambda index: (
+                timeout_rates[index], timeout_values[index], index
+            ),
+        )
+        selected = []
+        for sample_index in range(sample_count):
+            # 取每个等宽分层的上边界；既避开完全无超时样本，也覆盖到最大值。
+            rank = (
+                (sample_index + 1) * environment_count + sample_count - 1
+            ) // sample_count - 1
+            selected.append(ordered[min(rank, environment_count - 1)])
+        return list(reversed(selected))
+    raise ValueError(f'unsupported replay selection: {selection}')
 
 
 def select_trace_row(
@@ -290,7 +351,7 @@ def replay_final_steps(args, config, sampled_envs, terminal_metadata):
         'source_num_envs': args.num_envs,
         'sample_count': sample_count,
         'frame_stride': args.replay_frame_stride,
-        'selection': 'fixed-seed uniform sample after formal run',
+        'selection': args.replay_selection,
         'scope': (
             f'final {tail_drops} decision intervals before termination '
             'or drop cap'
@@ -315,7 +376,8 @@ def write_full_replay_index(path, entries, source_num_envs):
         title=f'{source_num_envs} 环境随机测试：{len(entries)} 条完整局回放',
         description=(
             '每条均从第 1 次投放记录到失败或投放上限。'
-            '选择左侧条目后只加载当前一局。'
+            '目录显示等待超时次数和比例；播放器可用 T / Shift+T '
+            '跳到下/上一次等待超时。选择左侧条目后只加载当前一局。'
         ),
     )
 
@@ -418,6 +480,14 @@ def replay_full_episodes(args, config, sampled_envs, terminal_metadata):
                 raise RuntimeError(
                     f'replay length mismatch for environment {original_index}'
                 )
+            actual_timeout_count = sum(
+                bool(step_trace.settle_timeout[0].item())
+                for step_trace in sequence
+            )
+            if actual_timeout_count != expected['settle_timeout_count']:
+                raise RuntimeError(
+                    f'replay timeout mismatch for environment {original_index}'
+                )
             html_path = args.replay_output_dir / (
                 f'env-{original_index}-full-episode.html'
             )
@@ -470,7 +540,7 @@ def replay_full_episodes(args, config, sampled_envs, terminal_metadata):
         'source_num_envs': args.num_envs,
         'sample_count': sample_count,
         'frame_stride': args.replay_frame_stride,
-        'selection': 'same fixed-seed sample as formal run',
+        'selection': args.replay_selection,
         'scope': 'complete episode from first drop through termination or cap',
         'elapsed_seconds': time.perf_counter() - started,
         'index': str(index_path.resolve()),
@@ -525,6 +595,29 @@ def main():
     torch.cuda.synchronize()
     extension_load_seconds = time.perf_counter() - build_started
 
+    if args.replay_from_plan is not None:
+        plan = json.loads(args.replay_from_plan.read_text(encoding='utf-8'))
+        args.seed = int(plan['seed'])
+        args.num_envs = int(plan['source_num_envs'])
+        args.replay_frame_stride = int(plan['frame_stride'])
+        args.replay_selection = str(plan['selection'])
+        args.replay_output_dir = Path(plan['replay_output_dir'])
+        sampled_envs = [int(value) for value in plan['sampled_envs']]
+        terminal_metadata = {
+            int(index): metadata
+            for index, metadata in plan['terminal_metadata'].items()
+        }
+        config = SimulatorConfig(**plan['config'])
+        manifest, manifest_path = replay_full_episodes(
+            args, config, sampled_envs, terminal_metadata
+        )
+        print(json.dumps({
+            'replay_manifest': str(manifest_path.resolve()),
+            'full_episode_index': manifest['index'],
+            'sampled_replay_envs': sampled_envs,
+        }, ensure_ascii=False, indent=2))
+        return
+
     config = SimulatorConfig(
         max_fruits=args.max_fruits,
         physics_fps=args.physics_fps,
@@ -547,6 +640,9 @@ def main():
     terminated = torch.zeros_like(running)
     truncated = torch.zeros_like(running)
     environments_with_settle_timeout = torch.zeros_like(running)
+    settle_timeout_counts = torch.zeros(
+        args.num_envs, dtype=torch.int64, device=simulator.device
+    )
     settle_timeout_intervals = torch.zeros(
         (), dtype=torch.int64, device=simulator.device
     )
@@ -576,6 +672,7 @@ def main():
         )
         active_settle_timeout = running & result.physics.settle_timeout
         environments_with_settle_timeout |= active_settle_timeout
+        settle_timeout_counts += active_settle_timeout.to(torch.int64)
         settle_timeout_intervals += active_settle_timeout.sum()
         newly_terminated = running & result.physics.done
         newly_truncated = running & result.physics.truncated
@@ -614,6 +711,11 @@ def main():
     truncated_cpu = truncated.cpu()
     step_counts_cpu = step_counts.cpu()
     scores_cpu = scores.cpu()
+    settle_timeout_counts_cpu = settle_timeout_counts.cpu()
+    settle_timeout_rates = (
+        settle_timeout_counts.to(torch.float32)
+        / step_counts.clamp_min(1).to(torch.float32)
+    )
     report = {
         'device': str(simulator.device),
         'num_envs': args.num_envs,
@@ -648,6 +750,8 @@ def main():
         'environments_with_settle_timeout_count': int(
             environments_with_settle_timeout.sum().item()
         ),
+        'settle_timeout_counts': tensor_summary(settle_timeout_counts),
+        'settle_timeout_rates': tensor_summary(settle_timeout_rates),
         'capped_count': int(capped.sum().item()),
         'all_step_counts': tensor_summary(step_counts),
         'terminated_step_counts': tensor_summary(step_counts[terminated]),
@@ -679,11 +783,13 @@ def main():
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
     if args.replay_samples:
-        selection_generator = torch.Generator(device='cpu')
-        selection_generator.manual_seed(args.seed ^ 0x5EED5EED)
-        sampled_envs = torch.randperm(
-            args.num_envs, generator=selection_generator
-        )[:args.replay_samples].tolist()
+        sampled_envs = select_replay_environments(
+            args.replay_selection,
+            args.replay_samples,
+            args.seed,
+            settle_timeout_counts_cpu,
+            step_counts_cpu,
+        )
         terminal_metadata = {}
         for env_index in sampled_envs:
             end_kind = (
@@ -699,7 +805,46 @@ def main():
                 'end_kind': end_kind,
                 'step_count': int(step_counts_cpu[env_index]),
                 'score': int(scores_cpu[env_index]),
+                'settle_timeout_count': int(
+                    settle_timeout_counts_cpu[env_index]
+                ),
+                'settle_timeout_rate': (
+                    int(settle_timeout_counts_cpu[env_index])
+                    / max(1, int(step_counts_cpu[env_index]))
+                ),
             }
+        args.replay_output_dir.mkdir(parents=True, exist_ok=True)
+        replay_plan = {
+            'seed': args.seed,
+            'source_num_envs': args.num_envs,
+            'frame_stride': args.replay_frame_stride,
+            'selection': args.replay_selection,
+            'replay_output_dir': str(args.replay_output_dir.resolve()),
+            'sampled_envs': sampled_envs,
+            'terminal_metadata': terminal_metadata,
+            'config': {
+                'max_fruits': config.max_fruits,
+                'physics_fps': config.physics_fps,
+                'max_physics_frames': config.max_physics_frames,
+                'stable_frames': config.stable_frames,
+                'solver_iterations': config.solver_iterations,
+                'drop_fast_forward': config.drop_fast_forward,
+                'kinematic_rest_frames': config.kinematic_rest_frames,
+                'kinematic_rest_displacement_epsilon': (
+                    config.kinematic_rest_displacement_epsilon
+                ),
+            },
+        }
+        replay_plan_path = args.replay_output_dir / 'replay-plan.json'
+        replay_plan_path.write_text(
+            json.dumps(replay_plan, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        report['replay_plan'] = str(replay_plan_path.resolve())
+        report['sampled_replay_envs'] = sampled_envs
+        args.output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8'
+        )
         replay_function = (
             replay_full_episodes
             if args.replay_full_episodes

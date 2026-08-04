@@ -441,6 +441,10 @@ class CudaVectorSimulatorTest(unittest.TestCase):
             <= result.physics.frames_simulated
         ).item())
         count = int(trace.record_counts[0])
+        expected_capacity = (
+            (config.max_physics_frames + 4 - 1) // 4 + 2
+        )
+        self.assertEqual(trace.frame_numbers.shape[1], expected_capacity)
         self.assertEqual(int(trace.frame_numbers[0, 0]), 0)
         self.assertEqual(
             int(trace.frame_numbers[0, count - 1]),
