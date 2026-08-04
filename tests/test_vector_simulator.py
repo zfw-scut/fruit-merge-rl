@@ -133,6 +133,7 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         )
         self._install_fruit(simulator, 0, 0, 1, 100, 300, 1)
         self._install_fruit(simulator, 0, 1, 2, 200, 300, 2)
+        simulator.age_frames[0, :2] = 1
         simulator.velocities[0, 0, 1] = 43.0
         simulator.velocities[0, 1, 1] = 43.0
         running = torch.tensor([True])
@@ -151,6 +152,107 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         self.assertEqual(float(simulator.velocities[0, 1, 1]), 43.0)
         self.assertEqual(int(quiet_frames[0, 0]), 4)
         self.assertEqual(int(quiet_frames[0, 1]), 0)
+
+    def test_angular_velocity_uses_same_time_damping_as_linear_velocity(self):
+        config = self._config(
+            physics_fps=30,
+            gravity_y=0.0,
+            damping=0.81,
+        )
+        simulator = TensorVectorSimulator(1, config=config, device='cpu')
+        self._install_fruit(simulator, 0, 0, 1, 100, 200, 1)
+        simulator.velocities[0, 0, 0] = 10.0
+        simulator.angular_velocities[0, 0] = 10.0
+
+        simulator._integrate(torch.tensor([True]))
+
+        expected = 10.0 * config.damping ** config.dt
+        self.assertAlmostEqual(
+            float(simulator.velocities[0, 0, 0]), expected, places=5
+        )
+        self.assertAlmostEqual(
+            float(simulator.angular_velocities[0, 0]), expected, places=5
+        )
+
+    def test_kinematic_rest_threshold_has_frame_rate_independent_speed(self):
+        for physics_fps in (30, 120):
+            config = self._config(
+                physics_fps=physics_fps,
+                kinematic_rest_frames=4,
+                kinematic_rest_displacement_epsilon=0.1,
+            )
+            simulator = TensorVectorSimulator(1, config=config, device='cpu')
+            self._install_fruit(simulator, 0, 0, 1, 100, 200, 1)
+            simulator.age_frames[0, 0] = 1
+            simulator.velocities[0, 0, 0] = 10.0
+            running = torch.tensor([True])
+            quiet_frames = torch.zeros_like(simulator.levels)
+            for _ in range(4):
+                frame_start = simulator.positions.clone()
+                simulator.positions[0, 0, 0] += 10.0 * config.dt
+                simulator._correct_kinematic_rest_velocity(
+                    running, frame_start, quiet_frames
+                )
+            self.assertEqual(int(quiet_frames[0, 0]), 4)
+            self.assertTrue(torch.equal(
+                simulator.velocities[0, 0], torch.zeros(2)
+            ))
+
+    def test_newly_merged_fruit_is_not_frozen_in_creation_frame(self):
+        config = self._config(kinematic_rest_frames=1)
+        simulator = TensorVectorSimulator(1, config=config, device='cpu')
+        self._install_fruit(simulator, 0, 0, 1, 100, 200, 1)
+        simulator.velocities[0, 0, 0] = 10.0
+        frame_start = simulator.positions.clone()
+        quiet_frames = torch.zeros_like(simulator.levels)
+
+        simulator._correct_kinematic_rest_velocity(
+            torch.tensor([True]), frame_start, quiet_frames
+        )
+
+        self.assertEqual(int(quiet_frames[0, 0]), 0)
+        self.assertEqual(float(simulator.velocities[0, 0, 0]), 10.0)
+
+    def test_low_speed_contact_does_not_apply_restitution(self):
+        config = self._config(restitution_velocity_threshold=35.0)
+        simulator = TensorVectorSimulator(2, config=config, device='cpu')
+        for env_index, speed in enumerate((10.0, 100.0)):
+            self._install_fruit(
+                simulator, env_index, 0, 1, 100, 200, env_index + 1
+            )
+            simulator.velocities[env_index, 0, 1] = speed
+        penetration = torch.zeros_like(simulator.physics_radii)
+        penetration[:, 0] = 1.0
+
+        simulator._apply_wall_contact(
+            penetration, (0.0, -1.0), torch.tensor([True, True])
+        )
+
+        self.assertAlmostEqual(float(simulator.velocities[0, 0, 1]), 0.0)
+        self.assertAlmostEqual(
+            float(simulator.velocities[1, 0, 1]),
+            -100.0 * config.fruit_elasticity,
+            places=4,
+        )
+
+    def test_adaptive_substeps_skip_free_fall_and_refine_deep_contact(self):
+        config = self._config(
+            physics_fps=30,
+            adaptive_collision_substeps=True,
+            max_collision_substeps=4,
+        )
+        simulator = TensorVectorSimulator(2, config=config, device='cpu')
+        self._install_fruit(simulator, 0, 0, 1, 100, 100, 1)
+        simulator.velocities[0, 0, 1] = 500.0
+        self._install_fruit(simulator, 1, 0, 1, 100, 200, 1)
+        self._install_fruit(simulator, 1, 1, 2, 120, 200, 2)
+
+        counts = simulator._collision_substep_counts(
+            torch.tensor([True, True])
+        )
+
+        self.assertEqual(int(counts[0]), 1)
+        self.assertEqual(int(counts[1]), 4)
 
     def test_deterministic_matching_and_chain_merges(self):
         simulator = TensorVectorSimulator(
@@ -294,6 +396,10 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         self.assertEqual(config.max_physics_frames, 180)
         self.assertEqual(config.stable_frames, 4)
         self.assertTrue(config.drop_fast_forward)
+        self.assertTrue(config.adaptive_collision_substeps)
+        self.assertEqual(config.max_collision_substeps, 2)
+        self.assertEqual(config.kinematic_rest_frames, 1)
+        self.assertAlmostEqual(config.position_correction, 0.9)
         self.assertAlmostEqual(
             config.max_physics_frames / config.physics_fps, 6.0
         )
@@ -439,6 +545,16 @@ class CudaVectorSimulatorTest(unittest.TestCase):
         self.assertTrue(torch.all(
             result.physics.fast_forwarded_frames
             <= result.physics.frames_simulated
+        ).item())
+        executed = (
+            result.physics.frames_simulated
+            - result.physics.fast_forwarded_frames
+        )
+        self.assertTrue(torch.all(
+            result.physics.collision_substeps >= executed
+        ).item())
+        self.assertTrue(torch.any(
+            result.physics.collision_substeps > executed
         ).item())
         count = int(trace.record_counts[0])
         expected_capacity = (

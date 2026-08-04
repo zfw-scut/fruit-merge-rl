@@ -76,6 +76,7 @@ __device__ inline void apply_wall(
     Vec2 normal,
     float penetration,
     float elasticity,
+    float restitution_velocity_threshold,
     float friction) {
   if (penetration <= 0.0f) return;
   int index = state.slot_index(slot);
@@ -89,7 +90,10 @@ __device__ inline void apply_wall(
   Vec2 velocity = state.velocity(slot);
   float normal_velocity = dot(velocity, normal);
   if (normal_velocity >= 0.0f) return;
-  float normal_impulse = -(1.0f + elasticity) * normal_velocity / inverse_mass;
+  float restitution = -normal_velocity >= restitution_velocity_threshold
+      ? elasticity
+      : 0.0f;
+  float normal_impulse = -(1.0f + restitution) * normal_velocity / inverse_mass;
   Vec2 tangent = {-normal.y, normal.x};
   Vec2 radius_vector = mul(normal, -radius);
   Vec2 contact_velocity = add(
@@ -114,21 +118,22 @@ __device__ inline void resolve_walls(
     int board_height,
     int wall_width,
     float elasticity,
+    float restitution_velocity_threshold,
     float wall_friction) {
   int index = state.slot_index(slot);
   if (!state.active[index]) return;
   float radius = state.physics_radii[index];
   Vec2 position = state.position(slot);
   apply_wall(state, slot, {1.0f, 0.0f}, wall_width + radius - position.x,
-             elasticity, wall_friction);
+             elasticity, restitution_velocity_threshold, wall_friction);
   position = state.position(slot);
   apply_wall(state, slot, {-1.0f, 0.0f},
-              position.x - (board_width - wall_width - radius),
-             elasticity, wall_friction);
+             position.x - (board_width - wall_width - radius),
+             elasticity, restitution_velocity_threshold, wall_friction);
   position = state.position(slot);
   apply_wall(state, slot, {0.0f, -1.0f},
              position.y - (board_height - wall_width - radius),
-             elasticity, wall_friction);
+             elasticity, restitution_velocity_threshold, wall_friction);
 }
 
 __device__ inline void resolve_pair(
@@ -136,6 +141,7 @@ __device__ inline void resolve_pair(
     int slot_i,
     int slot_j,
     float elasticity,
+    float restitution_velocity_threshold,
     float friction,
     float contact_slop,
     float position_correction) {
@@ -175,7 +181,11 @@ __device__ inline void resolve_pair(
   Vec2 relative_velocity = sub(contact_velocity_j, contact_velocity_i);
   float normal_velocity = dot(relative_velocity, normal);
   if (normal_velocity >= 0.0f) return;
-  float normal_impulse = -(1.0f + elasticity) * normal_velocity / inverse_mass_sum;
+  float restitution = -normal_velocity >= restitution_velocity_threshold
+      ? elasticity
+      : 0.0f;
+  float normal_impulse =
+      -(1.0f + restitution) * normal_velocity / inverse_mass_sum;
   Vec2 tangent = {-normal.y, normal.x};
   float tangent_velocity = dot(relative_velocity, tangent);
   float cross_i = cross(radius_vector_i, tangent);
@@ -197,6 +207,114 @@ __device__ inline void resolve_pair(
       cross(radius_vector_i, impulse) * state.inverse_inertias[index_i];
   state.angular_velocities[index_j] +=
       cross(radius_vector_j, impulse) * state.inverse_inertias[index_j];
+}
+
+__device__ inline Vec2 predicted_position(
+    KernelState& state,
+    int slot,
+    float dt,
+    float gravity_y,
+    float frame_damping) {
+  Vec2 velocity = state.velocity(slot);
+  velocity.y += gravity_y * dt;
+  velocity = mul(velocity, frame_damping);
+  return add(state.position(slot), mul(velocity, dt));
+}
+
+__device__ inline int choose_collision_substeps(
+    KernelState& state,
+    int active_slot_upper_bound,
+    int board_width,
+    int board_height,
+    int wall_width,
+    int max_collision_substeps,
+    float dt,
+    float gravity_y,
+    float frame_damping,
+    float stable_velocity_epsilon,
+    float contact_slop,
+    float motion_fraction,
+    float penetration_threshold) {
+  if (max_collision_substeps <= 1) return 1;
+
+  int active_count = 0;
+  int contact_count = 0;
+  float minimum_radius = 1e30f;
+  float maximum_motion = 0.0f;
+  float maximum_speed = 0.0f;
+  float maximum_penetration = 0.0f;
+  bool predicted_collision = false;
+
+  for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
+    int index = state.slot_index(slot);
+    if (!state.active[index]) continue;
+    ++active_count;
+    float radius = state.physics_radii[index];
+    minimum_radius = fminf(minimum_radius, radius);
+    Vec2 velocity = state.velocity(slot);
+    maximum_speed = fmaxf(maximum_speed, sqrtf(dot(velocity, velocity)));
+    Vec2 position = state.position(slot);
+    Vec2 predicted = predicted_position(
+        state, slot, dt, gravity_y, frame_damping);
+    maximum_motion = fmaxf(
+        maximum_motion, sqrtf(dot(sub(predicted, position), sub(predicted, position))));
+    if (predicted.x - radius <= static_cast<float>(wall_width)
+        || predicted.x + radius >= static_cast<float>(board_width - wall_width)
+        || predicted.y + radius >= static_cast<float>(board_height - wall_width)) {
+      predicted_collision = true;
+    }
+  }
+
+  for (int slot_i = 0; slot_i < active_slot_upper_bound; ++slot_i) {
+    int index_i = state.slot_index(slot_i);
+    if (!state.active[index_i]) continue;
+    Vec2 current_i = state.position(slot_i);
+    Vec2 predicted_i = predicted_position(
+        state, slot_i, dt, gravity_y, frame_damping);
+    for (int slot_j = slot_i + 1; slot_j < active_slot_upper_bound; ++slot_j) {
+      int index_j = state.slot_index(slot_j);
+      if (!state.active[index_j]) continue;
+      float radius_sum =
+          state.physics_radii[index_i] + state.physics_radii[index_j];
+      Vec2 current_delta = sub(state.position(slot_j), current_i);
+      Vec2 predicted_delta = sub(
+          predicted_position(state, slot_j, dt, gravity_y, frame_damping),
+          predicted_i);
+      if ((fabsf(current_delta.x) > radius_sum
+              || fabsf(current_delta.y) > radius_sum)
+          && (fabsf(predicted_delta.x) > radius_sum
+              || fabsf(predicted_delta.y) > radius_sum)) {
+        continue;
+      }
+      float current_distance = sqrtf(fmaxf(dot(current_delta, current_delta), 1e-12f));
+      float predicted_distance = sqrtf(
+          fmaxf(dot(predicted_delta, predicted_delta), 1e-12f));
+      float penetration = fmaxf(
+          radius_sum - fminf(current_distance, predicted_distance)
+              - contact_slop,
+          0.0f);
+      maximum_penetration = fmaxf(maximum_penetration, penetration);
+      if (fminf(current_distance, predicted_distance) <= radius_sum) {
+        predicted_collision = true;
+        ++contact_count;
+      }
+    }
+  }
+
+  int requested = 1;
+  if (predicted_collision) {
+    float motion_target = fmaxf(minimum_radius * motion_fraction, 1.0f);
+    requested = static_cast<int>(ceilf(maximum_motion / motion_target));
+  }
+  requested = max(
+      requested,
+      static_cast<int>(ceilf(maximum_penetration / penetration_threshold)));
+  if (active_count >= 2 && contact_count >= active_count
+      && maximum_speed > stable_velocity_epsilon) {
+    requested = max(requested, 2);
+  }
+  int substeps = requested <= 1 ? 1 : (requested <= 2 ? 2 : 4);
+  return min(substeps, max_collision_substeps);
 }
 
 __device__ inline bool touching(
@@ -303,6 +421,7 @@ __global__ void vector_step_kernel(
     const long long* merge_scores,
     long long* frames_simulated,
     long long* fast_forwarded_frames,
+    long long* collision_substeps,
     bool* stable_result,
     bool* done_result,
     bool* truncated_result,
@@ -335,11 +454,14 @@ __global__ void vector_step_kernel(
     int stable_frames,
     int solver_iterations,
     bool drop_fast_forward,
+    bool adaptive_collision_substeps,
+    int max_collision_substeps,
     int kinematic_rest_frames,
-    float kinematic_rest_displacement_epsilon,
+    float kinematic_rest_speed_epsilon,
     float gravity_y,
     float damping,
     float fruit_elasticity,
+    float restitution_velocity_threshold,
     float fruit_friction,
     float wall_friction,
     float stable_velocity_epsilon,
@@ -347,7 +469,9 @@ __global__ void vector_step_kernel(
     int danger_frame_limit,
     float contact_slop,
     float position_correction,
-    float merge_tolerance) {
+    float merge_tolerance,
+    float collision_substep_motion_fraction,
+    float collision_substep_penetration_threshold) {
   int env = blockIdx.x * blockDim.x + threadIdx.x;
   if (env >= num_envs || !enabled[env]) return;
 
@@ -368,6 +492,7 @@ __global__ void vector_step_kernel(
   event_count[env] = 0;
   frames_simulated[env] = 0;
   fast_forwarded_frames[env] = 0;
+  collision_substeps[env] = 0;
   stable_result[env] = false;
   done_result[env] = false;
   truncated_result[env] = false;
@@ -523,6 +648,7 @@ __global__ void vector_step_kernel(
   for (int frame = skipped_frames;
        frame < max_physics_frames && running;
        ++frame) {
+    long long frame_event_count = event_count[env];
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
       int index = state.slot_index(slot);
       if (!active[index]) continue;
@@ -530,31 +656,57 @@ __global__ void vector_step_kernel(
       Vec2 frame_start = state.position(slot);
       frame_start_positions[vector_index] = frame_start.x;
       frame_start_positions[vector_index + 1] = frame_start.y;
-      Vec2 velocity = state.velocity(slot);
-      velocity.y += gravity_y * dt;
-      velocity = mul(velocity, frame_damping);
-      state.set_velocity(slot, velocity);
-      state.set_position(slot, add(state.position(slot), mul(velocity, dt)));
-      angles[index] += angular_velocities[index] * dt;
       age_frames[index] += 1;
     }
 
-    for (int iteration = 0; iteration < solver_iterations; ++iteration) {
+    int substeps = adaptive_collision_substeps
+        ? choose_collision_substeps(
+            state, active_slot_upper_bound, board_width, board_height,
+            wall_width, max_collision_substeps, dt, gravity_y, frame_damping,
+            stable_velocity_epsilon, contact_slop,
+            collision_substep_motion_fraction,
+            collision_substep_penetration_threshold)
+        : 1;
+    collision_substeps[env] += substeps;
+    float substep_dt = dt / static_cast<float>(substeps);
+    float substep_damping = powf(damping, substep_dt);
+    for (int substep = 0; substep < substeps; ++substep) {
       for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
-        resolve_walls(state, slot, board_width, board_height, wall_width,
-                      fruit_elasticity, wall_friction);
+        int index = state.slot_index(slot);
+        if (!active[index]) continue;
+        Vec2 velocity = state.velocity(slot);
+        velocity.y += gravity_y * substep_dt;
+        velocity = mul(velocity, substep_damping);
+        state.set_velocity(slot, velocity);
+        angular_velocities[index] *= substep_damping;
+        state.set_position(
+            slot, add(state.position(slot), mul(velocity, substep_dt)));
+        angles[index] += angular_velocities[index] * substep_dt;
       }
-      for (int slot_i = 0; slot_i < active_slot_upper_bound; ++slot_i) {
-        for (int slot_j = slot_i + 1; slot_j < active_slot_upper_bound; ++slot_j) {
-          resolve_pair(state, slot_i, slot_j, fruit_elasticity,
-                       fruit_friction, contact_slop, position_correction);
+
+      for (int iteration = 0; iteration < solver_iterations; ++iteration) {
+        for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
+          resolve_walls(
+              state, slot, board_width, board_height, wall_width,
+              fruit_elasticity, restitution_velocity_threshold,
+              wall_friction);
+        }
+        for (int slot_i = 0; slot_i < active_slot_upper_bound; ++slot_i) {
+          for (int slot_j = slot_i + 1;
+               slot_j < active_slot_upper_bound;
+               ++slot_j) {
+            resolve_pair(
+                state, slot_i, slot_j, fruit_elasticity,
+                restitution_velocity_threshold, fruit_friction,
+                contact_slop, position_correction);
+          }
         }
       }
-    }
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
       claimed[slot] = 0;
-      resolve_walls(state, slot, board_width, board_height, wall_width,
-                    fruit_elasticity, wall_friction);
+      resolve_walls(
+          state, slot, board_width, board_height, wall_width,
+          fruit_elasticity, restitution_velocity_threshold, wall_friction);
     }
 
     for (int slot_i = 0; slot_i < active_slot_upper_bound; ++slot_i) {
@@ -653,11 +805,16 @@ __global__ void vector_step_kernel(
            && !active[state.slot_index(active_slot_upper_bound - 1)]) {
       --active_slot_upper_bound;
     }
+    }
 
     if (kinematic_rest_frames > 0) {
       for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
         int index = state.slot_index(slot);
         if (!active[index]) {
+          kinematic_quiet_frames[slot] = 0;
+          continue;
+        }
+        if (age_frames[index] == 0) {
           kinematic_quiet_frames[slot] = 0;
           continue;
         }
@@ -670,7 +827,7 @@ __global__ void vector_step_kernel(
             kinematic_quiet_frames[slot] >= kinematic_rest_frames;
         float displacement_epsilon = already_resting
             ? stable_velocity_epsilon * dt
-            : kinematic_rest_displacement_epsilon;
+            : kinematic_rest_speed_epsilon * dt;
         if (dot(displacement, displacement)
             <= displacement_epsilon * displacement_epsilon) {
           if (kinematic_quiet_frames[slot] < 255) {
@@ -708,7 +865,7 @@ __global__ void vector_step_kernel(
       running = false;
     }
 
-    bool all_stable = running;
+    bool all_stable = running && event_count[env] == frame_event_count;
     for (int slot = 0;
          all_stable && slot < active_slot_upper_bound;
          ++slot) {
@@ -798,6 +955,7 @@ void vector_step_cuda(
     torch::Tensor merge_scores,
     torch::Tensor frames_simulated,
     torch::Tensor fast_forwarded_frames,
+    torch::Tensor collision_substeps,
     torch::Tensor stable_result,
     torch::Tensor done_result,
     torch::Tensor truncated_result,
@@ -829,11 +987,14 @@ void vector_step_cuda(
     int64_t stable_frames,
     int64_t solver_iterations,
     bool drop_fast_forward,
+    bool adaptive_collision_substeps,
+    int64_t max_collision_substeps,
     int64_t kinematic_rest_frames,
-    double kinematic_rest_displacement_epsilon,
+    double kinematic_rest_speed_epsilon,
     double gravity_y,
     double damping,
     double fruit_elasticity,
+    double restitution_velocity_threshold,
     double fruit_friction,
     double wall_friction,
     double stable_velocity_epsilon,
@@ -842,6 +1003,8 @@ void vector_step_cuda(
     double contact_slop,
     double position_correction,
     double merge_tolerance,
+    double collision_substep_motion_fraction,
+    double collision_substep_penetration_threshold,
     int64_t threads_per_block) {
   const c10::cuda::CUDAGuard device_guard(actions.device());
   int num_envs = static_cast<int>(actions.numel());
@@ -874,7 +1037,8 @@ void vector_step_cuda(
       dropped_radii.data_ptr<float>(), merged_radii.data_ptr<float>(),
       mass_table.data_ptr<float>(), merge_scores.data_ptr<long long>(),
       frames_simulated.data_ptr<long long>(),
-      fast_forwarded_frames.data_ptr<long long>(), stable_result.data_ptr<bool>(),
+      fast_forwarded_frames.data_ptr<long long>(),
+      collision_substeps.data_ptr<long long>(), stable_result.data_ptr<bool>(),
       done_result.data_ptr<bool>(), truncated_result.data_ptr<bool>(),
       trace_rows.data_ptr<long long>(), trace_positions.data_ptr<float>(),
       trace_velocities.data_ptr<float>(), trace_angles.data_ptr<float>(),
@@ -895,15 +1059,20 @@ void vector_step_cuda(
       static_cast<int>(max_physics_frames), static_cast<int>(stable_frames),
       static_cast<int>(solver_iterations),
       drop_fast_forward,
+      adaptive_collision_substeps,
+      static_cast<int>(max_collision_substeps),
       static_cast<int>(kinematic_rest_frames),
-      static_cast<float>(kinematic_rest_displacement_epsilon),
+      static_cast<float>(kinematic_rest_speed_epsilon),
       static_cast<float>(gravity_y),
       static_cast<float>(damping), static_cast<float>(fruit_elasticity),
+      static_cast<float>(restitution_velocity_threshold),
       static_cast<float>(fruit_friction), static_cast<float>(wall_friction),
       static_cast<float>(stable_velocity_epsilon),
       static_cast<float>(stable_angular_velocity_epsilon),
       static_cast<int>(danger_frame_limit), static_cast<float>(contact_slop),
       static_cast<float>(position_correction),
-      static_cast<float>(merge_tolerance));
+      static_cast<float>(merge_tolerance),
+      static_cast<float>(collision_substep_motion_fraction),
+      static_cast<float>(collision_substep_penetration_threshold));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

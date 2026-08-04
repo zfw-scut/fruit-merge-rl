@@ -45,6 +45,7 @@ void vector_step_cuda(
     torch::Tensor merge_scores,
     torch::Tensor frames_simulated,
     torch::Tensor fast_forwarded_frames,
+    torch::Tensor collision_substeps,
     torch::Tensor stable_result,
     torch::Tensor done_result,
     torch::Tensor truncated_result,
@@ -76,11 +77,14 @@ void vector_step_cuda(
     int64_t stable_frames,
     int64_t solver_iterations,
     bool drop_fast_forward,
+    bool adaptive_collision_substeps,
+    int64_t max_collision_substeps,
     int64_t kinematic_rest_frames,
-    double kinematic_rest_displacement_epsilon,
+    double kinematic_rest_speed_epsilon,
     double gravity_y,
     double damping,
     double fruit_elasticity,
+    double restitution_velocity_threshold,
     double fruit_friction,
     double wall_friction,
     double stable_velocity_epsilon,
@@ -89,6 +93,8 @@ void vector_step_cuda(
     double contact_slop,
     double position_correction,
     double merge_tolerance,
+    double collision_substep_motion_fraction,
+    double collision_substep_penetration_threshold,
     int64_t threads_per_block);
 
 #define CHECK_CUDA(x) TORCH_CHECK(x.is_cuda(), #x " must be a CUDA tensor")
@@ -139,6 +145,7 @@ void vector_step(
     torch::Tensor merge_scores,
     torch::Tensor frames_simulated,
     torch::Tensor fast_forwarded_frames,
+    torch::Tensor collision_substeps,
     torch::Tensor stable_result,
     torch::Tensor done_result,
     torch::Tensor truncated_result,
@@ -170,11 +177,14 @@ void vector_step(
     int64_t stable_frames,
     int64_t solver_iterations,
     bool drop_fast_forward,
+    bool adaptive_collision_substeps,
+    int64_t max_collision_substeps,
     int64_t kinematic_rest_frames,
-    double kinematic_rest_displacement_epsilon,
+    double kinematic_rest_speed_epsilon,
     double gravity_y,
     double damping,
     double fruit_elasticity,
+    double restitution_velocity_threshold,
     double fruit_friction,
     double wall_friction,
     double stable_velocity_epsilon,
@@ -183,6 +193,8 @@ void vector_step(
     double contact_slop,
     double position_correction,
     double merge_tolerance,
+    double collision_substep_motion_fraction,
+    double collision_substep_penetration_threshold,
     int64_t threads_per_block) {
   CHECK_CUDA(actions);
   CHECK_CONTIGUOUS(actions);
@@ -217,8 +229,8 @@ void vector_step(
       event_source_levels, event_new_levels, event_positions,
       event_score_deltas, event_source_ids, event_new_fruit_ids,
       display_radii, dropped_radii, merged_radii, mass_table, merge_scores,
-      frames_simulated, fast_forwarded_frames, stable_result, done_result,
-      truncated_result,
+      frames_simulated, fast_forwarded_frames, collision_substeps,
+      stable_result, done_result, truncated_result,
       trace_rows, trace_positions, trace_velocities, trace_angles,
       trace_angular_velocities, trace_levels, trace_physics_radii,
       trace_fruit_ids, trace_active, trace_scores, trace_merge_counts,
@@ -227,12 +239,15 @@ void vector_step(
       board_width, board_height, spawn_y, wall_width, action_count,
       max_fruits, queue_length, physics_fps, max_physics_frames,
       stable_frames, solver_iterations, drop_fast_forward,
+      adaptive_collision_substeps, max_collision_substeps,
       kinematic_rest_frames,
-      kinematic_rest_displacement_epsilon, gravity_y, damping,
-      fruit_elasticity, fruit_friction, wall_friction,
+      kinematic_rest_speed_epsilon, gravity_y, damping,
+      fruit_elasticity, restitution_velocity_threshold,
+      fruit_friction, wall_friction,
       stable_velocity_epsilon, stable_angular_velocity_epsilon,
       danger_frame_limit, contact_slop, position_correction,
-      merge_tolerance, threads_per_block);
+      merge_tolerance, collision_substep_motion_fraction,
+      collision_substep_penetration_threshold, threads_per_block);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

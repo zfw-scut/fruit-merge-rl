@@ -112,6 +112,7 @@ class BatchPhysicsResult:
     merge_events: BatchMergeEvents
     settle_timeout: torch.Tensor | None = None
     fast_forwarded_frames: torch.Tensor | None = None
+    collision_substeps: torch.Tensor | None = None
 
 
 @dataclass(frozen=True, slots=True)

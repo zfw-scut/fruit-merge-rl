@@ -28,8 +28,20 @@ def parse_args():
     parser.add_argument('--stable-frames', type=int, default=15)
     parser.add_argument('--solver-iterations', type=int, default=4)
     parser.add_argument('--drop-fast-forward', action='store_true')
+    parser.add_argument('--adaptive-collision-substeps', action='store_true')
+    parser.add_argument('--max-collision-substeps', type=int, default=4)
+    parser.add_argument(
+        '--collision-substep-motion-fraction', type=float, default=0.25
+    )
+    parser.add_argument(
+        '--collision-substep-penetration-threshold', type=float, default=1.0
+    )
     parser.add_argument('--kinematic-rest-frames', type=int, default=4)
     parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
+    parser.add_argument(
+        '--restitution-velocity-threshold', type=float, default=35.0
+    )
+    parser.add_argument('--position-correction', type=float, default=0.75)
     parser.add_argument('--seed', type=int, default=20260804)
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--output', type=Path)
@@ -39,6 +51,7 @@ def parse_args():
 def run_steps(simulator, steps, generator):
     total_frames = torch.zeros((), dtype=torch.int64, device=simulator.device)
     total_fast_forwarded = torch.zeros_like(total_frames)
+    total_collision_substeps = torch.zeros_like(total_frames)
     total_merges = torch.zeros_like(total_frames)
     total_stable = torch.zeros_like(total_frames)
     total_settle_timeouts = torch.zeros_like(total_frames)
@@ -58,6 +71,8 @@ def run_steps(simulator, steps, generator):
             total_fast_forwarded += (
                 result.physics.fast_forwarded_frames.sum()
             )
+        if result.physics.collision_substeps is not None:
+            total_collision_substeps += result.physics.collision_substeps.sum()
         total_merges += result.physics.merge_events.count.sum()
         total_stable += result.physics.stable.sum()
         if result.physics.settle_timeout is not None:
@@ -70,6 +85,7 @@ def run_steps(simulator, steps, generator):
     return {
         'physics_frames': total_frames,
         'fast_forwarded_frames': total_fast_forwarded,
+        'collision_substeps': total_collision_substeps,
         'merge_events': total_merges,
         'stable_intervals': total_stable,
         'settle_timeout_intervals': total_settle_timeouts,
@@ -90,8 +106,18 @@ def main():
         stable_frames=args.stable_frames,
         solver_iterations=args.solver_iterations,
         drop_fast_forward=args.drop_fast_forward,
+        adaptive_collision_substeps=args.adaptive_collision_substeps,
+        max_collision_substeps=args.max_collision_substeps,
+        collision_substep_motion_fraction=(
+            args.collision_substep_motion_fraction
+        ),
+        collision_substep_penetration_threshold=(
+            args.collision_substep_penetration_threshold
+        ),
         kinematic_rest_frames=args.kinematic_rest_frames,
         kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
+        restitution_velocity_threshold=args.restitution_velocity_threshold,
+        position_correction=args.position_correction,
     )
     simulator = TensorVectorSimulator(
         args.num_envs,
@@ -121,6 +147,7 @@ def main():
         totals['fast_forwarded_frames'].item()
     )
     executed_frames = total_frames - fast_forwarded_frames
+    collision_substeps = int(totals['collision_substeps'].item())
     fruit_counts = simulator.active.sum(dim=1)
     observation = simulator.observe()
     finite_state = bool(
@@ -137,6 +164,14 @@ def main():
         'semantic_physics_frames': total_frames,
         'executed_physics_frames': executed_frames,
         'fast_forwarded_frames': fast_forwarded_frames,
+        'collision_substeps': collision_substeps,
+        'collision_substeps_per_executed_frame': (
+            collision_substeps / executed_frames if executed_frames else 0.0
+        ),
+        'extra_collision_substep_ratio': (
+            (collision_substeps - executed_frames) / executed_frames
+            if executed_frames else 0.0
+        ),
         'fast_forward_ratio': (
             fast_forwarded_frames / total_frames if total_frames else 0.0
         ),
@@ -169,6 +204,18 @@ def main():
             'max_fruits': config.max_fruits,
             'solver_iterations': config.solver_iterations,
             'drop_fast_forward': config.drop_fast_forward,
+            'adaptive_collision_substeps': config.adaptive_collision_substeps,
+            'max_collision_substeps': config.max_collision_substeps,
+            'restitution_velocity_threshold': (
+                config.restitution_velocity_threshold
+            ),
+            'position_correction': config.position_correction,
+            'collision_substep_motion_fraction': (
+                config.collision_substep_motion_fraction
+            ),
+            'collision_substep_penetration_threshold': (
+                config.collision_substep_penetration_threshold
+            ),
             'kinematic_rest_frames': config.kinematic_rest_frames,
             'kinematic_rest_displacement_epsilon': (
                 config.kinematic_rest_displacement_epsilon

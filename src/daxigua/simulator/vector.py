@@ -497,20 +497,22 @@ class TensorVectorSimulator:
         )
         return skipped
 
-    def _integrate(self, running):
+    def _integrate(self, running, *, dt=None, increment_age=True):
         active = self.active & running[:, None]
         active_float = active.to(self.float_dtype)
         active_vector = active_float.unsqueeze(-1)
-        dt = self.config.dt
+        dt = self.config.dt if dt is None else float(dt)
         damping = float(self.config.damping) ** dt
 
         self.velocities[..., 1] += (
             self.config.gravity_y * dt * active_float
         )
         self.velocities *= 1.0 + (damping - 1.0) * active_vector
+        self.angular_velocities *= 1.0 + (damping - 1.0) * active_float
         self.positions += self.velocities * (dt * active_vector)
         self.angles += self.angular_velocities * (dt * active_float)
-        self.age_frames += active.to(torch.int64)
+        if increment_age:
+            self.age_frames += active.to(torch.int64)
 
     def _apply_wall_contact(self, penetration, normal, running):
         active = self.active & running[:, None]
@@ -531,8 +533,13 @@ class TensorVectorSimulator:
         ).sum(dim=-1)
         approaching = contact & (normal_velocity < 0.0)
         approaching_float = approaching.to(self.float_dtype)
+        restitution = torch.where(
+            -normal_velocity >= self.config.restitution_velocity_threshold,
+            torch.full_like(normal_velocity, self.config.fruit_elasticity),
+            torch.zeros_like(normal_velocity),
+        )
         normal_impulse = (
-            -(1.0 + self.config.fruit_elasticity)
+            -(1.0 + restitution)
             * normal_velocity
             / self.inverse_masses.clamp_min(1e-12)
         ) * approaching_float
@@ -670,8 +677,13 @@ class TensorVectorSimulator:
         normal_velocity = (relative_velocity * normal).sum(dim=-1)
         approaching = contact & (normal_velocity < 0.0)
         approaching_float = approaching.to(self.float_dtype)
+        restitution = torch.where(
+            -normal_velocity >= self.config.restitution_velocity_threshold,
+            torch.full_like(normal_velocity, self.config.fruit_elasticity),
+            torch.zeros_like(normal_velocity),
+        )
         normal_impulse = (
-            -(1.0 + self.config.fruit_elasticity)
+            -(1.0 + restitution)
             * normal_velocity
             / inverse_mass_sum
             * approaching_float
@@ -1071,14 +1083,14 @@ class TensorVectorSimulator:
             ),
             torch.full_like(
                 quiet_frame_count,
-                self.config.kinematic_rest_displacement_epsilon,
+                self.config.kinematic_rest_speed_epsilon * self.config.dt,
                 dtype=self.float_dtype,
             ),
         )
         quiet_slots = (
             displacement.square().sum(dim=-1)
             <= displacement_epsilon.square()
-        ) & self.active & running[:, None]
+        ) & self.active & (self.age_frames > 0) & running[:, None]
         quiet_frame_count.copy_(torch.where(
             quiet_slots,
             quiet_frame_count + 1,
@@ -1091,6 +1103,130 @@ class TensorVectorSimulator:
         )
         if bool(correct.any().item()):
             self.velocities[correct] = 0.0
+
+    def _collision_substep_counts(self, running):
+        """按预测运动和接触拥挤度选择每个环境的碰撞子步数。"""
+
+        counts = torch.ones_like(self.score)
+        if (
+            not self.config.adaptive_collision_substeps
+            or self.config.max_collision_substeps == 1
+            or not bool(running.any().item())
+        ):
+            return counts
+
+        active = self.active & running[:, None]
+        active_float = active.to(self.float_dtype)
+        dt = self.config.dt
+        damping = float(self.config.damping) ** dt
+        predicted_velocity = self.velocities.clone()
+        predicted_velocity[..., 1] += self.config.gravity_y * dt * active_float
+        predicted_velocity *= 1.0 + (
+            damping - 1.0
+        ) * active_float.unsqueeze(-1)
+        predicted_positions = self.positions + predicted_velocity * (
+            dt * active_float.unsqueeze(-1)
+        )
+
+        displacement = (predicted_positions - self.positions).norm(dim=-1)
+        max_motion = torch.where(active, displacement, 0.0).amax(dim=1)
+        minimum_radius = torch.where(
+            active,
+            self.physics_radii,
+            torch.full_like(self.physics_radii, float('inf')),
+        ).amin(dim=1).clamp_min(1.0)
+        motion_target = (
+            minimum_radius * self.config.collision_substep_motion_fraction
+        ).clamp_min(1.0)
+        predicted_wall_contact = (
+            active
+            & (
+                (predicted_positions[..., 0] - self.physics_radii
+                    <= self.config.wall_width)
+                | (predicted_positions[..., 0] + self.physics_radii
+                    >= self.config.board_width - self.config.wall_width)
+                | (predicted_positions[..., 1] + self.physics_radii
+                    >= self.config.board_height - self.config.wall_width)
+            )
+        ).any(dim=1)
+
+        pair_i = self._pair_i
+        pair_j = self._pair_j
+        pair_active = active[:, pair_i] & active[:, pair_j]
+        predicted_delta = (
+            predicted_positions[:, pair_j] - predicted_positions[:, pair_i]
+        )
+        predicted_distance = predicted_delta.square().sum(dim=-1).sqrt()
+        radius_sum = (
+            self.physics_radii[:, pair_i]
+            + self.physics_radii[:, pair_j]
+        )
+        predicted_penetration = torch.where(
+            pair_active,
+            (radius_sum - predicted_distance - self.config.contact_slop)
+            .clamp_min(0.0),
+            0.0,
+        )
+        max_penetration = predicted_penetration.amax(dim=1)
+        penetration_steps = torch.ceil(
+            max_penetration
+            / self.config.collision_substep_penetration_threshold
+        ).to(torch.int64)
+
+        contact_count = (
+            pair_active & (predicted_distance <= radius_sum)
+        ).sum(dim=1)
+        predicted_collision = predicted_wall_contact | (contact_count > 0)
+        requested = torch.where(
+            predicted_collision,
+            torch.ceil(max_motion / motion_target).to(torch.int64),
+            torch.ones_like(self.score),
+        )
+        requested = torch.maximum(requested, penetration_steps)
+        active_count = active.sum(dim=1)
+        speed = self.velocities.norm(dim=-1)
+        max_speed = torch.where(active, speed, 0.0).amax(dim=1)
+        dense_and_moving = (
+            (contact_count >= active_count.clamp_min(2))
+            & (max_speed > self.config.stable_velocity_epsilon)
+        )
+        requested = torch.where(
+            dense_and_moving,
+            torch.maximum(requested, torch.full_like(requested, 2)),
+            requested,
+        )
+
+        counts = torch.where(
+            requested <= 1,
+            torch.ones_like(requested),
+            torch.where(
+                requested <= 2,
+                torch.full_like(requested, 2),
+                torch.full_like(requested, 4),
+            ),
+        ).clamp_max(self.config.max_collision_substeps)
+        return torch.where(running, counts, torch.ones_like(counts))
+
+    def _advance_collision_substeps(self, running):
+        """推进一个语义帧，并只对需要的环境增加内部碰撞子步。"""
+
+        substep_counts = self._collision_substep_counts(running)
+        self.age_frames += (self.active & running[:, None]).to(torch.int64)
+        for count in range(1, self.config.max_collision_substeps + 1):
+            selected = running & (substep_counts == count)
+            if not bool(selected.any().item()):
+                continue
+            substep_dt = self.config.dt / count
+            for _ in range(count):
+                self._integrate(
+                    selected, dt=substep_dt, increment_age=False
+                )
+                for _ in range(self.config.solver_iterations):
+                    self._resolve_walls(selected)
+                    self._resolve_fruit_contacts(selected)
+                self._resolve_walls(selected)
+                self._resolve_merges(selected)
+        return substep_counts
 
     def _update_termination(self, running):
         newest_id = torch.where(
@@ -1246,6 +1382,7 @@ class TensorVectorSimulator:
         self._clear_event_buffers()
         frames_simulated = torch.zeros_like(self.score)
         fast_forwarded_frames = torch.zeros_like(self.score)
+        collision_substeps = torch.zeros_like(self.score)
         stable_result = torch.zeros_like(self.terminated)
         done_result = torch.zeros_like(self.terminated)
         truncated_result = torch.zeros_like(self.terminated)
@@ -1335,6 +1472,7 @@ class TensorVectorSimulator:
             self._merge_scores,
             frames_simulated,
             fast_forwarded_frames,
+            collision_substeps,
             stable_result,
             done_result,
             truncated_result,
@@ -1366,11 +1504,14 @@ class TensorVectorSimulator:
             self.config.stable_frames,
             self.config.solver_iterations,
             self.config.drop_fast_forward,
+            self.config.adaptive_collision_substeps,
+            self.config.max_collision_substeps,
             self.config.kinematic_rest_frames,
-            self.config.kinematic_rest_displacement_epsilon,
+            self.config.kinematic_rest_speed_epsilon,
             self.config.gravity_y,
             self.config.damping,
             self.config.fruit_elasticity,
+            self.config.restitution_velocity_threshold,
             self.config.fruit_friction,
             self.config.wall_friction,
             self.config.stable_velocity_epsilon,
@@ -1379,6 +1520,8 @@ class TensorVectorSimulator:
             self.config.contact_slop,
             self.config.position_correction,
             self.config.merge_tolerance,
+            self.config.collision_substep_motion_fraction,
+            self.config.collision_substep_penetration_threshold,
             self.config.cuda_threads_per_block,
         )
         settle_timeout_result = (
@@ -1395,6 +1538,7 @@ class TensorVectorSimulator:
             truncated=truncated_result,
             settle_timeout=settle_timeout_result,
             fast_forwarded_frames=fast_forwarded_frames,
+            collision_substeps=collision_substeps,
             score_delta=self.score - score_before,
             merge_events=self._merge_event_view(),
         )
@@ -1451,6 +1595,7 @@ class TensorVectorSimulator:
             fast_forward_eligible
         )
         frames_simulated = fast_forwarded_frames.clone()
+        collision_substeps = torch.zeros_like(frames_simulated)
         running = frames_simulated < self.config.max_physics_frames
         budget_exhausted = ~running
         stable_count = torch.zeros_like(self.score)
@@ -1460,12 +1605,11 @@ class TensorVectorSimulator:
 
         for frame_index in range(self.config.max_physics_frames):
             frame_start_positions = self.positions.clone()
-            self._integrate(running)
-            for _ in range(self.config.solver_iterations):
-                self._resolve_walls(running)
-                self._resolve_fruit_contacts(running)
-            self._resolve_walls(running)
-            self._resolve_merges(running)
+            frame_event_count = self._event_count.clone()
+            substep_counts = self._advance_collision_substeps(running)
+            collision_substeps += torch.where(
+                running, substep_counts, torch.zeros_like(substep_counts)
+            )
             self._correct_kinematic_rest_velocity(
                 running,
                 frame_start_positions,
@@ -1478,7 +1622,10 @@ class TensorVectorSimulator:
             done_result |= newly_done
             running &= ~newly_done
 
-            stable_now = self._stable_environments() & running
+            merged_this_frame = self._event_count > frame_event_count
+            stable_now = (
+                self._stable_environments() & running & ~merged_this_frame
+            )
             stable_count = torch.where(
                 stable_now,
                 stable_count + 1,
@@ -1514,6 +1661,7 @@ class TensorVectorSimulator:
             truncated=truncated,
             settle_timeout=settle_timeout,
             fast_forwarded_frames=fast_forwarded_frames,
+            collision_substeps=collision_substeps,
             score_delta=self.score - score_before,
             merge_events=self._merge_event_view(),
         )

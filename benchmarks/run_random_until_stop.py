@@ -36,8 +36,20 @@ def parse_args():
     parser.add_argument('--stable-frames', type=int, default=15)
     parser.add_argument('--solver-iterations', type=int, default=4)
     parser.add_argument('--drop-fast-forward', action='store_true')
+    parser.add_argument('--adaptive-collision-substeps', action='store_true')
+    parser.add_argument('--max-collision-substeps', type=int, default=4)
+    parser.add_argument(
+        '--collision-substep-motion-fraction', type=float, default=0.25
+    )
+    parser.add_argument(
+        '--collision-substep-penetration-threshold', type=float, default=1.0
+    )
     parser.add_argument('--kinematic-rest-frames', type=int, default=4)
     parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
+    parser.add_argument(
+        '--restitution-velocity-threshold', type=float, default=35.0
+    )
+    parser.add_argument('--position-correction', type=float, default=0.75)
     parser.add_argument('--progress-every', type=int, default=50)
     parser.add_argument('--replay-samples', type=int, default=0)
     parser.add_argument(
@@ -625,8 +637,18 @@ def main():
         stable_frames=args.stable_frames,
         solver_iterations=args.solver_iterations,
         drop_fast_forward=args.drop_fast_forward,
+        adaptive_collision_substeps=args.adaptive_collision_substeps,
+        max_collision_substeps=args.max_collision_substeps,
+        collision_substep_motion_fraction=(
+            args.collision_substep_motion_fraction
+        ),
+        collision_substep_penetration_threshold=(
+            args.collision_substep_penetration_threshold
+        ),
         kinematic_rest_frames=args.kinematic_rest_frames,
         kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
+        restitution_velocity_threshold=args.restitution_velocity_threshold,
+        position_correction=args.position_correction,
     )
     simulator = TensorVectorSimulator(
         args.num_envs, config=config, device='cuda'
@@ -650,6 +672,8 @@ def main():
         (), dtype=torch.int64, device=simulator.device
     )
     total_fast_forwarded_frames = torch.zeros_like(total_physics_frames)
+    total_collision_substeps = torch.zeros_like(total_physics_frames)
+    total_merge_events = torch.zeros_like(total_physics_frames)
 
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats(simulator.device)
@@ -670,6 +694,8 @@ def main():
         total_fast_forwarded_frames += (
             result.physics.fast_forwarded_frames.sum()
         )
+        total_collision_substeps += result.physics.collision_substeps.sum()
+        total_merge_events += result.physics.merge_events.count.sum()
         active_settle_timeout = running & result.physics.settle_timeout
         environments_with_settle_timeout |= active_settle_timeout
         settle_timeout_counts += active_settle_timeout.to(torch.int64)
@@ -704,6 +730,8 @@ def main():
     physics_frames = int(total_physics_frames.item())
     fast_forwarded_frames = int(total_fast_forwarded_frames.item())
     executed_physics_frames = physics_frames - fast_forwarded_frames
+    collision_substeps = int(total_collision_substeps.item())
+    merge_events = int(total_merge_events.item())
     capped = running
     step_counts = simulator.step_count
     scores = simulator.score
@@ -729,6 +757,18 @@ def main():
         'semantic_physics_frames': physics_frames,
         'executed_physics_frames': executed_physics_frames,
         'fast_forwarded_frames': fast_forwarded_frames,
+        'collision_substeps': collision_substeps,
+        'collision_substeps_per_executed_frame': (
+            collision_substeps / executed_physics_frames
+            if executed_physics_frames else 0.0
+        ),
+        'extra_collision_substep_ratio': (
+            (collision_substeps - executed_physics_frames)
+            / executed_physics_frames
+            if executed_physics_frames else 0.0
+        ),
+        'merge_events': merge_events,
+        'merge_events_per_transition': merge_events / transitions,
         'fast_forward_ratio': (
             fast_forwarded_frames / physics_frames if physics_frames else 0.0
         ),
@@ -770,6 +810,18 @@ def main():
             'stable_frames': config.stable_frames,
             'solver_iterations': config.solver_iterations,
             'drop_fast_forward': config.drop_fast_forward,
+            'adaptive_collision_substeps': config.adaptive_collision_substeps,
+            'max_collision_substeps': config.max_collision_substeps,
+            'restitution_velocity_threshold': (
+                config.restitution_velocity_threshold
+            ),
+            'position_correction': config.position_correction,
+            'collision_substep_motion_fraction': (
+                config.collision_substep_motion_fraction
+            ),
+            'collision_substep_penetration_threshold': (
+                config.collision_substep_penetration_threshold
+            ),
             'kinematic_rest_frames': config.kinematic_rest_frames,
             'kinematic_rest_displacement_epsilon': (
                 config.kinematic_rest_displacement_epsilon
@@ -829,6 +881,20 @@ def main():
                 'stable_frames': config.stable_frames,
                 'solver_iterations': config.solver_iterations,
                 'drop_fast_forward': config.drop_fast_forward,
+                'adaptive_collision_substeps': (
+                    config.adaptive_collision_substeps
+                ),
+                'max_collision_substeps': config.max_collision_substeps,
+                'restitution_velocity_threshold': (
+                    config.restitution_velocity_threshold
+                ),
+                'position_correction': config.position_correction,
+                'collision_substep_motion_fraction': (
+                    config.collision_substep_motion_fraction
+                ),
+                'collision_substep_penetration_threshold': (
+                    config.collision_substep_penetration_threshold
+                ),
                 'kinematic_rest_frames': config.kinematic_rest_frames,
                 'kinematic_rest_displacement_epsilon': (
                     config.kinematic_rest_displacement_epsilon

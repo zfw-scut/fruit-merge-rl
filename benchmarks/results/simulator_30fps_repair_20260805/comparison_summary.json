@@ -1,0 +1,109 @@
+{
+  "date": "2026-08-05",
+  "device": "NVIDIA GeForce RTX 4070 Laptop GPU",
+  "python_environment": "python-torch",
+  "common": {
+    "num_envs": 4096,
+    "seed": 20260804,
+    "max_fruits": 128,
+    "solver_iterations": 4,
+    "termination": "游戏失败或投放超过 1000 次"
+  },
+  "full_episode_comparison": {
+    "historical_30fps_before_repair": {
+      "source": "../simulator_fastpath_20260804/fast_30_skip_long.json",
+      "env_steps_per_second": 8007.836361952138,
+      "mean_drops": 264.68896484375,
+      "mean_score": 2445.853515625,
+      "settle_timeout_intervals": 417480,
+      "settle_timeout_interval_rate": 0.38507018297935924
+    },
+    "current_120fps_reference": {
+      "source": "full_4096_120fps_repaired_core.json",
+      "env_steps_per_second": 5662.9228027902955,
+      "mean_drops": 168.945556640625,
+      "mean_score": 1296.3701171875,
+      "settle_timeout_intervals": 905,
+      "mean_settle_timeout_rate": 0.0013147022109478712
+    },
+    "repaired_30fps": {
+      "source": "full_4096_30fps_final.json",
+      "env_steps_per_second": 10106.6199378219,
+      "mean_drops": 191.429931640625,
+      "mean_score": 1560.06884765625,
+      "settle_timeout_intervals": 1004,
+      "mean_settle_timeout_rate": 0.0012822565622627735,
+      "collision_substeps_per_executed_frame": 1.9344609314630452,
+      "fast_forward_ratio": 0.35519794770402857
+    }
+  },
+  "relative_results": {
+    "repaired_30fps_vs_current_120fps": {
+      "throughput_gain_percent": 78.47002846025131,
+      "mean_drops_delta_percent": 13.308651288076167,
+      "mean_score_delta_percent": 20.34131510535351
+    },
+    "repaired_30fps_vs_historical_30fps": {
+      "throughput_gain_percent": 26.209121677882607,
+      "mean_drops_delta_percent": -27.6774036448293,
+      "mean_score_delta_percent": -36.21576935454376,
+      "episode_length_offset_reduction_percent": 78.00748419067691,
+      "score_offset_reduction_percent": 78.95978248331408
+    }
+  },
+  "contact_quality": {
+    "historical_30fps_timeout_sample": {
+      "source": "recordings/30fps-timeout-diagnostics-10-20260805/env-2718-full-episode.pt.gz",
+      "penetration_p95_px": 12.777,
+      "frame_max_penetration_p95_px": 22.805,
+      "frame_max_angular_speed_p95": 2.847
+    },
+    "repaired_30fps_full_episode_sample": {
+      "source": "final_replay_contact_quality.json",
+      "sampled_episodes": 3,
+      "penetration_p50_px": 0.5187149047851562,
+      "penetration_p95_px": 2.995591640472412,
+      "frame_max_penetration_p95_px": 5.348518371582031,
+      "frame_max_angular_speed_p95": 1.3048324584960938,
+      "maximum_penetration_px": 7.375114440917969
+    },
+    "current_120fps_short_sample": {
+      "source": "contact_quality_120fps_position_075.json",
+      "penetration_p50_px": 0.13140106201171875,
+      "penetration_p95_px": 0.6411845684051514,
+      "frame_max_penetration_p95_px": 1.5361659526824951
+    },
+    "note": "旧 30 FPS、修复 30 FPS 与 120 FPS 的回放样本并非同一轨迹，数值用于量级和分布诊断，不表示逐帧对应。"
+  },
+  "accepted_profile": {
+    "physics_fps": 30,
+    "max_physics_frames": 180,
+    "stable_frames": 4,
+    "solver_iterations": 4,
+    "drop_fast_forward": true,
+    "adaptive_collision_substeps": true,
+    "max_collision_substeps": 2,
+    "restitution_velocity_threshold": 35.0,
+    "position_correction": 0.9,
+    "kinematic_rest_frames": 1,
+    "kinematic_rest_reference_displacement_epsilon": 0.1
+  },
+  "rejected_experiments": [
+    {
+      "name": "每帧最多 3 个完整求解子步",
+      "reason": "1024×100 超时率约 8.51%，吞吐约 3351 steps/s"
+    },
+    {
+      "name": "每帧最多 4 个完整求解子步",
+      "reason": "1024×100 超时率约 27.5%，吞吐约 1882 steps/s"
+    },
+    {
+      "name": "把 4 次总求解预算分摊到子步",
+      "reason": "吞吐较高，但局面分布和超时没有得到足够改善"
+    },
+    {
+      "name": "恢复速度阈值 70",
+      "reason": "吞吐、平均分和超时均略差于阈值 35"
+    }
+  ]
+}

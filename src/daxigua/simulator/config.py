@@ -9,7 +9,7 @@ class SimulatorConfig:
 
     默认几何和时间参数对齐历史 Pymunk 环境。求解器本身是并行
     Jacobi 冲量法，因此 ``solver_iterations`` 不与 Pymunk 的顺序迭代次数
-   76f4接等价，需要通过行为和分布对照校准。
+    直接等价，需要通过行为和分布对照校准。
     """
 
     board_width: int = 560
@@ -25,17 +25,24 @@ class SimulatorConfig:
     stable_frames: int = 15
     solver_iterations: int = 4
     drop_fast_forward: bool = False
+    adaptive_collision_substeps: bool = False
+    max_collision_substeps: int = 4
 
     gravity_y: float = 1800.0
     damping: float = 0.995
     fruit_elasticity: float = 0.18
+    restitution_velocity_threshold: float = 35.0
     fruit_friction: float = 0.88
     wall_friction: float = 0.60
 
     stable_velocity_epsilon: float = 35.0
     stable_angular_velocity_epsilon: float = 4.0
     kinematic_rest_frames: int = 4
+    # 兼容旧配置名：该数值定义在 120 FPS 参考时间步上，运行时会先
+    # 换算为速度，再乘当前 dt，避免低帧率反而更难进入静止修正。
     kinematic_rest_displacement_epsilon: float = 0.10
+    collision_substep_motion_fraction: float = 0.25
+    collision_substep_penetration_threshold: float = 1.0
     danger_seconds: float = 2.0
     contact_slop: float = 0.05
     position_correction: float = 0.75
@@ -57,6 +64,7 @@ class SimulatorConfig:
             'max_physics_frames',
             'stable_frames',
             'solver_iterations',
+            'max_collision_substeps',
             'kinematic_rest_frames',
             'sync_interval_frames',
             'cuda_threads_per_block',
@@ -77,6 +85,7 @@ class SimulatorConfig:
             'max_physics_frames',
             'stable_frames',
             'solver_iterations',
+            'max_collision_substeps',
             'sync_interval_frames',
             'cuda_threads_per_block',
         )
@@ -98,7 +107,13 @@ class SimulatorConfig:
             raise ValueError('kinematic_rest_frames must be non-negative')
         if self.kinematic_rest_frames > 255:
             raise ValueError('kinematic_rest_frames must be <= 255')
-        for name in ('drop_fast_forward', 'use_cuda_extension'):
+        if not 1 <= self.max_collision_substeps <= 4:
+            raise ValueError('max_collision_substeps must be in [1, 4]')
+        for name in (
+            'drop_fast_forward',
+            'adaptive_collision_substeps',
+            'use_cuda_extension',
+        ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f'{name} must be bool')
         if self.cuda_threads_per_block > 1024:
@@ -121,12 +136,21 @@ class SimulatorConfig:
             'stable_velocity_epsilon',
             'stable_angular_velocity_epsilon',
             'kinematic_rest_displacement_epsilon',
+            'restitution_velocity_threshold',
+            'collision_substep_motion_fraction',
+            'collision_substep_penetration_threshold',
             'danger_seconds',
             'contact_slop',
             'merge_tolerance',
         ):
             if float(getattr(self, name)) < 0:
                 raise ValueError(f'{name} must be non-negative')
+        for name in (
+            'collision_substep_motion_fraction',
+            'collision_substep_penetration_threshold',
+        ):
+            if float(getattr(self, name)) <= 0:
+                raise ValueError(f'{name} must be positive')
 
     @property
     def dt(self):
@@ -135,6 +159,12 @@ class SimulatorConfig:
     @property
     def danger_frame_limit(self):
         return int(self.physics_fps * self.danger_seconds)
+
+    @property
+    def kinematic_rest_speed_epsilon(self):
+        """返回与物理帧率无关的静止修正速度阈值。"""
+
+        return self.kinematic_rest_displacement_epsilon * 120.0
 
     @classmethod
     def training_fast(cls, **overrides):
@@ -149,6 +179,10 @@ class SimulatorConfig:
             'max_physics_frames': 180,
             'stable_frames': 4,
             'drop_fast_forward': True,
+            'adaptive_collision_substeps': True,
+            'max_collision_substeps': 2,
+            'kinematic_rest_frames': 1,
+            'position_correction': 0.90,
         }
         values.update(overrides)
         return cls(**values)
