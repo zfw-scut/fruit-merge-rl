@@ -18,6 +18,7 @@
 - 只使用 30 FPS 采集训练数据，隔离执行 30/120 FPS greedy 评估；
 - 云端 CUDA 门禁、端到端性能标定、动态环境扩容和低开销 Web 面板；
 - 最终 Replay 抽样、完整决策边界轨迹和 SHA-256 产物清单。
+- 从任意当前格式 checkpoint 重建在线 GNN，并生成带逐帧物理、Q 值和动作解释的本地模型观看页面。
 
 `daxigua.core` 仍只依赖 Python 标准库。模拟器的独立依赖见
 `requirements-simulator.txt`；正式训练的附加依赖见
@@ -54,6 +55,22 @@ $env:PYTHONPATH = 'src'
 & $python tools\train_gnn_dqn.py --smoke --device cuda `
     --run-dir runs\local-formal-smoke
 ```
+
+## 本地观看训练模型
+
+模型观看器默认使用 120 FPS 精确物理和 greedy 策略。它从 checkpoint 冻结配置重建
+在线 GNN，记录真实逐帧运动，并生成不依赖服务端的浏览器游戏页面：
+
+```powershell
+& $python tools\watch_gnn_dqn.py `
+    runs\gnn_dqn_baseline\checkpoints\best.pt `
+    --device cuda --physics-fps 120 --open
+```
+
+页面提供播放、暂停、倍速、逐帧、逐投放和合成跳转，并显示 q0～q3、模型选择的落点、
+21 个动作的 Q 值分布和推理耗时。增加 `--episodes 5` 会生成多局目录；增加
+`--physics-fps 30` 可检查同一模型在训练物理下的表现。观看器不会把任何状态写回训练
+Replay，也不会修改 checkpoint。
 
 ## 使用 python-torch
 

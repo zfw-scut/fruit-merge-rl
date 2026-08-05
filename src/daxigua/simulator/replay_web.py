@@ -103,6 +103,24 @@ _PLAYER_CSS = r'''
 #__ROOT_ID__ .dxr-status i{width:9px;height:9px;flex:none;border-radius:50%;background:var(--dx-accent)}
 #__ROOT_ID__ .dxr-status[data-kind=timeout] i{background:var(--dx-accent-2)}
 #__ROOT_ID__ .dxr-status[data-kind=done] i,#__ROOT_ID__ .dxr-status[data-kind=truncated] i{background:var(--dx-danger)}
+#__ROOT_ID__ .dxr-model[hidden]{display:none}
+#__ROOT_ID__ .dxr-model-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
+#__ROOT_ID__ .dxr-model-head strong{font-size:13px}
+#__ROOT_ID__ .dxr-model-head span{color:var(--dx-muted);font-size:10px;text-align:right;overflow-wrap:anywhere}
+#__ROOT_ID__ .dxr-model-summary{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-bottom:10px}
+#__ROOT_ID__ .dxr-model-value{padding:8px;border-radius:8px;background:#101821;border:1px solid #293848}
+#__ROOT_ID__ .dxr-model-value span{display:block;color:var(--dx-muted);font-size:10px;margin-bottom:3px}
+#__ROOT_ID__ .dxr-model-value strong{display:block;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#__ROOT_ID__ .dxr-queue{display:flex;gap:5px;flex-wrap:wrap;margin:0 0 10px}
+#__ROOT_ID__ .dxr-queue span{padding:4px 7px;border-radius:999px;background:#21313e;color:var(--dx-muted);font-size:10px}
+#__ROOT_ID__ .dxr-queue span:first-child{background:#285e55;color:#ecfff9}
+#__ROOT_ID__ .dxr-q-title{display:flex;justify-content:space-between;color:var(--dx-muted);font-size:10px;margin-bottom:5px}
+#__ROOT_ID__ .dxr-q-bars{height:92px;display:grid;grid-template-columns:repeat(21,minmax(5px,1fr));align-items:end;gap:3px;padding:6px 5px 4px;border-radius:8px;background:#101821;border:1px solid #293848}
+#__ROOT_ID__ .dxr-q-action{position:relative;height:100%;display:flex;align-items:flex-end;justify-content:center}
+#__ROOT_ID__ .dxr-q-action i{display:block;width:100%;min-height:4px;border-radius:3px 3px 1px 1px;background:#587083;transition:height .18s}
+#__ROOT_ID__ .dxr-q-action.selected i{background:linear-gradient(180deg,#8be6ca,#3aa98a);box-shadow:0 0 0 1px #a5f2db55,0 0 12px #5cc5a566}
+#__ROOT_ID__ .dxr-q-action b{position:absolute;bottom:-17px;font-size:8px;color:#738696;font-weight:500}
+#__ROOT_ID__ .dxr-q-action.selected b{color:var(--dx-accent);font-weight:700}
 #__ROOT_ID__ .dxr-toggles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px}
 #__ROOT_ID__ .dxr-toggle{display:flex;align-items:center;gap:7px;color:var(--dx-muted);font-size:12px;cursor:pointer}
 #__ROOT_ID__ .dxr-toggle input{accent-color:var(--dx-accent)}
@@ -115,7 +133,7 @@ _PLAYER_CSS = r'''
 #__ROOT_ID__ .dxr-legend-item img{width:28px;height:28px;object-fit:contain;flex:none}
 #__ROOT_ID__ .dxr-legend-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media(max-width:820px){#__ROOT_ID__{grid-template-columns:1fr;padding:12px}#__ROOT_ID__ .dxr-stage{position:relative;top:auto}#__ROOT_ID__ canvas{max-height:none;max-width:560px;margin:auto}#__ROOT_ID__ .dxr-panel{max-width:560px;margin:auto;width:100%}}
-@media(max-width:430px){#__ROOT_ID__ .dxr-grid,#__ROOT_ID__ .dxr-stats{grid-template-columns:1fr}#__ROOT_ID__ .dxr-toggles{grid-template-columns:1fr}}
+@media(max-width:430px){#__ROOT_ID__ .dxr-grid,#__ROOT_ID__ .dxr-stats,#__ROOT_ID__ .dxr-model-summary{grid-template-columns:1fr}#__ROOT_ID__ .dxr-toggles{grid-template-columns:1fr}}
 '''
 
 
@@ -171,6 +189,18 @@ _PLAYER_MARKUP = r'''
       <div class="dxr-stat"><span>水果数 / 分数</span><strong class="dxr-score-stat"></strong></div>
       <div class="dxr-stat"><span>当前投放累计合成</span><strong class="dxr-merge-stat"></strong></div>
     </div>
+    <section class="dxr-box dxr-model" hidden>
+      <div class="dxr-model-head"><strong>GNN-DQN 模型决策</strong><span class="dxr-model-checkpoint"></span></div>
+      <div class="dxr-model-summary">
+        <div class="dxr-model-value"><span>当前水果 / 选定动作</span><strong class="dxr-model-action"></strong></div>
+        <div class="dxr-model-value"><span>真实投放位置</span><strong class="dxr-model-position"></strong></div>
+        <div class="dxr-model-value"><span>选定 Q / Q 均值</span><strong class="dxr-model-q"></strong></div>
+        <div class="dxr-model-value"><span>危险进度 / 推理耗时</span><strong class="dxr-model-danger"></strong></div>
+      </div>
+      <div class="dxr-queue" aria-label="未来水果队列"></div>
+      <div class="dxr-q-title"><span>21 个动作 Q 值</span><span class="dxr-q-range"></span></div>
+      <div class="dxr-q-bars" aria-label="动作 Q 值分布"></div>
+    </section>
     <div class="dxr-status" aria-live="polite"><i></i><span></span></div>
     <div class="dxr-box dxr-toggles">
       <label class="dxr-toggle"><input class="dxr-show-textures" type="checkbox" checked>水果贴图</label>
@@ -214,7 +244,10 @@ const playButton=q('.dxr-play'),speedSelect=q('.dxr-speed'),modeSelect=q('.dxr-m
 const textures=textureSources.map((source,level)=>{if(!source)return null;const image=new Image();image.decoding='async';image.src=source;image.addEventListener('load',()=>draw());return image});
 const fallback=['','#b74b95','#ed5b70','#7650ad','#f19c37','#ef7447','#ef5350','#d5b34c','#ef9d91','#e8a63d','#9fd45a','#45b933'];
 let clipIndex=0,recordIndex=0,playing=false,lastTime=0,accumulator=0;
+let renderedDecisionKey='';
 board.width=replay.board.width;board.height=replay.board.height;ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+
+if(replay.model_viewer){const viewer=replay.model_viewer,episode=viewer.episode||{};q('.dxr-lead').textContent=`模型使用 ${episode.physics_fps||replay.physics_fps} FPS 真实物理 greedy 游玩；页面保存了每次投放的完整 Q 值与逐帧运动。`}
 
 function currentClip(){return replay.clips[clipIndex]}
 function decode(raw){
@@ -249,6 +282,20 @@ function drawFruit(fruit){
  if(q('.dxr-show-velocity').checked)drawArrow(x,y,vx,vy,physicsRadius);
  if(q('.dxr-show-ids').checked){ctx.font=`600 ${Math.max(11,Math.min(18,physicsRadius*.34))}px ui-monospace,monospace`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.lineWidth=3;ctx.strokeStyle='#0b111bcc';ctx.strokeText(`${level}·${id}`,x,y);ctx.fillStyle='#fff';ctx.fillText(`${level}·${id}`,x,y)}
 }
+function renderDecision(summary){
+ const panel=q('.dxr-model'),decision=summary.decision,viewer=replay.model_viewer||{};
+ if(!decision){panel.hidden=true;renderedDecisionKey='';return}
+ panel.hidden=false;const key=`${clipIndex}:${decision.drop}`;if(key===renderedDecisionKey)return;renderedDecisionKey=key;
+ q('.dxr-model-checkpoint').textContent=`${viewer.checkpoint||'checkpoint'} · ${(viewer.checkpoint_sha256||'').slice(0,12)}`;
+ q('.dxr-model-action').textContent=`${decision.current_fruit||`等级 ${decision.current_level}`} · A${decision.action}`;
+ q('.dxr-model-position').textContent=`x = ${Number(decision.drop_x).toFixed(1)} px`;
+ q('.dxr-model-q').textContent=`${Number(decision.selected_q).toFixed(4)} / ${Number(decision.q_mean).toFixed(4)}`;
+ q('.dxr-model-danger').textContent=`${(Number(decision.danger_progress)*100).toFixed(1)}% / ${Number(decision.inference_ms).toFixed(2)} ms`;
+ const queue=q('.dxr-queue');queue.replaceChildren(...decision.queue.map((level,index)=>{const item=document.createElement('span');item.textContent=`q${index} · ${replay.fruit_names[level-1]||`等级 ${level}`}`;return item}));
+ const values=decision.q_values.map(Number),minimum=Math.min(...values),maximum=Math.max(...values),span=Math.max(1e-9,maximum-minimum),bars=q('.dxr-q-bars');
+ bars.replaceChildren(...values.map((value,index)=>{const item=document.createElement('span');item.className='dxr-q-action'+(index===decision.action?' selected':'');item.title=`动作 A${index} · Q=${value.toFixed(6)}`;const bar=document.createElement('i');bar.style.height=`${10+(value-minimum)/span*90}%`;const label=document.createElement('b');label.textContent=index;item.append(bar,label);return item}));
+ q('.dxr-q-range').textContent=`${minimum.toFixed(3)} ～ ${maximum.toFixed(3)}`;
+}
 function draw(){
  const clip=currentClip(),record=currentRecord(),summary=summaryFor(record),b=replay.board;
  const gradient=ctx.createLinearGradient(0,0,0,b.height);gradient.addColorStop(0,'#182735');gradient.addColorStop(1,'#0e171e');ctx.fillStyle=gradient;ctx.fillRect(0,0,b.width,b.height);
@@ -262,6 +309,7 @@ function draw(){
  q('.dxr-time-stat').textContent=`${(record.frame/replay.physics_fps).toFixed(2)} 秒 · 局部 ${record.local_frame} 帧`;
  q('.dxr-score-stat').textContent=`${record.fruits.length} 个 · ${record.score} 分`;
  q('.dxr-merge-stat').textContent=`${record.merges} 次 · 本次 +${summary.score_delta} 分`;
+ renderDecision(summary);
  const[kind,text]=statusText(summary),status=q('.dxr-status');status.dataset.kind=kind;status.querySelector('span').textContent=(summary.reset_before?'已在本次投放前重置；':'')+text;
 }
 function setRecord(value,{stopPlayback=true}={}){if(stopPlayback)stop();recordIndex=Math.max(0,Math.min(Number(value),currentClip().records.length-1));draw()}

@@ -246,6 +246,33 @@ def write_replay_html(
     """生成不依赖服务端或外部文件的完整回放 HTML。"""
 
     payload = trace_to_payload(trace, config, compact=True)
+    return write_replay_payload_html(
+        path,
+        payload,
+        title=title,
+        texture_dir=texture_dir,
+        use_textures=use_textures,
+        compress_payload=compress_payload,
+    )
+
+
+def write_replay_payload_html(
+        path,
+        payload,
+        *,
+        title='CUDA 物理回放',
+        texture_dir=None,
+        use_textures=True,
+        compress_payload=True):
+    """把已经扩展过的回放 payload 写成完整 HTML。
+
+    模拟器保持通用 payload 契约；模型观看器可以在调用本函数前，为每次投放附加
+    checkpoint、Q 值和队列等只读展示元数据。
+    """
+
+    if not isinstance(payload, dict) or not isinstance(
+            payload.get('clips'), list):
+        raise ValueError('replay payload must contain a clips list')
     textures = (
         load_fruit_texture_data_urls(texture_dir)
         if use_textures

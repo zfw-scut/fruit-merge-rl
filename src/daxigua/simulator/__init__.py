@@ -15,6 +15,7 @@ from .replay import (
     write_replay_catalog,
     write_replay_fragment,
     write_replay_html,
+    write_replay_payload_html,
 )
 from .types import (
     BatchDropResult,
@@ -46,6 +47,7 @@ __all__ = [
     'VectorEnv',
     'write_replay_fragment',
     'write_replay_html',
+    'write_replay_payload_html',
     'write_replay_catalog',
     'ZeroReward',
 ]

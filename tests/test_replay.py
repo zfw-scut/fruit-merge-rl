@@ -18,6 +18,7 @@ from daxigua.simulator import (
     write_replay_catalog,
     write_replay_fragment,
     write_replay_html,
+    write_replay_payload_html,
 )
 
 
@@ -116,7 +117,35 @@ class ReplayFileTest(unittest.TestCase):
         self.assertIn('下一超时', html)
         self.assertIn('jumpTimeout', html)
         self.assertIn('线速度向量', html)
+        self.assertIn('GNN-DQN 模型决策', html)
+        self.assertIn('21 个动作 Q 值', html)
         self.assertTrue(payload['compact_records'])
+
+    def test_extended_payload_can_keep_model_decision_metadata(self):
+        payload = trace_to_payload(
+            sample_trace(), SimulatorConfig(), compact=True
+        )
+        payload['model_viewer'] = {'checkpoint': 'best.pt'}
+        payload['clips'][0]['drop_summaries'][0]['decision'] = {
+            'drop': 1,
+            'action': 3,
+            'q_values': [float(index) for index in range(21)],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = write_replay_payload_html(
+                Path(directory) / 'model.html', payload
+            )
+            html = path.read_text(encoding='utf-8')
+        match = re.search(
+            r"decodePayload\('gzip-base64',(" + r'"[A-Za-z0-9+/=]+"' + r")\)",
+            html,
+        )
+        decoded = json.loads(gzip.decompress(base64.b64decode(
+            json.loads(match.group(1))
+        )))
+        decision = decoded['clips'][0]['drop_summaries'][0]['decision']
+        self.assertEqual(decision['action'], 3)
+        self.assertEqual(len(decision['q_values']), 21)
 
     def test_fragment_uses_the_same_full_player(self):
         with tempfile.TemporaryDirectory() as directory:

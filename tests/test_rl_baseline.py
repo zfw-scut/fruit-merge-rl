@@ -23,6 +23,10 @@ from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.monitoring import _DASHBOARD_HTML, _DashboardState
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
+from daxigua.rl.viewer import (
+    load_viewer_model,
+    viewer_simulator_config,
+)
 from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
 
 
@@ -228,10 +232,26 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
                 replay_metadata={'replay_saved_in_checkpoint': False},
             )
             loaded = load_checkpoint(path)
+            viewer_model = load_viewer_model(path, device='cpu')
         self.assertEqual(loaded['progress']['transitions'], 8)
+        self.assertEqual(viewer_model.progress['transitions'], 8)
+        self.assertEqual(viewer_model.model_config, _small_model_config())
+        self.assertEqual(viewer_model.device, torch.device('cpu'))
         self.assertFalse(
             loaded['replay_metadata']['replay_saved_in_checkpoint']
         )
+
+    def test_viewer_physics_defaults_to_accurate_120_fps(self):
+        model_config = _small_model_config()
+        accurate = viewer_simulator_config(120, model_config, 'cuda')
+        training = viewer_simulator_config(30, model_config, 'cuda')
+
+        self.assertEqual(accurate.physics_fps, 120)
+        self.assertEqual(training.physics_fps, 30)
+        self.assertTrue(accurate.use_cuda_extension)
+        self.assertTrue(training.use_cuda_extension)
+        with self.assertRaisesRegex(ValueError, '30 or 120'):
+            viewer_simulator_config(60, model_config, 'cuda')
 
 
 class DashboardTest(unittest.TestCase):
