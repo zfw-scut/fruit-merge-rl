@@ -7,9 +7,9 @@
 namespace {
 
 constexpr int kMaxFruits = 256;
-constexpr long long kRngMultiplier = 1103515245LL;
-constexpr long long kRngIncrement = 12345LL;
-constexpr long long kRngMask = 0x7fffffffLL;
+constexpr int64_t kRngMultiplier = 1103515245LL;
+constexpr int64_t kRngIncrement = 12345LL;
+constexpr int64_t kRngMask = 0x7fffffffLL;
 
 struct Vec2 {
   float x;
@@ -33,13 +33,13 @@ struct KernelState {
   float* velocities;
   float* angles;
   float* angular_velocities;
-  long long* levels;
+  int64_t* levels;
   float* physics_radii;
   float* masses;
   float* inverse_masses;
   float* inverse_inertias;
-  long long* fruit_ids;
-  long long* age_frames;
+  int64_t* fruit_ids;
+  int64_t* age_frames;
   bool* active;
   int env;
   int capacity;
@@ -340,16 +340,16 @@ __device__ inline void record_trace_frame(
     float* trace_velocities,
     float* trace_angles,
     float* trace_angular_velocities,
-    long long* trace_levels,
+    int64_t* trace_levels,
     float* trace_physics_radii,
-    long long* trace_fruit_ids,
+    int64_t* trace_fruit_ids,
     bool* trace_active,
-    long long* trace_scores,
-    long long* trace_merge_counts,
-    long long* trace_frame_numbers,
-    long long* trace_record_counts,
-    long long score,
-    long long merge_count) {
+    int64_t* trace_scores,
+    int64_t* trace_merge_counts,
+    int64_t* trace_frame_numbers,
+    int64_t* trace_record_counts,
+    int64_t score,
+    int64_t merge_count) {
   if (record_index < 0 || record_index >= trace_capacity) return;
   int frame_index = trace_row * trace_capacity + record_index;
   int fruit_base = frame_index * state.capacity;
@@ -377,67 +377,67 @@ __device__ inline void record_trace_frame(
 }
 
 __global__ void vector_step_kernel(
-    const long long* actions,
+    const int64_t* actions,
     const bool* enabled,
     float* positions,
     float* velocities,
     float* frame_start_positions,
     float* angles,
     float* angular_velocities,
-    long long* levels,
+    int64_t* levels,
     float* physics_radii,
     float* masses,
     float* inverse_masses,
     float* inverse_inertias,
-    long long* fruit_ids,
-    long long* age_frames,
+    int64_t* fruit_ids,
+    int64_t* age_frames,
     bool* active,
-    long long* fruit_queue,
-    long long* score,
-    long long* last_score,
-    long long* step_count,
-    long long* physics_frame,
-    long long* fail_frames,
-    long long* next_fruit_id,
-    long long* rng_state,
+    int64_t* fruit_queue,
+    int64_t* score,
+    int64_t* last_score,
+    int64_t* step_count,
+    int64_t* physics_frame,
+    int64_t* fail_frames,
+    int64_t* next_fruit_id,
+    int64_t* rng_state,
     bool* terminated,
     bool* needs_reset,
-    long long* last_drop_level,
+    int64_t* last_drop_level,
     float* last_drop_x,
-    long long* last_drop_id,
-    long long* last_queue_before,
-    long long* last_queue_after,
-    long long* event_count,
-    long long* event_source_levels,
-    long long* event_new_levels,
+    int64_t* last_drop_id,
+    int64_t* last_queue_before,
+    int64_t* last_queue_after,
+    int64_t* event_count,
+    int64_t* event_source_levels,
+    int64_t* event_new_levels,
     float* event_positions,
-    long long* event_score_deltas,
-    long long* event_source_ids,
-    long long* event_new_fruit_ids,
+    int64_t* event_score_deltas,
+    int64_t* event_source_ids,
+    int64_t* event_new_fruit_ids,
     const float* display_radii,
     const float* dropped_radii,
     const float* merged_radii,
     const float* mass_table,
-    const long long* merge_scores,
-    long long* frames_simulated,
-    long long* fast_forwarded_frames,
-    long long* collision_substeps,
+    const int64_t* merge_scores,
+    int64_t* frames_simulated,
+    int64_t* fast_forwarded_frames,
+    int64_t* collision_substeps,
     bool* stable_result,
     bool* done_result,
     bool* truncated_result,
-    const long long* trace_rows,
+    const int64_t* trace_rows,
     float* trace_positions,
     float* trace_velocities,
     float* trace_angles,
     float* trace_angular_velocities,
-    long long* trace_levels,
+    int64_t* trace_levels,
     float* trace_physics_radii,
-    long long* trace_fruit_ids,
+    int64_t* trace_fruit_ids,
     bool* trace_active,
-    long long* trace_scores,
-    long long* trace_merge_counts,
-    long long* trace_frame_numbers,
-    long long* trace_record_counts,
+    int64_t* trace_scores,
+    int64_t* trace_merge_counts,
+    int64_t* trace_frame_numbers,
+    int64_t* trace_record_counts,
     int trace_count,
     int trace_capacity,
     int trace_stride,
@@ -488,7 +488,7 @@ __global__ void vector_step_kernel(
   int trace_row = -1;
   int queue_base = env * queue_length;
   int event_base = env * max_fruits;
-  long long score_before = score[env];
+  int64_t score_before = score[env];
   event_count[env] = 0;
   frames_simulated[env] = 0;
   fast_forwarded_frames[env] = 0;
@@ -530,7 +530,7 @@ __global__ void vector_step_kernel(
     last_queue_before[queue_base + queue_index] =
         fruit_queue[queue_base + queue_index];
   }
-  long long level = fruit_queue[queue_base];
+  int64_t level = fruit_queue[queue_base];
   float display_radius = display_radii[level];
   float left = wall_width + display_radius + 2.0f;
   float right = board_width - wall_width - display_radius - 2.0f;
@@ -549,7 +549,7 @@ __global__ void vector_step_kernel(
   masses[drop_index] = mass;
   inverse_masses[drop_index] = 1.0f / mass;
   inverse_inertias[drop_index] = 1.0f / (0.5f * mass * drop_radius * drop_radius);
-  long long drop_id = next_fruit_id[env]++;
+  int64_t drop_id = next_fruit_id[env]++;
   fruit_ids[drop_index] = drop_id;
   age_frames[drop_index] = 0;
   active[drop_index] = true;
@@ -558,7 +558,7 @@ __global__ void vector_step_kernel(
     fruit_queue[queue_base + queue_index] =
         fruit_queue[queue_base + queue_index + 1];
   }
-  long long next_rng =
+  int64_t next_rng =
       (rng_state[env] * kRngMultiplier + kRngIncrement) & kRngMask;
   rng_state[env] = next_rng;
   fruit_queue[queue_base + queue_length - 1] = next_rng % 5 + 1;
@@ -648,7 +648,7 @@ __global__ void vector_step_kernel(
   for (int frame = skipped_frames;
        frame < max_physics_frames && running;
        ++frame) {
-    long long frame_event_count = event_count[env];
+    int64_t frame_event_count = event_count[env];
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
       int index = state.slot_index(slot);
       if (!active[index]) continue;
@@ -718,13 +718,13 @@ __global__ void vector_step_kernel(
         int index_j = state.slot_index(slot_j);
         claimed[slot_i] = 1;
         claimed[slot_j] = 1;
-        long long source_level = levels[index_i];
-        long long source_id_i = fruit_ids[index_i];
-        long long source_id_j = fruit_ids[index_j];
+        int64_t source_level = levels[index_i];
+        int64_t source_id_i = fruit_ids[index_i];
+        int64_t source_id_j = fruit_ids[index_j];
         Vec2 midpoint = mul(add(state.position(slot_i), state.position(slot_j)), 0.5f);
-        long long delta_score = merge_scores[source_level];
-        long long target_level = source_level < 11 ? source_level + 1 : 0;
-        long long new_id = target_level > 0 ? next_fruit_id[env]++ : 0;
+        int64_t delta_score = merge_scores[source_level];
+        int64_t target_level = source_level < 11 ? source_level + 1 : 0;
+        int64_t new_id = target_level > 0 ? next_fruit_id[env]++ : 0;
         Vec2 inherited_velocity = {0.0f, 0.0f};
         float inherited_angular_velocity = 0.0f;
         float new_radius = 0.0f;
@@ -845,7 +845,7 @@ __global__ void vector_step_kernel(
     frames_simulated[env] += 1;
     physics_frame[env] += 1;
 
-    long long newest_id = 0;
+    int64_t newest_id = 0;
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
       int index = state.slot_index(slot);
       if (active[index]) newest_id = max(newest_id, fruit_ids[index]);
@@ -1012,44 +1012,44 @@ void vector_step_cuda(
   int blocks = (num_envs + threads - 1) / threads;
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vector_step_kernel<<<blocks, threads, 0, stream>>>(
-      actions.data_ptr<long long>(), enabled.data_ptr<bool>(),
+      actions.data_ptr<int64_t>(), enabled.data_ptr<bool>(),
       positions.data_ptr<float>(),
       velocities.data_ptr<float>(), frame_start_positions.data_ptr<float>(),
       angles.data_ptr<float>(),
-      angular_velocities.data_ptr<float>(), levels.data_ptr<long long>(),
+      angular_velocities.data_ptr<float>(), levels.data_ptr<int64_t>(),
       physics_radii.data_ptr<float>(), masses.data_ptr<float>(),
       inverse_masses.data_ptr<float>(), inverse_inertias.data_ptr<float>(),
-      fruit_ids.data_ptr<long long>(), age_frames.data_ptr<long long>(),
-      active.data_ptr<bool>(), fruit_queue.data_ptr<long long>(),
-      score.data_ptr<long long>(), last_score.data_ptr<long long>(),
-      step_count.data_ptr<long long>(), physics_frame.data_ptr<long long>(),
-      fail_frames.data_ptr<long long>(), next_fruit_id.data_ptr<long long>(),
-      rng_state.data_ptr<long long>(), terminated.data_ptr<bool>(),
-      needs_reset.data_ptr<bool>(), last_drop_level.data_ptr<long long>(),
-      last_drop_x.data_ptr<float>(), last_drop_id.data_ptr<long long>(),
-      last_queue_before.data_ptr<long long>(),
-      last_queue_after.data_ptr<long long>(), event_count.data_ptr<long long>(),
-      event_source_levels.data_ptr<long long>(),
-      event_new_levels.data_ptr<long long>(), event_positions.data_ptr<float>(),
-      event_score_deltas.data_ptr<long long>(),
-      event_source_ids.data_ptr<long long>(),
-      event_new_fruit_ids.data_ptr<long long>(), display_radii.data_ptr<float>(),
+      fruit_ids.data_ptr<int64_t>(), age_frames.data_ptr<int64_t>(),
+      active.data_ptr<bool>(), fruit_queue.data_ptr<int64_t>(),
+      score.data_ptr<int64_t>(), last_score.data_ptr<int64_t>(),
+      step_count.data_ptr<int64_t>(), physics_frame.data_ptr<int64_t>(),
+      fail_frames.data_ptr<int64_t>(), next_fruit_id.data_ptr<int64_t>(),
+      rng_state.data_ptr<int64_t>(), terminated.data_ptr<bool>(),
+      needs_reset.data_ptr<bool>(), last_drop_level.data_ptr<int64_t>(),
+      last_drop_x.data_ptr<float>(), last_drop_id.data_ptr<int64_t>(),
+      last_queue_before.data_ptr<int64_t>(),
+      last_queue_after.data_ptr<int64_t>(), event_count.data_ptr<int64_t>(),
+      event_source_levels.data_ptr<int64_t>(),
+      event_new_levels.data_ptr<int64_t>(), event_positions.data_ptr<float>(),
+      event_score_deltas.data_ptr<int64_t>(),
+      event_source_ids.data_ptr<int64_t>(),
+      event_new_fruit_ids.data_ptr<int64_t>(), display_radii.data_ptr<float>(),
       dropped_radii.data_ptr<float>(), merged_radii.data_ptr<float>(),
-      mass_table.data_ptr<float>(), merge_scores.data_ptr<long long>(),
-      frames_simulated.data_ptr<long long>(),
-      fast_forwarded_frames.data_ptr<long long>(),
-      collision_substeps.data_ptr<long long>(), stable_result.data_ptr<bool>(),
+      mass_table.data_ptr<float>(), merge_scores.data_ptr<int64_t>(),
+      frames_simulated.data_ptr<int64_t>(),
+      fast_forwarded_frames.data_ptr<int64_t>(),
+      collision_substeps.data_ptr<int64_t>(), stable_result.data_ptr<bool>(),
       done_result.data_ptr<bool>(), truncated_result.data_ptr<bool>(),
-      trace_rows.data_ptr<long long>(), trace_positions.data_ptr<float>(),
+      trace_rows.data_ptr<int64_t>(), trace_positions.data_ptr<float>(),
       trace_velocities.data_ptr<float>(), trace_angles.data_ptr<float>(),
       trace_angular_velocities.data_ptr<float>(),
-      trace_levels.data_ptr<long long>(),
+      trace_levels.data_ptr<int64_t>(),
       trace_physics_radii.data_ptr<float>(),
-      trace_fruit_ids.data_ptr<long long>(), trace_active.data_ptr<bool>(),
-      trace_scores.data_ptr<long long>(),
-      trace_merge_counts.data_ptr<long long>(),
-      trace_frame_numbers.data_ptr<long long>(),
-      trace_record_counts.data_ptr<long long>(),
+      trace_fruit_ids.data_ptr<int64_t>(), trace_active.data_ptr<bool>(),
+      trace_scores.data_ptr<int64_t>(),
+      trace_merge_counts.data_ptr<int64_t>(),
+      trace_frame_numbers.data_ptr<int64_t>(),
+      trace_record_counts.data_ptr<int64_t>(),
       static_cast<int>(trace_count), static_cast<int>(trace_capacity),
       static_cast<int>(trace_stride),
       num_envs, static_cast<int>(board_width), static_cast<int>(board_height),
