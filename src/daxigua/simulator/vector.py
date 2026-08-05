@@ -1774,6 +1774,13 @@ class TensorVectorSimulator:
             * self.active.to(self.float_dtype)
         ).sum(dim=1)
         empty_space_ratio = (1.0 - fruit_area / playable_area).clamp(0.0, 1.0)
+        over_danger_line = (
+            self.active & (fruit_top < float(self.config.spawn_y))
+        ).any(dim=1)
+        danger_limit = max(1, self.config.danger_frame_limit)
+        danger_progress = (
+            self.fail_frames.to(self.float_dtype) / float(danger_limit)
+        ).clamp(0.0, 1.0)
         return BatchObservation(
             positions=self.positions,
             velocities=self.velocities,
@@ -1794,6 +1801,8 @@ class TensorVectorSimulator:
             max_level=max_level,
             max_height=max_height,
             empty_space_ratio=empty_space_ratio,
+            danger_progress=danger_progress,
+            over_danger_line=over_danger_line,
         )
 
     def action_candidates(self, env_index):

@@ -34,6 +34,8 @@ class BatchObservation:
     max_level: torch.Tensor
     max_height: torch.Tensor
     empty_space_ratio: torch.Tensor
+    danger_progress: torch.Tensor
+    over_danger_line: torch.Tensor
 
     def clone(self):
         """返回与后续环境步进解耦的状态快照。"""

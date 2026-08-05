@@ -1,0 +1,84 @@
+[training]
+run_dir = "runs/gnn_dqn_baseline"
+device = "cuda"
+seed = 20260805
+max_envs = 4096
+active_envs = 4096
+total_transitions = 50000000
+max_wall_seconds = 0.0
+finalization_reserve_seconds = 1800.0
+log_interval_seconds = 10.0
+checkpoint_interval_seconds = 1800.0
+max_episode_drops = 1000
+
+[model]
+max_fruits = 64
+action_count = 21
+queue_length = 4
+hidden_dim = 128
+edge_hidden_dim = 128
+message_layers = 3
+queue_hidden_dim = 64
+queue_layers = 1
+level_embedding_dim = 16
+max_neighbors = 12
+nearest_neighbors = 4
+motion_neighbors = 2
+vertical_neighbors_per_direction = 2
+action_key_fruits = 8
+dropout = 0.0
+
+[dqn]
+gamma = 0.99
+learning_rate = 0.0001
+huber_delta = 1.0
+grad_clip_norm = 10.0
+target_update_interval = 1000
+epsilon_start = 1.0
+epsilon_end = 0.05
+epsilon_decay_fraction = 0.40
+utd_ratio = 1.0
+use_bfloat16 = true
+fused_adam = true
+compile_model = false
+compile_mode = "reduce-overhead"
+
+[replay]
+capacity = 1048576
+batch_size = 512
+warmup_transitions = 262144
+warmup_stage_ratios = [0.30, 0.30, 0.25, 0.15]
+
+[evaluation]
+fast_interval_transitions = 2097152
+accurate_milestones = [10000000, 25000000, 50000000, 100000000]
+periodic_episodes = 512
+final_episodes = 4096
+parallel_envs = 512
+max_episode_drops = 1000
+seed_base = 32000000
+
+[analysis]
+transition_sample_size = 131072
+transition_chunk_size = 8192
+trajectory_episodes = 512
+
+[dashboard]
+enabled = true
+host = "127.0.0.1"
+port = 8765
+publish_interval_seconds = 1.0
+resource_interval_seconds = 2.0
+history_size = 3600
+
+[autoscale]
+enabled = true
+candidate_envs = [1024, 2048, 4096, 8192, 16384, 32768]
+low_gpu_utilization = 80.0
+low_cpu_utilization = 75.0
+max_memory_utilization = 85.0
+observation_seconds = 120.0
+trial_seconds = 120.0
+cooldown_seconds = 600.0
+minimum_throughput_gain = 0.08
+rollback_loss = 0.05

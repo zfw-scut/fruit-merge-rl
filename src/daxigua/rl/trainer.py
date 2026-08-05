@@ -1,0 +1,954 @@
+"""第一版 GNN-DQN 的单进程 GPU 正式训练主链。"""
+
+from __future__ import annotations
+
+from collections import deque
+import json
+import math
+import os
+from pathlib import Path
+import random
+import subprocess
+import time
+
+import torch
+
+from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
+
+from .checkpoint import (
+    load_checkpoint,
+    restore_rng_state,
+    save_checkpoint_atomic,
+    write_artifact_manifest,
+)
+from .autoscale import AdaptiveScaleController
+from .config import TrainingConfig
+from .evaluation import evaluate_policy
+from .learner import DqnLearner
+from .model import BaselineGnnDqn
+from .monitoring import DashboardPublisher, ResourceSampler
+from .observations import TensorState
+from .replay import GpuReplayBuffer
+
+
+def _json_safe(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _git_identity(project_root):
+    def run(*arguments):
+        try:
+            return subprocess.check_output(
+                ('git',) + arguments,
+                cwd=project_root,
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            return None
+    return {
+        'commit': run('rev-parse', 'HEAD'),
+        'branch': run('branch', '--show-current'),
+        'dirty': bool(run('status', '--short')),
+    }
+
+
+class _TensorMetricAccumulator:
+    def __init__(self):
+        self.sums = {}
+        self.count = 0
+
+    def add(self, metrics):
+        for name, value in metrics.items():
+            if isinstance(value, torch.Tensor) and value.numel() == 1:
+                detached = value.detach().float()
+                self.sums[name] = self.sums.get(name, 0.0) + detached
+        self.count += 1
+
+    def flush(self):
+        if self.count == 0:
+            return {}
+        values = {
+            name: float((total / self.count).item())
+            for name, total in self.sums.items()
+        }
+        self.sums.clear()
+        self.count = 0
+        return values
+
+
+class BaselineTrainer:
+    """30 FPS 独占训练；评估模拟器从不写入 Replay。"""
+
+    CHECKPOINT_MILESTONES = (
+        1_000_000,
+        5_000_000,
+        10_000_000,
+        25_000_000,
+        50_000_000,
+        100_000_000,
+    )
+
+    def __init__(self, config, *, project_root=None):
+        if not isinstance(config, TrainingConfig):
+            raise TypeError('config must be TrainingConfig')
+        self.config = config
+        self.device = torch.device(config.device)
+        if self.device.type == 'cuda' and not torch.cuda.is_available():
+            raise RuntimeError('CUDA is not available for formal training')
+        if self.device.type == 'cuda' and self.device.index is None:
+            self.device = torch.device('cuda', torch.cuda.current_device())
+        if self.device.type != 'cuda' and config.active_envs != config.max_envs:
+            raise ValueError('CPU smoke requires active_envs == max_envs')
+
+        self.project_root = Path(project_root or Path.cwd()).resolve()
+        self.run_dir = Path(config.run_dir).resolve()
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        (self.run_dir / 'checkpoints').mkdir(exist_ok=True)
+        (self.run_dir / 'evaluations').mkdir(exist_ok=True)
+        (self.run_dir / 'analysis').mkdir(exist_ok=True)
+        random.seed(config.seed)
+        torch.manual_seed(config.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(config.seed)
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.set_float32_matmul_precision('high')
+
+        self.simulator_config = SimulatorConfig.training_fast(
+            max_fruits=config.model.max_fruits,
+            action_count=config.model.action_count,
+            queue_length=config.model.queue_length,
+            use_cuda_extension=self.device.type == 'cuda',
+        )
+        self.simulator = TensorVectorSimulator(
+            config.max_envs,
+            config=self.simulator_config,
+            device=self.device,
+        )
+        self.active_envs = config.active_envs
+        base_model = BaselineGnnDqn(
+            config.model,
+            board_width=self.simulator_config.board_width,
+            board_height=self.simulator_config.board_height,
+            spawn_y=self.simulator_config.spawn_y,
+            wall_width=self.simulator_config.wall_width,
+            gravity_y=self.simulator_config.gravity_y,
+        ).to(self.device)
+        self.learner = DqnLearner(base_model, config.dqn)
+        self.model = self.learner.online_model
+        self.replay = GpuReplayBuffer(
+            config.replay.capacity,
+            max_fruits=config.model.max_fruits,
+            queue_length=config.model.queue_length,
+            device=self.device,
+            physics_fps=self.simulator_config.physics_fps,
+            seed=config.seed + 1,
+        )
+        self.dashboard = DashboardPublisher(config.dashboard, self.run_dir)
+        self.resource_sampler = ResourceSampler(os.getpid())
+        self.scale_controller = AdaptiveScaleController(
+            config.autoscale,
+            initial_envs=config.active_envs,
+            maximum_envs=config.max_envs,
+        )
+        self.training_metrics = _TensorMetricAccumulator()
+        self.recent_scores = deque(maxlen=4096)
+        self.recent_drops = deque(maxlen=4096)
+        self.transitions = 0
+        self.simulated_transitions = 0
+        self.episodes = 0
+        self.update_credit = 0.0
+        self.best_accurate_score = float('-inf')
+        self.last_fast_eval_score = None
+        self.last_accurate_eval_score = None
+        self.completed_accurate_milestones = set()
+        self.completed_checkpoint_milestones = set()
+        self.action_counts = torch.zeros(
+            config.model.action_count,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.stage_thresholds = (16, 64, 128)
+        self.stop_requested = False
+        self.stop_reason = None
+        self._write_run_identity()
+
+    def request_stop(self, reason='requested'):
+        self.stop_requested = True
+        self.stop_reason = str(reason)
+        self.dashboard.event(
+            'stop_requested', '收到安全停止请求', reason=self.stop_reason
+        )
+
+    def _write_run_identity(self):
+        identity = {
+            'training_config': self.config.to_dict(),
+            'git': _git_identity(self.project_root),
+            'torch_version': torch.__version__,
+            'cuda_runtime': torch.version.cuda,
+            'device': str(self.device),
+            'device_name': (
+                torch.cuda.get_device_name(self.device)
+                if self.device.type == 'cuda'
+                else 'cpu'
+            ),
+            'pid': os.getpid(),
+            'created_at': time.time(),
+        }
+        (self.run_dir / 'run_identity.json').write_text(
+            json.dumps(identity, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+
+    def _active_rows(self):
+        return torch.arange(
+            self.active_envs, dtype=torch.int64, device=self.device
+        )
+
+    def _enabled_mask(self, extra=None):
+        mask = torch.zeros(
+            self.config.max_envs, dtype=torch.bool, device=self.device
+        )
+        mask[:self.active_envs] = True
+        if extra is not None:
+            mask &= extra
+        return mask
+
+    def _step(self, actions, enabled_mask=None):
+        if enabled_mask is None or bool(enabled_mask.all().item()):
+            return self.simulator.step(actions)
+        if self.device.type != 'cuda':
+            raise RuntimeError('masked stepping is only available on CUDA')
+        return self.simulator.step_masked(actions, enabled_mask)
+
+    def _random_actions(self):
+        return torch.randint(
+            self.config.model.action_count,
+            (self.config.max_envs,),
+            device=self.device,
+        )
+
+    def _reset_finished(self, finished):
+        if bool(finished.any().item()):
+            self.simulator.reset(finished)
+
+    @torch.no_grad()
+    def estimate_stage_thresholds(self):
+        if self.device.type != 'cuda':
+            self.stage_thresholds = (8, 16, 32)
+            return self.stage_thresholds
+        self.dashboard.event('pilot_started', '开始随机局长阶段标定')
+        self.simulator.reset(self._enabled_mask(), seeds=self.config.seed + 100)
+        finished = torch.zeros(
+            self.config.max_envs, dtype=torch.bool, device=self.device
+        )
+        lengths = torch.zeros(
+            self.config.max_envs, dtype=torch.int64, device=self.device
+        )
+        for _ in range(self.config.max_episode_drops):
+            enabled = self._enabled_mask(~finished)
+            if not bool(enabled.any().item()):
+                break
+            result = self._step(self._random_actions(), enabled)
+            time_limit = result.observation.step_count >= self.config.max_episode_drops
+            newly_finished = enabled & (result.physics.done | time_limit)
+            lengths[newly_finished] = result.observation.step_count[newly_finished]
+            finished |= newly_finished
+        active_lengths = lengths[:self.active_envs].to(torch.float32)
+        active_lengths = torch.where(
+            active_lengths > 0,
+            active_lengths,
+            torch.full_like(active_lengths, self.config.max_episode_drops),
+        )
+        quantiles = torch.quantile(
+            active_lengths,
+            torch.tensor((0.25, 0.50, 0.75), device=self.device),
+        ).to(torch.int64)
+        self.stage_thresholds = tuple(
+            max(1, int(value)) for value in quantiles.tolist()
+        )
+        self.simulator.reset(self._enabled_mask(), seeds=self.config.seed + 200)
+        self.dashboard.event(
+            'pilot_finished',
+            '随机局长阶段标定完成',
+            thresholds=self.stage_thresholds,
+        )
+        return self.stage_thresholds
+
+    @torch.no_grad()
+    def stagger_initial_states(self):
+        if self.device.type != 'cuda':
+            return
+        q1, q2, q3 = self.stage_thresholds
+        upper = max(q3 + 1, min(self.config.max_episode_drops, q3 * 2))
+        bounds = ((0, q1), (q1, q2), (q2, q3), (q3, upper))
+        targets = torch.zeros(
+            self.config.max_envs, dtype=torch.int64, device=self.device
+        )
+        for stage, (low, high) in enumerate(bounds):
+            rows = torch.arange(
+                stage, self.active_envs, 4, device=self.device
+            )
+            if rows.numel() == 0:
+                continue
+            high = max(low + 1, high)
+            targets[rows] = torch.randint(
+                low, high, (rows.numel(),), device=self.device
+            )
+        for _ in range(self.config.max_episode_drops * 3):
+            pending = self._enabled_mask(
+                self.simulator.step_count < targets
+            )
+            if not bool(pending.any().item()):
+                return
+            result = self._step(self._random_actions(), pending)
+            failed = pending & result.physics.done
+            self._reset_finished(failed)
+        raise RuntimeError('could not construct dispersed warmup states')
+
+    def _classify_stages(self, observation):
+        rows = self._active_rows()
+        step_count = observation.step_count.index_select(0, rows)
+        danger = (
+            observation.over_danger_line.index_select(0, rows)
+            | (observation.danger_progress.index_select(0, rows) > 0)
+        )
+        q1, q2, _q3 = self.stage_thresholds
+        stages = torch.zeros_like(step_count)
+        stages = torch.where(step_count >= q1, torch.ones_like(stages), stages)
+        stages = torch.where(step_count >= q2, torch.full_like(stages, 2), stages)
+        stages = torch.where(danger, torch.full_like(stages, 3), stages)
+        return stages
+
+    @torch.no_grad()
+    def fill_warmup_replay(self):
+        target = self.config.replay.warmup_transitions
+        ratios = self.config.replay.warmup_stage_ratios
+        quotas = [int(target * ratio) for ratio in ratios]
+        quotas[-1] += target - sum(quotas)
+        counts = [0, 0, 0, 0]
+        self.dashboard.event('warmup_started', '开始分阶段预热 Replay')
+        max_rounds = max(
+            self.config.max_episode_drops * 20,
+            math.ceil(target / self.active_envs) * 100,
+        )
+        for _ in range(max_rounds):
+            if sum(counts) >= target:
+                break
+            observation = self.simulator.observe()
+            current = TensorState.from_observation(
+                observation,
+                physics_fps=self.simulator_config.physics_fps,
+                rows=self._active_rows(),
+            )
+            stages = self._classify_stages(observation)
+            admit = torch.zeros(
+                self.active_envs, dtype=torch.bool, device=self.device
+            )
+            for stage in range(4):
+                remaining = quotas[stage] - counts[stage]
+                if remaining <= 0:
+                    continue
+                candidates = torch.nonzero(
+                    stages == stage, as_tuple=False
+                ).flatten()[:remaining]
+                admit[candidates] = True
+                counts[stage] += int(candidates.numel())
+            ticket = self.replay.begin_append(current, mask=admit) \
+                if bool(admit.any().item()) else None
+            full_actions = self._random_actions()
+            result = self._step(full_actions, self._enabled_mask())
+            self.simulated_transitions += self.active_envs
+            next_state = TensorState.from_observation(
+                result.observation,
+                physics_fps=self.simulator_config.physics_fps,
+                rows=self._active_rows(),
+            )
+            active_actions = full_actions[:self.active_envs]
+            rewards = result.physics.score_delta[:self.active_envs].to(
+                torch.float32
+            ) / 66.0
+            terminals = result.physics.done[:self.active_envs]
+            if ticket is not None:
+                self.replay.finish_append(
+                    ticket,
+                    next_state,
+                    active_actions,
+                    rewards,
+                    terminals,
+                    stages,
+                )
+            timeout = (
+                result.observation.step_count >= self.config.max_episode_drops
+            )
+            self._reset_finished(
+                self._enabled_mask() & (result.physics.done | timeout)
+            )
+        if sum(counts) < target:
+            raise RuntimeError(
+                f'warmup stage quotas were not filled: {counts} / {quotas}'
+            )
+        if self.transitions == 0:
+            self.transitions = len(self.replay)
+        self.dashboard.event(
+            'warmup_finished',
+            '分阶段预热 Replay 完成',
+            counts=counts,
+            replay_size=len(self.replay),
+        )
+
+    def epsilon(self):
+        decay_steps = max(
+            1,
+            int(
+                self.config.total_transitions
+                * self.config.dqn.epsilon_decay_fraction
+            ),
+        )
+        progress = min(1.0, self.transitions / decay_steps)
+        return (
+            self.config.dqn.epsilon_start
+            + progress
+            * (
+                self.config.dqn.epsilon_end
+                - self.config.dqn.epsilon_start
+            )
+        )
+
+    @torch.no_grad()
+    def _select_actions(self, state, epsilon):
+        self.model.eval()
+        q_values = self.model(state)
+        greedy = q_values.argmax(dim=1)
+        random_actions = torch.randint(
+            self.config.model.action_count,
+            (state.batch_size,),
+            device=self.device,
+        )
+        explore = torch.rand(state.batch_size, device=self.device) < epsilon
+        return torch.where(explore, random_actions, greedy)
+
+    def _record_episodes(self, result):
+        active_done = result.physics.done[:self.active_envs]
+        time_limit = (
+            result.observation.step_count[:self.active_envs]
+            >= self.config.max_episode_drops
+        )
+        finished = active_done | time_limit
+        if bool(finished.any().item()):
+            self.recent_scores.extend(
+                int(value)
+                for value in result.observation.score[:self.active_envs][finished]
+                .tolist()
+            )
+            self.recent_drops.extend(
+                int(value)
+                for value in result.observation.step_count[:self.active_envs][finished]
+                .tolist()
+            )
+            self.episodes += int(finished.sum().item())
+        full_finished = torch.zeros(
+            self.config.max_envs, dtype=torch.bool, device=self.device
+        )
+        full_finished[:self.active_envs] = finished
+        self._reset_finished(full_finished)
+
+    @torch.no_grad()
+    def _set_active_envs(self, target_envs):
+        target_envs = int(target_envs)
+        if not 0 < target_envs <= self.config.max_envs:
+            raise ValueError('autoscale target is outside allocated environments')
+        if target_envs <= self.active_envs:
+            self.active_envs = target_envs
+            return
+        if self.device.type != 'cuda':
+            raise RuntimeError('dynamic environment scaling requires CUDA')
+        previous = self.active_envs
+        new_rows = torch.zeros(
+            self.config.max_envs, dtype=torch.bool, device=self.device
+        )
+        new_rows[previous:target_envs] = True
+        self.simulator.reset(
+            new_rows,
+            seeds=self.config.seed + self.transitions + target_envs,
+        )
+        targets = torch.zeros(
+            self.config.max_envs, dtype=torch.int64, device=self.device
+        )
+        upper = max(1, self.stage_thresholds[1])
+        targets[previous:target_envs] = torch.randint(
+            0,
+            upper,
+            (target_envs - previous,),
+            device=self.device,
+        )
+        for _ in range(max(1, upper * 3)):
+            pending = new_rows & (self.simulator.step_count < targets)
+            if not bool(pending.any().item()):
+                self.active_envs = target_envs
+                return
+            result = self._step(self._random_actions(), pending)
+            failed = pending & result.physics.done
+            self._reset_finished(failed)
+            self.simulated_transitions += int(pending.sum().item())
+        raise RuntimeError('autoscale pre-roll did not reach its target stages')
+
+    def _progress(self):
+        return {
+            'transitions': self.transitions,
+            'simulated_transitions': self.simulated_transitions,
+            'episodes': self.episodes,
+            'updates': self.learner.update_count,
+            'active_envs': self.active_envs,
+            'best_accurate_score': self.best_accurate_score,
+            'last_fast_eval_score': self.last_fast_eval_score,
+            'last_accurate_eval_score': self.last_accurate_eval_score,
+        }
+
+    def save_checkpoint(self, name, *, extra=None):
+        path = self.run_dir / 'checkpoints' / name
+        return save_checkpoint_atomic(
+            path,
+            learner=self.learner,
+            training_config=self.config,
+            progress=self._progress(),
+            replay_metadata=self.replay.metadata(),
+            extra={
+                'replay_resume_policy': 'rebuild',
+                **(extra or {}),
+            },
+        )
+
+    def resume(self, checkpoint_path):
+        checkpoint = load_checkpoint(
+            checkpoint_path, map_location=self.device
+        )
+        self.learner.load_state_dict(checkpoint['learner'])
+        restore_rng_state(checkpoint['rng_state'])
+        progress = checkpoint['progress']
+        self.transitions = int(progress['transitions'])
+        self.simulated_transitions = int(progress['simulated_transitions'])
+        self.episodes = int(progress['episodes'])
+        self.best_accurate_score = float(progress['best_accurate_score'])
+        self.last_fast_eval_score = progress.get('last_fast_eval_score')
+        self.last_accurate_eval_score = progress.get('last_accurate_eval_score')
+        self.dashboard.event(
+            'resumed', '已恢复模型与优化器，Replay 将重新预热'
+        )
+
+    def _append_jsonl(self, name, payload):
+        with (self.run_dir / name).open(
+                'a', encoding='utf-8', buffering=1
+        ) as handle:
+            handle.write(json.dumps(
+                _json_safe(payload), ensure_ascii=False
+            ) + '\n')
+
+    def _evaluate(
+            self,
+            physics_fps,
+            episodes,
+            transition,
+            *,
+            trajectory_output_path=None,
+            trajectory_episodes=0):
+        summary, details = evaluate_policy(
+            self.model,
+            physics_fps=physics_fps,
+            episodes=episodes,
+            parallel_envs=min(
+                self.config.evaluation.parallel_envs, episodes
+            ),
+            device=self.device,
+            seed_base=self.config.evaluation.seed_base,
+            max_fruits=self.config.model.max_fruits,
+            max_episode_drops=self.config.evaluation.max_episode_drops,
+            trajectory_output_path=trajectory_output_path,
+            trajectory_episodes=trajectory_episodes,
+        )
+        payload = {
+            'transition': transition,
+            **summary.to_dict(),
+            **{key: value for key, value in details.items() if key != 'scores'},
+        }
+        self._append_jsonl('evaluations/metrics.jsonl', payload)
+        if physics_fps == 30:
+            self.last_fast_eval_score = summary.mean_score
+        else:
+            self.last_accurate_eval_score = summary.mean_score
+            if summary.mean_score > self.best_accurate_score:
+                self.best_accurate_score = summary.mean_score
+                self.save_checkpoint(
+                    'best.pt',
+                    extra={'best_evaluation': payload},
+                )
+        self.dashboard.event(
+            'evaluation_finished',
+            f'{physics_fps} FPS greedy 评估完成',
+            mean_score=summary.mean_score,
+            episodes=summary.episodes,
+        )
+        return payload
+
+    @staticmethod
+    def _state_to_cpu_dict(state):
+        return {
+            name: getattr(state, name).detach().cpu()
+            for name in state.__dataclass_fields__
+            if name != 'physics_fps'
+        }
+
+    def _export_transition_sample(self):
+        sample_count = min(
+            self.config.analysis.transition_sample_size, len(self.replay)
+        )
+        if sample_count <= 0:
+            return None
+        chunks = []
+        remaining = sample_count
+        while remaining > 0:
+            chunk_size = min(
+                remaining,
+                self.config.analysis.transition_chunk_size,
+                len(self.replay),
+            )
+            batch = self.replay.sample(chunk_size)
+            chunks.append({
+                'current': self._state_to_cpu_dict(batch.current),
+                'actions': batch.action.detach().cpu(),
+                'rewards': batch.reward.detach().cpu(),
+                'next_state': self._state_to_cpu_dict(batch.next_state),
+                'terminal': batch.terminal.detach().cpu(),
+                'stage': batch.stage.detach().cpu(),
+            })
+            remaining -= chunk_size
+        path = self.run_dir / 'analysis' / 'transition_sample.pt'
+        temporary = path.with_suffix('.pt.tmp')
+        torch.save({
+            'format_version': 1,
+            'physics_fps': self.simulator_config.physics_fps,
+            'reward_scale': 'score_delta / 66',
+            'sample_count': sample_count,
+            'replay_metadata': self.replay.metadata(),
+            'chunks': chunks,
+        }, temporary)
+        os.replace(temporary, path)
+        self.dashboard.event(
+            'analysis_sample_exported',
+            '已导出带阶段标签的均匀 Replay 样本',
+            sample_count=sample_count,
+            path=str(path),
+        )
+        return path
+
+    def _maybe_evaluate(self, previous_transitions):
+        interval = self.config.evaluation.fast_interval_transitions
+        if (
+                previous_transitions // interval
+                < self.transitions // interval):
+            self._evaluate(
+                30,
+                self.config.evaluation.periodic_episodes,
+                self.transitions,
+            )
+        for milestone in self.config.evaluation.accurate_milestones:
+            if (
+                    previous_transitions < milestone <= self.transitions
+                    and milestone not in self.completed_accurate_milestones):
+                self._evaluate(
+                    120,
+                    self.config.evaluation.periodic_episodes,
+                    self.transitions,
+                )
+                self.completed_accurate_milestones.add(milestone)
+
+    def _maybe_milestone_checkpoint(self, previous_transitions):
+        for milestone in self.CHECKPOINT_MILESTONES:
+            if (
+                    previous_transitions < milestone <= self.transitions
+                    and milestone not in self.completed_checkpoint_milestones):
+                self.save_checkpoint(f'transition_{milestone:09d}.pt')
+                self.completed_checkpoint_milestones.add(milestone)
+
+    def _publish_metrics(
+            self,
+            *,
+            started,
+            window_started,
+            window_transitions,
+            window_updates,
+            stage_seconds):
+        now = time.perf_counter()
+        window = max(now - window_started, 1e-9)
+        uptime = now - started
+        remaining = max(0, self.config.total_transitions - self.transitions)
+        speed = window_transitions / window
+        payload = {
+            'phase': 'training',
+            **self._progress(),
+            'epsilon': self.epsilon(),
+            'replay_size': len(self.replay),
+            'replay_capacity': self.replay.capacity,
+            'env_steps_per_second': speed,
+            'updates_per_second': window_updates / window,
+            'learner_samples_per_second': (
+                window_updates * self.config.replay.batch_size / window
+            ),
+            'uptime_seconds': uptime,
+            'eta_seconds': remaining / max(speed, 1e-9),
+            'training_mean_score': (
+                sum(self.recent_scores) / len(self.recent_scores)
+                if self.recent_scores else None
+            ),
+            'training_mean_drops': (
+                sum(self.recent_drops) / len(self.recent_drops)
+                if self.recent_drops else None
+            ),
+            'last_fast_eval_score': self.last_fast_eval_score,
+            'last_accurate_eval_score': self.last_accurate_eval_score,
+            **stage_seconds,
+            **self.training_metrics.flush(),
+        }
+        action_counts = self.action_counts.detach().cpu()
+        payload['action_counts'] = action_counts.tolist()
+        payload['action_distribution'] = (
+            action_counts.to(torch.float64)
+            / action_counts.sum().clamp_min(1)
+        ).tolist()
+        self.action_counts.zero_()
+        resources = self.resource_sampler.sample()
+        decision = self.scale_controller.observe(resources, speed)
+        if decision is not None:
+            previous_envs = self.active_envs
+            if decision.action in ('trial', 'rollback'):
+                self._set_active_envs(decision.target_envs)
+            self.dashboard.event(
+                f'autoscale_{decision.action}',
+                decision.reason,
+                previous_envs=previous_envs,
+                target_envs=self.active_envs,
+            )
+            payload['active_envs'] = self.active_envs
+            payload['autoscale_action'] = decision.action
+            payload['autoscale_reason'] = decision.reason
+        payload.update({
+            f'trainer_{name}': value for name, value in resources.items()
+        })
+        self.dashboard.publish(payload)
+        self._append_jsonl('metrics.jsonl', {'timestamp': time.time(), **payload})
+        return payload
+
+    def run(self, *, final_evaluation=True):
+        started = time.perf_counter()
+        deadline = (
+            started
+            + self.config.max_wall_seconds
+            - self.config.finalization_reserve_seconds
+            if self.config.max_wall_seconds > 0
+            else float('inf')
+        )
+        self.dashboard.event(
+            'training_started',
+            '第一版 30 FPS GNN-DQN 训练启动',
+            dashboard=f'http://{self.config.dashboard.host}:{self.config.dashboard.port}',
+        )
+        if len(self.replay) < self.config.replay.warmup_transitions:
+            self.estimate_stage_thresholds()
+            self.stagger_initial_states()
+            self.fill_warmup_replay()
+
+        window_started = time.perf_counter()
+        window_transitions = 0
+        window_updates = 0
+        last_log = window_started
+        last_heartbeat = window_started
+        last_checkpoint = window_started
+        stage_seconds = {
+            'actor_seconds': 0.0,
+            'physics_seconds': 0.0,
+            'learner_seconds': 0.0,
+        }
+        try:
+            while (
+                    self.transitions < self.config.total_transitions
+                    and time.perf_counter() < deadline
+                    and not self.stop_requested):
+                previous_transitions = self.transitions
+                observation = self.simulator.observe()
+                current = TensorState.from_observation(
+                    observation,
+                    physics_fps=self.simulator_config.physics_fps,
+                    rows=self._active_rows(),
+                )
+                current_stages = self._classify_stages(observation)
+                actor_started = time.perf_counter()
+                active_actions = self._select_actions(
+                    current, self.epsilon()
+                )
+                self.action_counts += torch.bincount(
+                    active_actions,
+                    minlength=self.config.model.action_count,
+                )
+                full_actions = torch.zeros(
+                    self.config.max_envs,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+                full_actions[:self.active_envs] = active_actions
+                ticket = self.replay.begin_append(current)
+                stage_seconds['actor_seconds'] += (
+                    time.perf_counter() - actor_started
+                )
+
+                physics_started = time.perf_counter()
+                result = self._step(full_actions, self._enabled_mask())
+                stage_seconds['physics_seconds'] += (
+                    time.perf_counter() - physics_started
+                )
+                next_state = TensorState.from_observation(
+                    result.observation,
+                    physics_fps=self.simulator_config.physics_fps,
+                    rows=self._active_rows(),
+                )
+                rewards = result.physics.score_delta[:self.active_envs].to(
+                    torch.float32
+                ) / 66.0
+                terminals = result.physics.done[:self.active_envs]
+                self.replay.finish_append(
+                    ticket,
+                    next_state,
+                    active_actions,
+                    rewards,
+                    terminals,
+                    current_stages,
+                )
+                self.transitions += self.active_envs
+                self.simulated_transitions += self.active_envs
+                window_transitions += self.active_envs
+                self._record_episodes(result)
+
+                self.update_credit += (
+                    self.active_envs
+                    * self.config.dqn.utd_ratio
+                    / self.config.replay.batch_size
+                )
+                updates = int(self.update_credit)
+                self.update_credit -= updates
+                learner_started = time.perf_counter()
+                for _ in range(updates):
+                    metrics = self.learner.update(
+                        self.replay, self.config.replay.batch_size
+                    )
+                    self.training_metrics.add(metrics)
+                stage_seconds['learner_seconds'] += (
+                    time.perf_counter() - learner_started
+                )
+                window_updates += updates
+
+                self._maybe_milestone_checkpoint(previous_transitions)
+                self._maybe_evaluate(previous_transitions)
+                now = time.perf_counter()
+                if (
+                        now - last_heartbeat
+                        >= self.config.dashboard.publish_interval_seconds):
+                    heartbeat_window = max(now - window_started, 1e-9)
+                    self.dashboard.publish({
+                        'phase': 'training',
+                        **self._progress(),
+                        'epsilon': self.epsilon(),
+                        'replay_size': len(self.replay),
+                        'replay_capacity': self.replay.capacity,
+                        'env_steps_per_second': (
+                            window_transitions / heartbeat_window
+                        ),
+                        'updates_per_second': (
+                            window_updates / heartbeat_window
+                        ),
+                        'uptime_seconds': now - started,
+                    })
+                    last_heartbeat = now
+                if now - last_checkpoint >= self.config.checkpoint_interval_seconds:
+                    self.save_checkpoint('latest.pt')
+                    last_checkpoint = now
+                if now - last_log >= self.config.log_interval_seconds:
+                    self._publish_metrics(
+                        started=started,
+                        window_started=window_started,
+                        window_transitions=window_transitions,
+                        window_updates=window_updates,
+                        stage_seconds=stage_seconds,
+                    )
+                    window_started = time.perf_counter()
+                    window_transitions = 0
+                    window_updates = 0
+                    stage_seconds = {
+                        'actor_seconds': 0.0,
+                        'physics_seconds': 0.0,
+                        'learner_seconds': 0.0,
+                    }
+                    last_log = window_started
+
+            self.save_checkpoint('latest.pt')
+            if final_evaluation:
+                self._evaluate(
+                    30,
+                    self.config.evaluation.final_episodes,
+                    self.transitions,
+                    trajectory_output_path=(
+                        self.run_dir
+                        / 'analysis'
+                        / 'decision_trajectories_30fps.pt'
+                    ),
+                    trajectory_episodes=(
+                        self.config.analysis.trajectory_episodes
+                    ),
+                )
+                self._evaluate(
+                    120, self.config.evaluation.final_episodes, self.transitions
+                )
+            self._export_transition_sample()
+            final_path = self.save_checkpoint('final.pt')
+            loaded = load_checkpoint(final_path, map_location='cpu')
+            if int(loaded['progress']['transitions']) != self.transitions:
+                raise RuntimeError('final checkpoint round-trip validation failed')
+            manifest = write_artifact_manifest(
+                self.run_dir,
+                tuple(self.run_dir.rglob('*.json'))
+                + tuple(self.run_dir.rglob('*.jsonl'))
+                + tuple(self.run_dir.rglob('*.pt')),
+                metadata=self._progress(),
+            )
+            self.dashboard.event(
+                'training_finished',
+                '训练、最终评估和产物校验完成',
+                manifest=str(manifest),
+            )
+            return self._progress()
+        except BaseException as error:
+            failure = {
+                'timestamp': time.time(),
+                'error_type': type(error).__name__,
+                'message': str(error),
+                'progress': self._progress(),
+            }
+            (self.run_dir / 'failure_latest.json').write_text(
+                json.dumps(failure, ensure_ascii=False, indent=2),
+                encoding='utf-8',
+            )
+            try:
+                self.save_checkpoint('failure_last.pt', extra=failure)
+            except BaseException:
+                pass
+            self.dashboard.event(
+                'training_failed', str(error), error_type=type(error).__name__
+            )
+            raise
+        finally:
+            self.resource_sampler.close()
+            self.dashboard.close()

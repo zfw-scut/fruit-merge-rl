@@ -1,7 +1,7 @@
 # 合成大西瓜 accelerated-v1
 
-这是模型与训练系统重构分支。当前已在稳定领域契约之上加入
-支持 CUDA 的多环境并行物理模拟器，但仍不包含模型和正式训练入口。
+这是模型与训练系统重构分支。当前已在稳定领域契约和 CUDA 多环境并行物理之上，
+实现第一版可正式训练的 GNN-Dueling Double DQN 基线。
 
 ## 当前能力
 
@@ -13,19 +13,47 @@
 - 零拷贝 Tensor 状态读取、Python 单环境适配器和可插拔奖励接口；
 - 指定 CUDA 环境的逐物理帧抽样录制、纹理化离线播放器和多局回放目录；
 - 按当前规则重新实现的 Pymunk 行为参考环境，只用于对照和回退。
+- 定长混合局部物理图、q0～q3 队列图和 21 个单向动作探针；
+- 1-step Dueling Double DQN、GPU Replay、分阶段预热和原子 checkpoint；
+- 只使用 30 FPS 采集训练数据，隔离执行 30/120 FPS greedy 评估；
+- 云端 CUDA 门禁、端到端性能标定、动态环境扩容和低开销 Web 面板；
+- 最终 Replay 抽样、完整决策边界轨迹和 SHA-256 产物清单。
 
 `daxigua.core` 仍只依赖 Python 标准库。模拟器的独立依赖见
-`requirements-simulator.txt`。
+`requirements-simulator.txt`；正式训练的附加依赖见
+`requirements-training.txt`。
 
 ## 当前明确不包含
 
 - 桌面或 Android 游戏；
-- GNN、DQN 或其他模型结构；
-- replay、rollout、trainer 和训练脚本；
 - Reward V1/V2、状态分析、因果归因、反事实或 Shapley；
-- 正式 RL 奖励和 CUDA 训练管线。
+- 战略 Pair Encoder、等级/区域聚合、高层计划器、FiLM、动作效果辅助任务和 BMCTS。
 
-这些能力只有在新设计被明确确认后才会逐项加入。
+这些后续能力只有在新设计被明确确认后才会逐项加入；旧分支模型不作为运行依赖。
+
+## 第一版 GNN-DQN 训练
+
+本机或云服务器先执行正确性门禁，再在彼此隔离的子进程中扫描环境数、batch、BF16、
+FP32 和可用时的 `torch.compile`，最后按 UTD=1 端到端吞吐和显存余量自动选择正式配置：
+
+```bash
+export PYTHONPATH="$PWD/src"
+python tools/preflight_training.py
+python tools/benchmark_training_pipeline.py
+python tools/run_autotuned_training.py --max-wall-hours 12
+```
+
+也可以直接运行 `scripts/run_cloud_training.sh --max-wall-hours 12`。面板默认监听
+`127.0.0.1:8765`，应通过 SSH 端口转发访问。训练只调用 30 FPS 物理；120 FPS 只在里程碑
+和最终评估中使用，相关状态不会写入 Replay 或 loss。
+
+快速验证完整主链：
+
+```powershell
+$env:PYTHONPATH = 'src'
+& $python tools\train_gnn_dqn.py --smoke --device cuda `
+    --run-dir runs\local-formal-smoke
+```
 
 ## 使用 python-torch
 
@@ -92,8 +120,8 @@ simulator.reset(reset_mask)
 压缩播放器使用现代浏览器原生的 `DecompressionStream`。需要兼容不支持该接口的旧浏览器
 时，重新渲染时增加 `--no-payload-compression`；文件会更大，但物理记录完全相同。
 
-正式奖励尚未定义。需要类 Gymnasium 返回值时，必须显式为 `VectorEnv` 提供
-`RewardComputer`，不能把游戏分数静默当成 RL 奖励。
+第一版 RL 基线显式使用 `score_delta / 66`，不含终局惩罚或奖励塑形。通用
+`VectorEnv` 仍必须显式提供 `RewardComputer`，不能把游戏分数静默当成其它任务的奖励。
 
 ## 验证和性能
 
