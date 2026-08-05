@@ -59,6 +59,26 @@ def _git_identity(project_root):
     }
 
 
+def _lower_unreachable_prewarm_targets(targets, survived_drops, failed):
+    """把终止轨迹的预投放目标降到其最后一个可存活投放数。"""
+
+    reachable = (survived_drops.to(targets.dtype) - 1).clamp_min(0)
+    return torch.where(failed, torch.minimum(targets, reachable), targets)
+
+
+def _bounded_stage_thresholds(quantiles, pilot_max_drops):
+    """把删失局长分位限制在统计窗口的 25%/50%/75%。"""
+
+    caps = tuple(
+        max(1, pilot_max_drops * numerator // 4)
+        for numerator in (1, 2, 3)
+    )
+    return tuple(
+        max(1, min(int(value), cap))
+        for value, cap in zip(quantiles, caps, strict=True)
+    )
+
+
 class _TensorMetricAccumulator:
     def __init__(self):
         self.sums = {}
@@ -246,16 +266,31 @@ class BaselineTrainer:
         if self.device.type != 'cuda':
             self.stage_thresholds = (8, 16, 32)
             return self.stage_thresholds
-        self.dashboard.event('pilot_started', '开始随机局长阶段标定')
-        self.simulator.reset(self._enabled_mask(), seeds=self.config.seed + 100)
+        pilot_envs = min(self.active_envs, self.config.stage_pilot_envs)
+        pilot_max_drops = min(
+            self.config.max_episode_drops,
+            self.config.stage_pilot_max_drops,
+        )
+        pilot_mask = torch.zeros(
+            self.config.max_envs, dtype=torch.bool, device=self.device
+        )
+        pilot_mask[:pilot_envs] = True
+        self.dashboard.event(
+            'pilot_started',
+            '开始随机局长阶段标定',
+            pilot_envs=pilot_envs,
+            active_envs=self.active_envs,
+            pilot_max_drops=pilot_max_drops,
+        )
+        self.simulator.reset(pilot_mask, seeds=self.config.seed + 100)
         finished = torch.zeros(
             self.config.max_envs, dtype=torch.bool, device=self.device
         )
         lengths = torch.zeros(
             self.config.max_envs, dtype=torch.int64, device=self.device
         )
-        for _ in range(self.config.max_episode_drops):
-            enabled = self._enabled_mask(~finished)
+        for _ in range(pilot_max_drops):
+            enabled = pilot_mask & ~finished
             if not bool(enabled.any().item()):
                 break
             result = self._step(self._random_actions(), enabled)
@@ -263,24 +298,26 @@ class BaselineTrainer:
             newly_finished = enabled & (result.physics.done | time_limit)
             lengths[newly_finished] = result.observation.step_count[newly_finished]
             finished |= newly_finished
-        active_lengths = lengths[:self.active_envs].to(torch.float32)
+        active_lengths = lengths[:pilot_envs].to(torch.float32)
         active_lengths = torch.where(
             active_lengths > 0,
             active_lengths,
-            torch.full_like(active_lengths, self.config.max_episode_drops),
+            torch.full_like(active_lengths, pilot_max_drops),
         )
         quantiles = torch.quantile(
             active_lengths,
             torch.tensor((0.25, 0.50, 0.75), device=self.device),
         ).to(torch.int64)
-        self.stage_thresholds = tuple(
-            max(1, int(value)) for value in quantiles.tolist()
+        self.stage_thresholds = _bounded_stage_thresholds(
+            quantiles.tolist(), pilot_max_drops
         )
         self.simulator.reset(self._enabled_mask(), seeds=self.config.seed + 200)
         self.dashboard.event(
             'pilot_finished',
             '随机局长阶段标定完成',
             thresholds=self.stage_thresholds,
+            pilot_envs=pilot_envs,
+            pilot_max_drops=pilot_max_drops,
         )
         return self.stage_thresholds
 
@@ -304,14 +341,29 @@ class BaselineTrainer:
             targets[rows] = torch.randint(
                 low, high, (rows.numel(),), device=self.device
             )
+        original_targets = targets.clone()
         for _ in range(self.config.max_episode_drops * 3):
             pending = self._enabled_mask(
                 self.simulator.step_count < targets
             )
             if not bool(pending.any().item()):
+                adjusted = int(
+                    (targets[:self.active_envs]
+                     != original_targets[:self.active_envs]).sum().item()
+                )
+                self.dashboard.event(
+                    'warmup_states_staggered',
+                    '分散预热起始状态构造完成',
+                    adjusted_unreachable_targets=adjusted,
+                )
                 return
             result = self._step(self._random_actions(), pending)
             failed = pending & result.physics.done
+            targets = _lower_unreachable_prewarm_targets(
+                targets,
+                result.observation.step_count,
+                failed,
+            )
             self._reset_finished(failed)
         raise RuntimeError('could not construct dispersed warmup states')
 

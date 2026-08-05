@@ -172,6 +172,8 @@ class TrainingConfig:
     log_interval_seconds: float = 10.0
     checkpoint_interval_seconds: float = 1800.0
     max_episode_drops: int = 1000
+    stage_pilot_envs: int = 256
+    stage_pilot_max_drops: int = 128
     model: ModelConfig = field(default_factory=ModelConfig)
     dqn: DqnConfig = field(default_factory=DqnConfig)
     replay: ReplayConfig = field(default_factory=ReplayConfig)
@@ -189,6 +191,10 @@ class TrainingConfig:
             raise ValueError('total_transitions must be positive')
         if self.max_wall_seconds < 0.0:
             raise ValueError('max_wall_seconds cannot be negative')
+        if self.stage_pilot_envs <= 0:
+            raise ValueError('stage_pilot_envs must be positive')
+        if self.stage_pilot_max_drops <= 0:
+            raise ValueError('stage_pilot_max_drops must be positive')
         if self.model.max_fruits != 64:
             raise ValueError('the first baseline is frozen at 64 fruit slots')
 

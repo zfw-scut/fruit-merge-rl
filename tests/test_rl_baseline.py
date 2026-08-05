@@ -23,6 +23,10 @@ from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.monitoring import _DASHBOARD_HTML, _DashboardState
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
+from daxigua.rl.trainer import (
+    _bounded_stage_thresholds,
+    _lower_unreachable_prewarm_targets,
+)
 from daxigua.rl.viewer import (
     load_viewer_model,
     viewer_simulator_config,
@@ -173,6 +177,35 @@ class ReplayAndLearnerTest(unittest.TestCase):
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):
+    def test_censored_stage_quantiles_use_the_pilot_window_quartiles(self):
+        self.assertEqual(
+            _bounded_stage_thresholds((128, 128, 128), 128),
+            (32, 64, 96),
+        )
+        self.assertEqual(
+            _bounded_stage_thresholds((8, 20, 80), 128),
+            (8, 20, 80),
+        )
+
+    def test_unreachable_prewarm_targets_are_lowered_before_retry(self):
+        targets = torch.tensor((12, 20, 7, 4), dtype=torch.int64)
+        survived = torch.tensor((8, 30, 1, 0), dtype=torch.int64)
+        failed = torch.tensor((True, False, True, False))
+
+        adjusted = _lower_unreachable_prewarm_targets(
+            targets, survived, failed
+        )
+
+        self.assertEqual(adjusted.tolist(), [7, 20, 0, 4])
+
+    def test_stage_pilot_environment_count_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, 'stage_pilot_envs'):
+            TrainingConfig(stage_pilot_envs=0)
+
+    def test_stage_pilot_drop_horizon_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, 'stage_pilot_max_drops'):
+            TrainingConfig(stage_pilot_max_drops=0)
+
     def test_autoscale_trials_and_commits_only_after_throughput_gain(self):
         config = AutoScaleConfig(
             candidate_envs=(2, 4),
