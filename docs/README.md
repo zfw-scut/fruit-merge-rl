@@ -4,6 +4,14 @@ accelerated-v1 当前只维护最小仓库治理文档：
 
 - `GIT_WORKFLOW.md`：分支、提交语言和提交前检查规则；
 - `LEGACY_PROJECT_EXPERIENCE_INDEX.md`：旧分支关键提交、证据、经验和禁止照搬边界；
+- `model/STRATEGIC_VIEW_CONNECTIVITY.md`：新模型战略视角、水果可联通性、多时间尺度直接合成机会和 pair survival 算法设计；
+- `model/STRATEGIC_LEVEL_AGGREGATION.md`：水果个体与等级节点、数量敏感聚合、理论进位、合并机会和合并债务算法设计；
+- `model/STRATEGIC_REGION_ANCHORS.md`：7 个固定横向战略锚点、软归属、垂直区域摘要和高层计划位置语义；
+- `model/HIGH_LEVEL_PLAN_LIFECYCLE.md`：事件驱动的可变时长显式计划、完成、中止、抢占和分类最长时域；
+- `model/ACTION_CONDITIONED_EFFECT_VIEW.md`：共享物理水果 GNN、21 个单向动作探针、反事实隔离和 Dueling 读出；
+- `model/MODEL_DESIGN_STATUS_OVERVIEW.md`：新模型组件、节点、边、输出、弃用项、设计状态和实现基础总览；
+- `model/GNN_DQN_BASELINE.md`：第一版 GNN-DQN 基线的模型范围、1-step Double DQN、纯分数奖励和排除项；
+- `model/GNN_DQN_TRAINING_SYSTEM.md`：30 FPS 独占训练、30/120 FPS 隔离评估、GPU Replay、性能标定、动态扩容、实时面板和云端归档规格；
 - `codex/RULES.md`：较大修改的记录规则；
 - `codex/01_建立accelerated_v1最小基线_2026_08_01.md`：本分支首个结构记录；
 - `codex/02_对齐标准合成规则_2026_08_01.md`：当前水果、计分和西瓜相消规则；
@@ -18,10 +26,11 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/11_增加训练帧率与稳定投放快进_2026_08_04.md`：30 FPS 显式训练档、稳定场景自由下落快进与 4096 环境对比。
 - `codex/12_增加30帧超时分层回放_2026_08_05.md`：逐环境超时统计、分层完整局回放、超时跳转与快进追踪容量修复。
 - `codex/13_修复30帧碰撞与静止语义_2026_08_05.md`：角阻尼、低速恢复、自适应碰撞子步、时间步一致静止语义与完整局对比。
+- `codex/14_记录新模型总体技术方向_2026_08_05.md`：新模型的分层决策、状态编码、计划条件化、辅助任务和搜索增强总体草案。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的
 实现依据。
 
-当前没有模型或正式奖励设计文档。后续方案只有在确认并开始实现时，才会按实际接口补充，避免
-提前固化尚未验证的设计。
+当前已有新模型总体技术方向、第一版 GNN-DQN 基线和训练系统规格，但尚未实现模型与训练
+代码。后续战略、计划和搜索模块继续按专项文档逐项验证，不进入第一版基线。
