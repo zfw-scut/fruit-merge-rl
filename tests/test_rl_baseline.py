@@ -20,6 +20,7 @@ from daxigua.rl.config import (
 from daxigua.rl.evaluation import evaluate_policy
 from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
+from daxigua.rl.monitoring import _DASHBOARD_HTML, _DashboardState
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
 from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
@@ -231,6 +232,28 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
         self.assertFalse(
             loaded['replay_metadata']['replay_saved_in_checkpoint']
         )
+
+
+class DashboardTest(unittest.TestCase):
+    def test_dashboard_keeps_score_curves_and_uses_chinese_labels(self):
+        state = _DashboardState(history_size=4)
+        state.update_training({
+            'transitions': 1000,
+            'env_steps_per_second': 200.0,
+            'updates_per_second': 0.5,
+            'training_window_mean_score': 123.0,
+            'training_window_max_score': 456.0,
+            'training_rolling_mean_score': 120.0,
+        })
+        history = state.snapshot()['history']
+        self.assertEqual(history[0]['training_window_mean_score'], 123.0)
+        self.assertEqual(history[0]['training_window_max_score'], 456.0)
+        self.assertIn('训练效果曲线', _DASHBOARD_HTML)
+        self.assertIn('窗口局均分', _DASHBOARD_HTML)
+        self.assertIn('score-chart', _DASHBOARD_HTML)
+        self.assertIn('Windows 11 Fluent', _DASHBOARD_HTML)
+        self.assertIn('概览', _DASHBOARD_HTML)
+        self.assertNotIn('文件(F)', _DASHBOARD_HTML)
 
 
 if __name__ == '__main__':

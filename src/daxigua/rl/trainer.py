@@ -160,6 +160,8 @@ class BaselineTrainer:
         self.training_metrics = _TensorMetricAccumulator()
         self.recent_scores = deque(maxlen=4096)
         self.recent_drops = deque(maxlen=4096)
+        self.metric_window_scores = []
+        self.metric_window_drops = []
         self.transitions = 0
         self.simulated_transitions = 0
         self.episodes = 0
@@ -167,6 +169,7 @@ class BaselineTrainer:
         self.best_accurate_score = float('-inf')
         self.last_fast_eval_score = None
         self.last_accurate_eval_score = None
+        self.best_training_score = 0
         self.completed_accurate_milestones = set()
         self.completed_checkpoint_milestones = set()
         self.action_counts = torch.zeros(
@@ -442,15 +445,22 @@ class BaselineTrainer:
         )
         finished = active_done | time_limit
         if bool(finished.any().item()):
-            self.recent_scores.extend(
+            finished_scores = [
                 int(value)
                 for value in result.observation.score[:self.active_envs][finished]
                 .tolist()
-            )
-            self.recent_drops.extend(
+            ]
+            finished_drops = [
                 int(value)
                 for value in result.observation.step_count[:self.active_envs][finished]
                 .tolist()
+            ]
+            self.recent_scores.extend(finished_scores)
+            self.recent_drops.extend(finished_drops)
+            self.metric_window_scores.extend(finished_scores)
+            self.metric_window_drops.extend(finished_drops)
+            self.best_training_score = max(
+                self.best_training_score, max(finished_scores)
             )
             self.episodes += int(finished.sum().item())
         full_finished = torch.zeros(
@@ -502,6 +512,10 @@ class BaselineTrainer:
     def _progress(self):
         return {
             'transitions': self.transitions,
+            'total_transitions': self.config.total_transitions,
+            'progress_fraction': min(
+                1.0, self.transitions / self.config.total_transitions
+            ),
             'simulated_transitions': self.simulated_transitions,
             'episodes': self.episodes,
             'updates': self.learner.update_count,
@@ -509,6 +523,7 @@ class BaselineTrainer:
             'best_accurate_score': self.best_accurate_score,
             'last_fast_eval_score': self.last_fast_eval_score,
             'last_accurate_eval_score': self.last_accurate_eval_score,
+            'best_training_score': self.best_training_score,
         }
 
     def save_checkpoint(self, name, *, extra=None):
@@ -538,6 +553,7 @@ class BaselineTrainer:
         self.best_accurate_score = float(progress['best_accurate_score'])
         self.last_fast_eval_score = progress.get('last_fast_eval_score')
         self.last_accurate_eval_score = progress.get('last_accurate_eval_score')
+        self.best_training_score = int(progress.get('best_training_score', 0))
         self.dashboard.event(
             'resumed', '已恢复模型与优化器，Replay 将重新预热'
         )
@@ -706,9 +722,29 @@ class BaselineTrainer:
                 sum(self.recent_scores) / len(self.recent_scores)
                 if self.recent_scores else None
             ),
+            'training_rolling_mean_score': (
+                sum(self.recent_scores) / len(self.recent_scores)
+                if self.recent_scores else None
+            ),
+            'training_rolling_max_score': (
+                max(self.recent_scores) if self.recent_scores else None
+            ),
+            'training_window_mean_score': (
+                sum(self.metric_window_scores) / len(self.metric_window_scores)
+                if self.metric_window_scores else None
+            ),
+            'training_window_max_score': (
+                max(self.metric_window_scores)
+                if self.metric_window_scores else None
+            ),
+            'training_window_episodes': len(self.metric_window_scores),
             'training_mean_drops': (
                 sum(self.recent_drops) / len(self.recent_drops)
                 if self.recent_drops else None
+            ),
+            'training_window_mean_drops': (
+                sum(self.metric_window_drops) / len(self.metric_window_drops)
+                if self.metric_window_drops else None
             ),
             'last_fast_eval_score': self.last_fast_eval_score,
             'last_accurate_eval_score': self.last_accurate_eval_score,
@@ -742,6 +778,8 @@ class BaselineTrainer:
         })
         self.dashboard.publish(payload)
         self._append_jsonl('metrics.jsonl', {'timestamp': time.time(), **payload})
+        self.metric_window_scores.clear()
+        self.metric_window_drops.clear()
         return payload
 
     def run(self, *, final_evaluation=True):
