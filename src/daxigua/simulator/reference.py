@@ -177,6 +177,19 @@ class PymunkReferenceGame:
         except Exception:
             pass
 
+    def remove_fruit(self, fruit_id):
+        """按稳定水果 ID 从当前物理世界移除水果。"""
+        if isinstance(fruit_id, bool) or not isinstance(fruit_id, int):
+            raise TypeError('fruit_id must be an integer')
+        if fruit_id <= 0:
+            raise ValueError('fruit_id must be positive')
+        for shape in tuple(self.balls):
+            meta = self._fruit_meta.get(id(shape))
+            if meta is not None and meta.fruit_id == fruit_id:
+                self._remove_ball(shape)
+                return True
+        return False
+
     def _handle_merge(self, arbiter):
         if self.lock:
             return

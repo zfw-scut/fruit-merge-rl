@@ -157,6 +157,12 @@ class ScenarioLabLiveSession:
                 x,
             )
             return {'accepted': True, 'fruit_id': fruit_id}
+        if kind == 'remove':
+            fruit_id = int(command['fruit_id'])
+            return {
+                'accepted': self.game.remove_fruit(fruit_id),
+                'fruit_id': fruit_id,
+            }
         if kind == 'pause':
             self.paused = True
             return {'accepted': True, 'paused': True}

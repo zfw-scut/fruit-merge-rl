@@ -957,6 +957,24 @@ class PymunkReferenceGameTest(unittest.TestCase):
         self.assertGreater(after.physics_frame, before.physics_frame)
         self.assertTrue(any(fruit.vy > 80.0 for fruit in after.board_fruits))
 
+    def test_reference_can_remove_fruit_by_stable_id(self):
+        from daxigua.simulator.reference import PymunkReferenceGame
+        game = PymunkReferenceGame(
+            SimulatorConfig(max_fruits=8, use_cuda_extension=False),
+            seed=5,
+        )
+        kept_id = game.spawn_fruit(1, 150.0)
+        removed_id = game.spawn_fruit(2, 410.0)
+
+        removed = game.remove_fruit(removed_id)
+        state = game.get_state()
+
+        self.assertTrue(removed)
+        self.assertFalse(game.remove_fruit(removed_id))
+        self.assertEqual(
+            [kept_id], [fruit.fruit_id for fruit in state.board_fruits]
+        )
+
     def test_reference_uses_current_merge_score_and_midpoint(self):
         from daxigua.simulator.reference import PymunkReferenceGame
 

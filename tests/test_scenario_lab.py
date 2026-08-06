@@ -36,8 +36,14 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('dropPreviews', html)
         self.assertIn('interpolateLiveFruits', html)
         self.assertIn('requestAnimationFrame(renderLiveFrame)', html)
+        self.assertIn("{type:'remove',fruit_id:fruitId}", html)
+        self.assertIn('beginTransientEdit', html)
+        self.assertIn('finishTransientEdit', html)
+        self.assertIn('按住编辑 · 松手恢复', html)
+        self.assertIn("await pushLiveScene(true);await sendLiveCommand({type:'resume'})", html)
         self.assertIn(
-            "button.disabled=!editable&&button.dataset.tool==='erase'", html
+            "button.disabled=busy||(!editable&&button.dataset.tool==='erase')",
+            html,
         )
         self.assertIn('物理 ${state.physicsFps||120} FPS · 显示同步', html)
         self.assertIn('暂停并进入编辑', html)
@@ -113,6 +119,24 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(2, len(snapshot['fruits']))
         self.assertGreater(later['physics_frame'], snapshot['physics_frame'])
         self.assertFalse(snapshot['paused'])
+
+    def test_live_session_removes_fruit_at_command_boundary(self):
+        session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
+        session.start()
+        try:
+            dropped = session.execute({
+                'type': 'drop', 'level': 1, 'x': 280,
+            })
+            removed = session.execute({
+                'type': 'remove', 'fruit_id': dropped['fruit_id'],
+            })
+            snapshot = session.snapshot()
+        finally:
+            session.close()
+
+        self.assertTrue(removed['accepted'])
+        self.assertEqual(dropped['fruit_id'], removed['fruit_id'])
+        self.assertEqual([], snapshot['fruits'])
 
     def test_live_session_pause_stops_physics_but_keeps_commands(self):
         session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
