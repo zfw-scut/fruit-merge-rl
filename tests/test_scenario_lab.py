@@ -24,6 +24,8 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('评估 21 个动作', html)
         self.assertIn('daxigua:scenario-request', html)
         self.assertIn('/api/evaluate', html)
+        self.assertIn('/api/settle', html)
+        self.assertIn('requestNaturalSettle', html)
         self.assertIn('effective_normalized_area', html)
         self.assertNotIn('文件(F)', html)
 
@@ -102,6 +104,31 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(6, payload['selected_action'])
         self.assertEqual(3, len(payload['actions'][6]['space_slots']))
         self.assertTrue(payload['actions'][6]['result_fruits'])
+
+    def test_settle_drops_existing_fruit_without_consuming_queue(self):
+        evaluator = ScenarioLabEvaluator(device='cpu')
+
+        payload = evaluator.settle({
+            'name': '自然下落检查',
+            'fps': 120,
+            'queue': [1, 2, 3, 4],
+            'fruits': [{
+                'id': 8,
+                'level': 1,
+                'x': 280.0,
+                'y': 400.0,
+            }],
+        })
+
+        self.assertEqual([1, 2, 3, 4], payload['queue'])
+        self.assertEqual(30, payload['physics_fps'])
+        self.assertEqual(120, payload['requested_fps'])
+        self.assertTrue(payload['fast'])
+        self.assertTrue(payload['stable'])
+        self.assertFalse(payload['done'])
+        self.assertEqual(1, len(payload['fruits']))
+        self.assertEqual(8, payload['fruits'][0]['id'])
+        self.assertGreater(payload['fruits'][0]['y'], 400.0)
 
 
 if __name__ == '__main__':

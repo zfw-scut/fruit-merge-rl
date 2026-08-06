@@ -246,6 +246,7 @@ class ScenarioLabEvaluator:
             raise RuntimeError('CUDA is not available')
         self.reward_config = SpatialRewardConfig(reward_scale=reward_scale)
         self._runtimes = {}
+        self._settle_runtimes = {}
         self._lock = Lock()
 
     def _runtime(self, fps):
@@ -263,6 +264,44 @@ class ScenarioLabEvaluator:
             runtime = (simulator, calculator)
             self._runtimes[fps] = runtime
         return runtime
+
+    def _settle_runtime(self, fps):
+        simulator = self._settle_runtimes.get(fps)
+        if simulator is None:
+            # 单场景编辑优先低延迟和接口简单；21动作评估仍使用配置设备。
+            config = _simulator_config(fps, device='cpu')
+            simulator = TensorVectorSimulator(1, config=config, device='cpu')
+            self._settle_runtimes[fps] = simulator
+        return simulator
+
+    @torch.inference_mode()
+    def settle(self, scene, *, fast=True):
+        """不额外投放q0，只把编辑中的现有水果推进至稳定。"""
+
+        scene = validate_scenario(scene)
+        if not isinstance(fast, bool):
+            raise TypeError('fast must be bool')
+        physics_fps = 30 if fast else scene['fps']
+        with self._lock:
+            simulator = self._settle_runtime(physics_fps)
+            _load_scenario(simulator, scene)
+            result = simulator.settle()
+            physics = result.physics
+            return {
+                'format_version': 1,
+                'physics_fps': physics_fps,
+                'requested_fps': scene['fps'],
+                'fast': fast,
+                'queue': list(scene['queue']),
+                'fruits': _result_fruits(result.observation, 0),
+                'stable': bool(physics.stable[0]),
+                'done': bool(physics.done[0]),
+                'settle_timeout': bool(physics.settle_timeout[0]),
+                'frames_simulated': int(physics.frames_simulated[0]),
+                'score_delta': int(physics.score_delta[0]),
+                'merge_count': int(physics.merge_events.count[0]),
+                'message': '当前场景已用真实物理推进至决策边界。',
+            }
 
     @torch.inference_mode()
     def evaluate(self, scene, *, mode='all'):

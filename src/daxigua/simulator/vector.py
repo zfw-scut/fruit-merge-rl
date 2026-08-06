@@ -27,6 +27,7 @@ from .types import (
     BatchMergeEvents,
     BatchObservation,
     BatchPhysicsResult,
+    BatchSettleResult,
     BatchSimulationTrace,
     BatchStepResult,
 )
@@ -1579,22 +1580,14 @@ class TensorVectorSimulator:
         )
         return result, simulation_trace
 
-    @torch.no_grad()
-    def step(self, actions):
-        """为所有环境各执行一次完整投放。"""
+    def _advance_until_stable(
+            self,
+            *,
+            score_before,
+            frames_simulated,
+            fast_forwarded_frames):
+        """用Tensor物理把已存在的场景推进到决策边界。"""
 
-        actions = self._validate_actions(actions)
-        if self.device.type == 'cuda' and self.config.use_cuda_extension:
-            return self._step_cuda_extension(actions)
-        score_before = self.score.clone()
-        self._clear_event_buffers()
-        fast_forward_eligible = self._drop_fast_forward_eligibility()
-        self._drop(actions)
-
-        fast_forwarded_frames = self._fast_forward_new_drop(
-            fast_forward_eligible
-        )
-        frames_simulated = fast_forwarded_frames.clone()
         collision_substeps = torch.zeros_like(frames_simulated)
         running = frames_simulated < self.config.max_physics_frames
         budget_exhausted = ~running
@@ -1654,7 +1647,7 @@ class TensorVectorSimulator:
         truncated = torch.zeros_like(running)
         self.terminated = done_result
         self.needs_reset = done_result | truncated
-        physics = BatchPhysicsResult(
+        return BatchPhysicsResult(
             frames_simulated=frames_simulated,
             stable=stable_result,
             done=done_result,
@@ -1664,6 +1657,49 @@ class TensorVectorSimulator:
             collision_substeps=collision_substeps,
             score_delta=self.score - score_before,
             merge_events=self._merge_event_view(),
+        )
+
+    @torch.no_grad()
+    def settle(self):
+        """不投放新水果，只把当前场景自然推进至稳定或终局。
+
+        该接口面向场景编辑、诊断和测试，不进入正式训练热路径。它使用
+        与CPU回退步进相同的Tensor物理，且不会消费队列或增加决策步数。
+        """
+
+        score_before = self.score.clone()
+        self._clear_event_buffers()
+        frames_simulated = torch.zeros_like(self.score)
+        physics = self._advance_until_stable(
+            score_before=score_before,
+            frames_simulated=frames_simulated,
+            fast_forwarded_frames=torch.zeros_like(frames_simulated),
+        )
+        return BatchSettleResult(
+            observation=self.observe(),
+            physics=physics,
+        )
+
+    @torch.no_grad()
+    def step(self, actions):
+        """为所有环境各执行一次完整投放。"""
+
+        actions = self._validate_actions(actions)
+        if self.device.type == 'cuda' and self.config.use_cuda_extension:
+            return self._step_cuda_extension(actions)
+        score_before = self.score.clone()
+        self._clear_event_buffers()
+        fast_forward_eligible = self._drop_fast_forward_eligibility()
+        self._drop(actions)
+
+        fast_forwarded_frames = self._fast_forward_new_drop(
+            fast_forward_eligible
+        )
+        frames_simulated = fast_forwarded_frames.clone()
+        physics = self._advance_until_stable(
+            score_before=score_before,
+            frames_simulated=frames_simulated,
+            fast_forwarded_frames=fast_forwarded_frames,
         )
         result = BatchStepResult(
             observation=self.observe(),

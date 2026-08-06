@@ -50,12 +50,13 @@ class ScenarioLabServer:
                         'ready': True,
                         'reward_version': 'spatial_v2',
                         'device': str(owner.evaluator.device),
+                        'natural_settle': True,
                     })
                     return
                 self._json(404, {'error': '路径不存在'})
 
             def do_POST(self):
-                if self.path != '/api/evaluate':
+                if self.path not in ('/api/evaluate', '/api/settle'):
                     self._json(404, {'error': '路径不存在'})
                     return
                 try:
@@ -63,9 +64,16 @@ class ScenarioLabServer:
                     if length <= 0 or length > 2 * 1024 * 1024:
                         raise ValueError('请求体大小无效')
                     request = json.loads(self.rfile.read(length))
-                    payload = owner.evaluator.evaluate(
-                        request.get('scene'), mode=request.get('mode', 'all')
-                    )
+                    if self.path == '/api/settle':
+                        payload = owner.evaluator.settle(
+                            request.get('scene'),
+                            fast=request.get('fast', True),
+                        )
+                    else:
+                        payload = owner.evaluator.evaluate(
+                            request.get('scene'),
+                            mode=request.get('mode', 'all'),
+                        )
                 except (TypeError, ValueError, KeyError) as error:
                     self._json(400, {'error': str(error)})
                     return

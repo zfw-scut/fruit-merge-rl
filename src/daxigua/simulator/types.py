@@ -127,6 +127,14 @@ class BatchStepResult:
 
 
 @dataclass(frozen=True, slots=True)
+class BatchSettleResult:
+    """不新增水果、只把当前批量场景推进至稳定的结果。"""
+
+    observation: BatchObservation
+    physics: BatchPhysicsResult
+
+
+@dataclass(frozen=True, slots=True)
 class BatchSimulationTrace:
     """指定 CUDA 环境的一次投放逐帧记录。
 

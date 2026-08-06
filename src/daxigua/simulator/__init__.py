@@ -39,6 +39,7 @@ from .types import (
     BatchMergeEvents,
     BatchObservation,
     BatchPhysicsResult,
+    BatchSettleResult,
     BatchSimulationTrace,
     BatchStepResult,
 )
@@ -49,6 +50,7 @@ __all__ = [
     'BatchMergeEvents',
     'BatchObservation',
     'BatchPhysicsResult',
+    'BatchSettleResult',
     'BatchSimulationTrace',
     'BatchStepResult',
     'AccessibleSpaceBatch',

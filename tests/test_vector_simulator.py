@@ -122,6 +122,22 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         ]
         self.assertEqual(len(torch.unique(final_x)), 4)
 
+    def test_settle_advances_existing_scene_without_consuming_queue(self):
+        simulator = TensorVectorSimulator(
+            1, config=self._config(), device='cpu'
+        )
+        self._install_fruit(simulator, 0, 0, 1, 160, 140, 1)
+        queue_before = simulator.fruit_queue.clone()
+
+        result = simulator.settle()
+
+        self.assertTrue(bool(result.physics.stable[0]))
+        self.assertFalse(bool(result.physics.done[0]))
+        self.assertGreater(float(result.observation.positions[0, 0, 1]), 140)
+        self.assertTrue(torch.equal(queue_before, simulator.fruit_queue))
+        self.assertEqual(int(simulator.step_count[0]), 0)
+        self.assertEqual(int(result.observation.fruit_count[0]), 1)
+
     def test_kinematic_rest_correction_is_per_fruit(self):
         simulator = TensorVectorSimulator(
             1,
