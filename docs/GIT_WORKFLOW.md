@@ -2,7 +2,7 @@
 
 ## 分支边界
 
-- 当前重构分支为 `codex/accelerated-v1`。
+- 当前 Reward V2 开发分支为 `reward-v2`，基线来源分支为 `codex/accelerated-v1`。
 - 当前分支通过独立 worktree 开发，不要在原项目工作树中强行切换该分支。
 - 原来的 `codex/work-1` 保留完整训练历史和 Android 成品，不向本分支整批合并。
 - 从旧历史迁移内容时使用文件级白名单，并重新核对依赖；不直接 cherry-pick 大型功能提交。

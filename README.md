@@ -19,7 +19,8 @@
 - 云端 CUDA 门禁、端到端性能标定、动态环境扩容和低开销 Web 面板；
 - 最终 Replay 抽样、完整决策边界轨迹和 SHA-256 产物清单。
 - 从任意当前格式 checkpoint 重建在线 GNN，并生成带逐帧物理、Q 值和动作解释的本地模型观看页面。
-- 鼠标交互式自定义场景实验室前端，可放置、拖动、删除水果并编辑队列、预设和投放探针；真实物理与奖励后端尚未接入。
+- 纯空间 Reward V2：21列可投放面积、队列对齐、标准占用补偿和相邻状态缓存；
+- 鼠标交互式场景实验室，可调用真实物理并可视化21动作空间奖励与投放后局面。
 
 `daxigua.core` 仍只依赖 Python 标准库。模拟器的独立依赖见
 `requirements-simulator.txt`；正式训练的附加依赖见
@@ -28,7 +29,7 @@
 ## 当前明确不包含
 
 - 桌面或 Android 游戏；
-- Reward V1/V2、状态分析、因果归因、反事实或 Shapley；
+- 重型状态分析、因果归因、反事实或 Shapley；
 - 战略 Pair Encoder、等级/区域聚合、高层计划器、FiLM、动作效果辅助任务和 BMCTS。
 
 这些后续能力只有在新设计被明确确认后才会逐项加入；旧分支模型不作为运行依赖。
@@ -42,6 +43,7 @@ FP32 和可用时的 `torch.compile`，最后按 UTD=1 端到端吞吐和显存�
 export PYTHONPATH="$PWD/src"
 python tools/preflight_training.py
 python tools/benchmark_training_pipeline.py
+python tools/compare_reward_throughput.py
 python tools/run_autotuned_training.py --max-wall-hours 12
 ```
 
@@ -75,18 +77,20 @@ $env:PYTHONPATH = 'src'
 `--physics-fps 30` 可检查同一模型在训练物理下的表现。观看器不会把任何状态写回训练
 Replay，也不会修改 checkpoint。
 
-## 自定义场景实验室前端
+## 自定义场景实验室
 
-当前版本先提供无依赖、自包含的场景编辑页面，用于确定交互和后续场景数据契约：
+使用真实物理和 Reward V2 后端启动交互式场景实验室：
 
 ```powershell
 $env:PYTHONPATH = 'src'
-& $python tools\open_scenario_lab.py --open
+& $python tools\open_scenario_lab.py --serve --device cuda --open
 ```
 
 页面支持鼠标放置与拖动、右键删除、滚轮切换等级、撤销重做、q0～q3 编辑、21 动作
-投放探针、30/120 FPS 参数选择、极端场景预设和 JSON 导入导出。当前“运行至稳定”和
-“评估 21 个动作”只生成前端请求并明确提示后端未连接，不会用近似动画伪造物理或奖励。
+投放探针、30/120 FPS 参数选择、极端场景预设和 JSON 导入导出。“评估 21 个动作”
+会批量执行同一场景的21个真实投放，显示势能前后值、原始空间变化、占用补偿、终局
+动作和投放后水果，并在画布叠加每个未来水果的21列空间增减。省略 `--serve` 时仍可
+生成完全自包含的离线编辑页面，但不会伪造物理或奖励。
 
 ## 使用 python-torch
 
@@ -153,7 +157,8 @@ simulator.reset(reset_mask)
 压缩播放器使用现代浏览器原生的 `DecompressionStream`。需要兼容不支持该接口的旧浏览器
 时，重新渲染时增加 `--no-payload-compression`；文件会更大，但物理记录完全相同。
 
-第一版 RL 基线显式使用 `score_delta / 66`，不含终局惩罚或奖励塑形。通用
+第一版 RL 基线配置仍显式使用 `score_delta / 66`，作为 Reward V2 的固定对照；
+`configs/gnn_dqn_reward_v2.toml` 改用纯空间奖励。通用
 `VectorEnv` 仍必须显式提供 `RewardComputer`，不能把游戏分数静默当成其它任务的奖励。
 
 ## 验证和性能
