@@ -23,7 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--config', type=Path,
-        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_baseline.toml',
+        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2.toml',
     )
     parser.add_argument(
         '--autotune-report', type=Path,
@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument('--run-dir')
     parser.add_argument('--max-wall-hours', type=float)
     parser.add_argument('--total-transitions', type=int)
+    parser.add_argument('--reward-scale', type=float)
     parser.add_argument('--dashboard-port', type=int)
     parser.add_argument('--disable-dashboard', action='store_true')
     parser.add_argument('--curve-snapshot-interval', type=float)
@@ -76,6 +77,14 @@ def main():
             base.dqn,
             compile_model=bool(report['selected_compile_model']),
             use_bfloat16=bool(report['selected_use_bfloat16']),
+        ),
+        reward=replace(
+            base.reward,
+            reward_scale=(
+                args.reward_scale
+                if args.reward_scale is not None
+                else base.reward.reward_scale
+            ),
         ),
         dashboard=replace(
             base.dashboard,

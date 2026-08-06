@@ -1,5 +1,5 @@
 [training]
-run_dir = "runs/gnn_dqn_baseline"
+run_dir = "runs/gnn_dqn_reward_v2"
 device = "cuda"
 seed = 20260805
 max_envs = 4096
@@ -46,7 +46,7 @@ compile_model = false
 compile_mode = "reduce-overhead"
 
 [reward]
-kind = "score_v1"
+kind = "spatial_v2"
 score_divisor = 66.0
 reward_scale = 1.0
 queue_weights = [0.50, 0.30, 0.20]

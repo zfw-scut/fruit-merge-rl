@@ -22,7 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--config', type=Path,
-        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_baseline.toml',
+        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2.toml',
     )
     parser.add_argument('--run-dir')
     parser.add_argument('--device')
@@ -33,6 +33,7 @@ def parse_args():
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--replay-capacity', type=int)
     parser.add_argument('--warmup-transitions', type=int)
+    parser.add_argument('--reward-scale', type=float)
     parser.add_argument('--dashboard-port', type=int)
     parser.add_argument('--disable-dashboard', action='store_true')
     parser.add_argument('--curve-snapshot-interval', type=float)
@@ -112,6 +113,14 @@ def resolve_config(args):
         active_envs=args.active_envs or config.active_envs,
         replay=replay,
         dqn=dqn,
+        reward=replace(
+            config.reward,
+            reward_scale=(
+                args.reward_scale
+                if args.reward_scale is not None
+                else config.reward.reward_scale
+            ),
+        ),
         dashboard=dashboard,
         autoscale=autoscale,
     )

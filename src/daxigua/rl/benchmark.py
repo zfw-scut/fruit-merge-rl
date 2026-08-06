@@ -9,7 +9,12 @@ import time
 
 import torch
 
-from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
+from daxigua.simulator import (
+    SimulatorConfig,
+    SpatialRewardComputer,
+    SpatialRewardConfig,
+    TensorVectorSimulator,
+)
 
 from .config import DqnConfig, ModelConfig
 from .learner import DqnLearner
@@ -38,6 +43,8 @@ class PipelineBenchmarkResult:
     device_name: str
     use_bfloat16: bool
     compile_model: bool
+    reward_kind: str
+    reward_scale: float
     profile_trace: str | None
 
     def to_dict(self):
@@ -50,7 +57,12 @@ def _sync(device):
 
 
 @torch.no_grad()
-def _random_transition(simulator, replay):
+def _random_transition(
+        simulator,
+        replay,
+        reward_computer,
+        *,
+        score_divisor=66.0):
     current = TensorState.from_observation(
         simulator.observe(), physics_fps=simulator.config.physics_fps
     )
@@ -61,6 +73,11 @@ def _random_transition(simulator, replay):
     )
     ticket = replay.begin_append(current)
     result = simulator.step(actions)
+    rewards = (
+        reward_computer.step(result).reward
+        if reward_computer is not None
+        else result.physics.score_delta.to(torch.float32) / score_divisor
+    )
     next_state = TensorState.from_observation(
         result.observation, physics_fps=simulator.config.physics_fps
     )
@@ -68,9 +85,11 @@ def _random_transition(simulator, replay):
         ticket,
         next_state,
         actions,
-        result.physics.score_delta.to(torch.float32) / 66.0,
+        rewards,
         result.physics.done,
     )
+    if reward_computer is not None:
+        reward_computer.reset_rows(result.physics.done)
     simulator.reset(result.physics.done)
 
 
@@ -83,6 +102,8 @@ def benchmark_training_candidate(
         pre_roll_steps=8,
         use_bfloat16=True,
         compile_model=False,
+        reward_kind='spatial_v2',
+        reward_scale=1.0,
         profiler_output=None):
     device = torch.device(device)
     if device.type == 'cuda' and device.index is None:
@@ -99,6 +120,19 @@ def benchmark_training_candidate(
     simulator = TensorVectorSimulator(
         num_envs, config=simulator_config, device=device
     )
+    reward_computer = (
+        SpatialRewardComputer(
+            simulator_config,
+            device=device,
+            reward_config=SpatialRewardConfig(
+                reward_scale=reward_scale
+            ),
+        )
+        if reward_kind == 'spatial_v2'
+        else None
+    )
+    if reward_kind not in ('score_v1', 'spatial_v2'):
+        raise ValueError('unsupported reward_kind')
     base_model = BaselineGnnDqn(model_config).to(device)
     learner = DqnLearner(
         base_model,
@@ -128,8 +162,10 @@ def benchmark_training_candidate(
             actions = torch.randint(21, (num_envs,), device=device)
             result = simulator.step(actions)
             simulator.reset(result.physics.done)
+    if reward_computer is not None:
+        reward_computer.initialize(simulator.observe())
     while len(replay) < batch_size:
-        _random_transition(simulator, replay)
+        _random_transition(simulator, replay, reward_computer)
 
     state = TensorState.from_observation(
         simulator.observe(), physics_fps=simulator_config.physics_fps
@@ -154,6 +190,9 @@ def benchmark_training_candidate(
         simulator.reset(result.physics.done)
     _sync(device)
     physics_elapsed = time.perf_counter() - physics_started
+
+    if reward_computer is not None:
+        reward_computer.initialize(simulator.observe())
 
     _sync(device)
     learner_started = time.perf_counter()
@@ -186,6 +225,11 @@ def benchmark_training_candidate(
                 selected = model(current).argmax(dim=1)
             ticket = replay.begin_append(current)
             result = simulator.step(selected)
+            rewards = (
+                reward_computer.step(result).reward
+                if reward_computer is not None
+                else result.physics.score_delta.to(torch.float32) / 66.0
+            )
             next_state = TensorState.from_observation(
                 result.observation, physics_fps=simulator_config.physics_fps
             )
@@ -193,9 +237,11 @@ def benchmark_training_candidate(
                 ticket,
                 next_state,
                 selected,
-                result.physics.score_delta.to(torch.float32) / 66.0,
+                rewards,
                 result.physics.done,
             )
+            if reward_computer is not None:
+                reward_computer.reset_rows(result.physics.done)
             simulator.reset(result.physics.done)
             update_credit += num_envs / batch_size
             updates = int(update_credit)
@@ -265,5 +311,7 @@ def benchmark_training_candidate(
         device_name=device_name,
         use_bfloat16=bool(use_bfloat16),
         compile_model=bool(compile_model),
+        reward_kind=str(reward_kind),
+        reward_scale=float(reward_scale),
         profile_trace=str(profile_path) if profile_path is not None else None,
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from pathlib import Path
 import tomllib
 
@@ -81,6 +82,36 @@ class DqnConfig:
             raise ValueError('utd_ratio must be positive')
         if self.compile_mode not in ('default', 'reduce-overhead', 'max-autotune'):
             raise ValueError('unsupported torch.compile mode')
+
+
+@dataclass(frozen=True, slots=True)
+class RewardConfig:
+    """训练奖励的可比较配置。"""
+
+    kind: str = 'spatial_v2'
+    score_divisor: float = 66.0
+    reward_scale: float = 1.0
+    queue_weights: tuple[float, float, float] = (0.5, 0.3, 0.2)
+
+    def __post_init__(self):
+        if self.kind not in ('score_v1', 'spatial_v2'):
+            raise ValueError('reward kind must be score_v1 or spatial_v2')
+        score_divisor = float(self.score_divisor)
+        reward_scale = float(self.reward_scale)
+        weights = tuple(float(value) for value in self.queue_weights)
+        if not math.isfinite(score_divisor) or score_divisor <= 0.0:
+            raise ValueError('score_divisor must be finite and positive')
+        if not math.isfinite(reward_scale) or reward_scale <= 0.0:
+            raise ValueError('reward_scale must be finite and positive')
+        if len(weights) != 3:
+            raise ValueError('queue_weights must contain three values')
+        if any(not math.isfinite(value) or value < 0.0 for value in weights):
+            raise ValueError('queue_weights must be finite and non-negative')
+        if not math.isclose(sum(weights), 1.0, rel_tol=0.0, abs_tol=1e-6):
+            raise ValueError('queue_weights must sum to one')
+        object.__setattr__(self, 'score_divisor', score_divisor)
+        object.__setattr__(self, 'reward_scale', reward_scale)
+        object.__setattr__(self, 'queue_weights', weights)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +221,7 @@ class TrainingConfig:
     stage_pilot_max_drops: int = 128
     model: ModelConfig = field(default_factory=ModelConfig)
     dqn: DqnConfig = field(default_factory=DqnConfig)
+    reward: RewardConfig = field(default_factory=RewardConfig)
     replay: ReplayConfig = field(default_factory=ReplayConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     analysis: AnalysisExportConfig = field(default_factory=AnalysisExportConfig)
@@ -221,6 +253,7 @@ class TrainingConfig:
             **root,
             model=ModelConfig(**data.get('model', {})),
             dqn=DqnConfig(**data.get('dqn', {})),
+            reward=RewardConfig(**data.get('reward', {})),
             replay=ReplayConfig(**data.get('replay', {})),
             evaluation=EvaluationConfig(**data.get('evaluation', {})),
             analysis=AnalysisExportConfig(**data.get('analysis', {})),

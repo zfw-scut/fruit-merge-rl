@@ -37,6 +37,12 @@ def parse_args():
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--compile-model', action='store_true')
     parser.add_argument('--fp32', action='store_true')
+    parser.add_argument(
+        '--reward-kind',
+        choices=('score_v1', 'spatial_v2'),
+        default='spatial_v2',
+    )
+    parser.add_argument('--reward-scale', type=float, default=1.0)
     parser.add_argument('--skip-execution-variants', action='store_true')
     parser.add_argument('--skip-profile', action='store_true')
     parser.add_argument('--profiler-output', type=Path)
@@ -58,6 +64,8 @@ def _run_single(args):
         pre_roll_steps=args.pre_roll_steps,
         use_bfloat16=not args.fp32,
         compile_model=args.compile_model,
+        reward_kind=args.reward_kind,
+        reward_scale=args.reward_scale,
         profiler_output=args.profiler_output,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +97,8 @@ def _subprocess_result(
         ),
         '--pre-roll-steps', str(args.pre_roll_steps),
         '--device', args.device,
+        '--reward-kind', args.reward_kind,
+        '--reward-scale', str(args.reward_scale),
         '--output', str(single_output),
     )
     compile_model = args.compile_model if compile_model is None else compile_model
@@ -281,6 +291,8 @@ def main():
     report = {
         'created_at': time.time(),
         'selection_metric': 'end_to_end_env_steps_per_second_at_utd_1',
+        'reward_kind': args.reward_kind,
+        'reward_scale': args.reward_scale,
         'selected_num_envs': best['num_envs'],
         'selected_batch_size': best['batch_size'],
         'selected_compile_model': best.get('compile_model', False),

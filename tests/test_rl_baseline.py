@@ -16,6 +16,7 @@ from daxigua.rl.config import (
     DqnConfig,
     EvaluationConfig,
     ModelConfig,
+    RewardConfig,
     ReplayConfig,
     TrainingConfig,
 )
@@ -180,6 +181,27 @@ class ReplayAndLearnerTest(unittest.TestCase):
         self.assertEqual(metrics['update_count'], 1)
         self.assertTrue(metrics['target_synced'])
         self.assertTrue(bool(torch.isfinite(metrics['loss'])))
+
+
+class RewardTrainingConfigTest(unittest.TestCase):
+    def test_reward_modes_are_explicit_and_validate_weights(self):
+        self.assertEqual(RewardConfig(kind='score_v1').kind, 'score_v1')
+        self.assertEqual(RewardConfig().kind, 'spatial_v2')
+        with self.assertRaisesRegex(ValueError, 'sum to one'):
+            RewardConfig(queue_weights=(0.5, 0.5, 0.5))
+
+    def test_baseline_and_reward_v2_toml_keep_separate_reward_modes(self):
+        project_root = Path(__file__).resolve().parents[1]
+        baseline = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_baseline.toml'
+        )
+        reward_v2 = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_reward_v2.toml'
+        )
+
+        self.assertEqual(baseline.reward.kind, 'score_v1')
+        self.assertEqual(reward_v2.reward.kind, 'spatial_v2')
+        self.assertEqual(reward_v2.reward.queue_weights, (0.5, 0.3, 0.2))
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):

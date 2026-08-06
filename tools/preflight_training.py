@@ -27,14 +27,19 @@ from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
-from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
+from daxigua.simulator import (
+    SimulatorConfig,
+    SpatialRewardComputer,
+    SpatialRewardConfig,
+    TensorVectorSimulator,
+)
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--config', type=Path,
-        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_baseline.toml',
+        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2.toml',
     )
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--smoke-envs', type=int, default=32)
@@ -64,6 +69,18 @@ def run_preflight(args):
         config=simulator_config,
         device=device,
     )
+    reward_computer = (
+        SpatialRewardComputer(
+            simulator_config,
+            device=device,
+            reward_config=SpatialRewardConfig(
+                queue_weights=config.reward.queue_weights,
+                reward_scale=config.reward.reward_scale,
+            ),
+        )
+        if config.reward.kind == 'spatial_v2'
+        else None
+    )
     model = BaselineGnnDqn(config.model).to(device)
     learner = DqnLearner(
         model,
@@ -81,6 +98,8 @@ def run_preflight(args):
         physics_fps=simulator_config.physics_fps,
     )
     observation = simulator.observe()
+    if reward_computer is not None:
+        reward_computer.initialize(observation)
     current = TensorState.from_observation(
         observation, physics_fps=simulator_config.physics_fps
     )
@@ -93,6 +112,17 @@ def run_preflight(args):
     actions = q_values.argmax(dim=1)
     ticket = replay.begin_append(current)
     result = simulator.step(actions)
+    reward_step = (
+        reward_computer.step(result)
+        if reward_computer is not None
+        else None
+    )
+    rewards = (
+        reward_step.reward
+        if reward_step is not None
+        else result.physics.score_delta.to(torch.float32)
+        / config.reward.score_divisor
+    )
     next_state = TensorState.from_observation(
         result.observation, physics_fps=simulator_config.physics_fps
     )
@@ -100,7 +130,7 @@ def run_preflight(args):
         ticket,
         next_state,
         actions,
-        result.physics.score_delta.to(torch.float32) / 66.0,
+        rewards,
         result.physics.done,
     )
     while len(replay) < args.smoke_batch_size:
@@ -199,6 +229,13 @@ def run_preflight(args):
         'training_physics_fps': 30,
         'evaluation_physics_fps': [30, 120],
         'accurate_replay_writes': 0,
+        'reward_kind': config.reward.kind,
+        'reward_scale': config.reward.reward_scale,
+        'spatial_reward_mean': (
+            float(reward_step.reward.mean().item())
+            if reward_step is not None else None
+        ),
+        'spatial_reward_finite': bool(torch.isfinite(rewards).all().item()),
     }
 
 

@@ -7,6 +7,7 @@ from .config import (
     DqnConfig,
     EvaluationConfig,
     ModelConfig,
+    RewardConfig,
     ReplayConfig,
     TrainingConfig,
 )
@@ -21,6 +22,7 @@ __all__ = [
     'DqnConfig',
     'EvaluationConfig',
     'ModelConfig',
+    'RewardConfig',
     'ReplayConfig',
     'TensorState',
     'TrainingConfig',

@@ -6,13 +6,13 @@ cd "$project_dir"
 export PYTHONPATH="$project_dir/src"
 
 python tools/preflight_training.py \
-  --config configs/gnn_dqn_baseline.toml \
+  --config configs/gnn_dqn_reward_v2.toml \
   --output runs/preflight/gnn_dqn.json
 
 python tools/benchmark_training_pipeline.py \
   --output runs/autotune/training_pipeline.json
 
 python tools/run_autotuned_training.py \
-  --config configs/gnn_dqn_baseline.toml \
+  --config configs/gnn_dqn_reward_v2.toml \
   --autotune-report runs/autotune/training_pipeline.json \
   "$@"

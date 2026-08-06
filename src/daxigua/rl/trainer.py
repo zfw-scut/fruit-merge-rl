@@ -13,7 +13,12 @@ import time
 
 import torch
 
-from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
+from daxigua.simulator import (
+    SimulatorConfig,
+    SpatialRewardComputer,
+    SpatialRewardConfig,
+    TensorVectorSimulator,
+)
 
 from .checkpoint import (
     load_checkpoint,
@@ -151,6 +156,18 @@ class BaselineTrainer:
             config=self.simulator_config,
             device=self.device,
         )
+        self.reward_computer = (
+            SpatialRewardComputer(
+                self.simulator_config,
+                device=self.device,
+                reward_config=SpatialRewardConfig(
+                    queue_weights=config.reward.queue_weights,
+                    reward_scale=config.reward.reward_scale,
+                ),
+            )
+            if config.reward.kind == 'spatial_v2'
+            else None
+        )
         self.active_envs = config.active_envs
         base_model = BaselineGnnDqn(
             config.model,
@@ -178,6 +195,7 @@ class BaselineTrainer:
             maximum_envs=config.max_envs,
         )
         self.training_metrics = _TensorMetricAccumulator()
+        self.reward_metrics = _TensorMetricAccumulator()
         self.recent_scores = deque(maxlen=4096)
         self.recent_drops = deque(maxlen=4096)
         self.metric_window_scores = []
@@ -259,7 +277,25 @@ class BaselineTrainer:
 
     def _reset_finished(self, finished):
         if bool(finished.any().item()):
+            if self.reward_computer is not None:
+                self.reward_computer.reset_rows(finished)
             self.simulator.reset(finished)
+
+    def _initialize_reward(self):
+        if self.reward_computer is not None:
+            self.reward_computer.initialize(self.simulator.observe())
+
+    def _compute_rewards(self, result, *, record_metrics=False):
+        if self.reward_computer is None:
+            return result.physics.score_delta[:self.active_envs].to(
+                torch.float32
+            ) / self.config.reward.score_divisor
+        reward_step = self.reward_computer.step(
+            result, batch_size=self.active_envs
+        )
+        if record_metrics:
+            self.reward_metrics.add(reward_step.scalar_metrics())
+        return reward_step.reward
 
     @torch.no_grad()
     def estimate_stage_thresholds(self):
@@ -389,6 +425,7 @@ class BaselineTrainer:
         quotas[-1] += target - sum(quotas)
         counts = [0, 0, 0, 0]
         self.dashboard.event('warmup_started', '开始分阶段预热 Replay')
+        self._initialize_reward()
         max_rounds = max(
             self.config.max_episode_drops * 20,
             math.ceil(target / self.active_envs) * 100,
@@ -426,9 +463,7 @@ class BaselineTrainer:
                 rows=self._active_rows(),
             )
             active_actions = full_actions[:self.active_envs]
-            rewards = result.physics.score_delta[:self.active_envs].to(
-                torch.float32
-            ) / 66.0
+            rewards = self._compute_rewards(result)
             terminals = result.physics.done[:self.active_envs]
             if ticket is not None:
                 self.replay.finish_append(
@@ -554,6 +589,7 @@ class BaselineTrainer:
             pending = new_rows & (self.simulator.step_count < targets)
             if not bool(pending.any().item()):
                 self.active_envs = target_envs
+                self._initialize_reward()
                 return
             result = self._step(self._random_actions(), pending)
             failed = pending & result.physics.done
@@ -702,7 +738,7 @@ class BaselineTrainer:
         torch.save({
             'format_version': 1,
             'physics_fps': self.simulator_config.physics_fps,
-            'reward_scale': 'score_delta / 66',
+            'reward_config': self.config.to_dict()['reward'],
             'sample_count': sample_count,
             'replay_metadata': self.replay.metadata(),
             'chunks': chunks,
@@ -803,6 +839,7 @@ class BaselineTrainer:
             'last_accurate_eval_score': self.last_accurate_eval_score,
             **stage_seconds,
             **self.training_metrics.flush(),
+            **self.reward_metrics.flush(),
         }
         action_counts = self.action_counts.detach().cpu()
         payload['action_counts'] = action_counts.tolist()
@@ -846,13 +883,22 @@ class BaselineTrainer:
         )
         self.dashboard.event(
             'training_started',
-            '第一版 30 FPS GNN-DQN 训练启动',
+            (
+                'Reward V2 30 FPS GNN-DQN 训练启动'
+                if self.config.reward.kind == 'spatial_v2'
+                else '纯分数基线 30 FPS GNN-DQN 训练启动'
+            ),
+            reward_kind=self.config.reward.kind,
             dashboard=f'http://{self.config.dashboard.host}:{self.config.dashboard.port}',
         )
         if len(self.replay) < self.config.replay.warmup_transitions:
             self.estimate_stage_thresholds()
             self.stagger_initial_states()
             self.fill_warmup_replay()
+        if (
+                self.reward_computer is not None
+                and not self.reward_computer.initialized):
+            self._initialize_reward()
 
         window_started = time.perf_counter()
         window_transitions = 0
@@ -863,6 +909,7 @@ class BaselineTrainer:
         stage_seconds = {
             'actor_seconds': 0.0,
             'physics_seconds': 0.0,
+            'reward_seconds': 0.0,
             'learner_seconds': 0.0,
         }
         try:
@@ -907,9 +954,13 @@ class BaselineTrainer:
                     physics_fps=self.simulator_config.physics_fps,
                     rows=self._active_rows(),
                 )
-                rewards = result.physics.score_delta[:self.active_envs].to(
-                    torch.float32
-                ) / 66.0
+                reward_started = time.perf_counter()
+                rewards = self._compute_rewards(
+                    result, record_metrics=True
+                )
+                stage_seconds['reward_seconds'] += (
+                    time.perf_counter() - reward_started
+                )
                 terminals = result.physics.done[:self.active_envs]
                 self.replay.finish_append(
                     ticket,
@@ -981,6 +1032,7 @@ class BaselineTrainer:
                     stage_seconds = {
                         'actor_seconds': 0.0,
                         'physics_seconds': 0.0,
+                        'reward_seconds': 0.0,
                         'learner_seconds': 0.0,
                     }
                     last_log = window_started
