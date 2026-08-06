@@ -90,8 +90,9 @@ C(q0,Q) = 0.5*B[q0,q1] + 0.3*B[q0,q2] + 0.2*B[q0,q3]
 21列深度、归一化面积、各队列位的原始变化与补偿、加权势能和最终奖励。
 前端只消费后端结果，不在 JavaScript 中重写奖励公式。
 
-服务入口为 `tools/open_scenario_lab.py --serve`。浏览器可切换21个动作和 q1～q3，
-查看势能、空间变化、补偿、终局有效面积、投放后水果与21列增减覆盖层。
+服务入口为 `tools/open_scenario_lab.py --serve`。场景实验室使用持续实时物理，
+评估时只复制按下按钮时的状态快照，不会暂停或替换主画布。浏览器可切换21个动作和 q1～q3，
+查看势能、空间变化、补偿、终局有效面积与21列增减覆盖层。
 
 ## 6. 实现位置
 
@@ -99,6 +100,7 @@ C(q0,Q) = 0.5*B[q0,q1] + 0.3*B[q0,q2] + 0.2*B[q0,q3]
 - `src/daxigua/rl/trainer.py`：Reward V1/V2 显式选择、缓存重置和标量监控；
 - `configs/gnn_dqn_reward_v2.toml`：Reward V2 正式训练配置；
 - `src/daxigua/simulator/scenario_lab_service.py`：21动作真实物理评估和JSON诊断；
+- `src/daxigua/simulator/scenario_lab_live.py`：持久化单环境物理循环、帧边界命令队列和实时状态发布；
 - `tools/compare_reward_throughput.py`：5%警告、8%阻断的成对吞吐门禁。
 
 ## 7. 旧分支审计结论

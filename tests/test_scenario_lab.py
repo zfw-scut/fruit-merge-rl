@@ -1,6 +1,10 @@
+import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.request import Request, urlopen
 
 from daxigua.simulator.scenario_lab import fruit_specs, write_scenario_lab_html
 from daxigua.simulator.scenario_lab_service import (
@@ -8,6 +12,8 @@ from daxigua.simulator.scenario_lab_service import (
     validate_scenario,
 )
 from daxigua.simulator.scenario_lab_web import render_scenario_lab_document
+from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
+from daxigua.simulator.scenario_lab_server import ScenarioLabServer
 
 
 class ScenarioLabFrontendTests(unittest.TestCase):
@@ -24,7 +30,13 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('评估 21 个动作', html)
         self.assertIn('daxigua:scenario-request', html)
         self.assertIn('/api/evaluate', html)
+        self.assertIn('/api/live/command', html)
+        self.assertIn('/api/live/events', html)
+        self.assertIn('new EventSource', html)
+        self.assertIn('dropPreviews', html)
+        self.assertIn('暂停并进入编辑', html)
         self.assertIn('effective_normalized_area', html)
+        self.assertNotIn('回放轨迹', html)
         self.assertNotIn('文件(F)', html)
 
     def test_fruit_specs_follow_all_stable_levels(self):
@@ -49,6 +61,78 @@ class ScenarioLabFrontendTests(unittest.TestCase):
 
 
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_live_http_api_exposes_state_and_accepts_drop_command(self):
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'), host='127.0.0.1', port=0
+        ).start()
+        try:
+            with urlopen(server.url + 'api/health', timeout=2.0) as response:
+                health = json.loads(response.read())
+            request = Request(
+                server.url + 'api/live/command',
+                data=json.dumps({
+                    'command': {'type': 'drop', 'level': 1, 'x': 280.0}
+                }).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=2.0) as response:
+                accepted = json.loads(response.read())
+            with urlopen(server.url + 'api/live/state', timeout=2.0) as response:
+                state = json.loads(response.read())
+        finally:
+            server.close()
+
+        self.assertTrue(health['live_physics'])
+        self.assertTrue(accepted['accepted'])
+        self.assertEqual(1, state['step_count'])
+        self.assertEqual(1, len(state['fruits']))
+
+    def test_live_session_accepts_consecutive_drops_without_settling(self):
+        session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
+        session.start()
+        try:
+            session.execute({'type': 'clear', 'queue': [1, 2, 3, 4]})
+            first = session.execute({'type': 'drop', 'level': 1, 'x': 180})
+            second = session.execute({'type': 'drop', 'level': 2, 'x': 380})
+            snapshot = session.snapshot()
+            sequence = snapshot['sequence']
+            later = session.wait_for_snapshot(sequence, timeout=0.2)
+        finally:
+            session.close()
+
+        self.assertTrue(first['accepted'])
+        self.assertTrue(second['accepted'])
+        self.assertEqual(2, snapshot['step_count'])
+        self.assertEqual(2, len(snapshot['fruits']))
+        self.assertGreater(later['physics_frame'], snapshot['physics_frame'])
+        self.assertFalse(snapshot['paused'])
+
+    def test_live_session_pause_stops_physics_but_keeps_commands(self):
+        session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
+        session.start()
+        try:
+            session.execute({'type': 'pause'})
+            session.execute({'type': 'drop', 'level': 1, 'x': 280})
+            paused = session.snapshot()
+            time.sleep(0.04)
+            still_paused = session.snapshot()
+            session.execute({'type': 'resume'})
+            moving = session.snapshot()
+            deadline = time.monotonic() + 0.2
+            while (
+                    moving['physics_frame'] <= still_paused['physics_frame']
+                    and time.monotonic() < deadline):
+                moving = session.wait_for_snapshot(
+                    moving['sequence'], timeout=0.05
+                )
+        finally:
+            session.close()
+
+        self.assertEqual(paused['physics_frame'], still_paused['physics_frame'])
+        self.assertEqual(1, len(still_paused['fruits']))
+        self.assertGreater(moving['physics_frame'], still_paused['physics_frame'])
+
     def test_validate_scenario_normalizes_reward_v2_inputs(self):
         scene = validate_scenario({
             'name': '测试场景',
