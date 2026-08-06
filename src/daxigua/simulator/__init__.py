@@ -27,6 +27,13 @@ from .replay import (
     write_replay_html,
     write_replay_payload_html,
 )
+from .scenario_lab import (
+    fruit_specs,
+    render_scenario_lab_html,
+    write_scenario_lab_html,
+)
+from .scenario_lab_server import ScenarioLabServer
+from .scenario_lab_service import ScenarioLabEvaluator, validate_scenario
 from .types import (
     BatchDropResult,
     BatchMergeEvents,
@@ -51,6 +58,8 @@ __all__ = [
     'load_fruit_texture_data_urls',
     'load_trace_archive',
     'RewardComputer',
+    'ScenarioLabEvaluator',
+    'ScenarioLabServer',
     'SimulatorConfig',
     'SingleEnvAdapter',
     'SpatialRewardComputer',
@@ -59,7 +68,9 @@ __all__ = [
     'SpatialRewardStep',
     'build_standard_compensation_table',
     'diagnose_spatial_reward',
+    'fruit_specs',
     'save_trace_archive',
+    'render_scenario_lab_html',
     'TensorVectorSimulator',
     'trace_to_payload',
     'VectorEnv',
@@ -67,5 +78,7 @@ __all__ = [
     'write_replay_html',
     'write_replay_payload_html',
     'write_replay_catalog',
+    'write_scenario_lab_html',
+    'validate_scenario',
     'ZeroReward',
 ]

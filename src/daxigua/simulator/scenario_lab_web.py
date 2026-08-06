@@ -1,8 +1,4 @@
-"""自定义场景实验室的无依赖前端页面。
-
-当前模块只负责浏览器中的场景编辑、几何提示和结果展示外壳。真实物理、模型推理与
-奖励计算由后续本地服务接入，前端不会用近似动画伪造这些结果。
-"""
+"""自定义场景实验室的无依赖前端页面与Reward V2诊断视图。"""
 
 from __future__ import annotations
 
@@ -138,8 +134,11 @@ canvas{display:block;width:100%;height:100%;border-radius:13px;background:#111b2
   background:#fff}.result-card span{display:block;color:var(--muted);font-size:9px;margin-bottom:4px}.result-card strong{font-size:15px}
 .action-results{height:134px;display:grid;grid-template-columns:repeat(21,minmax(5px,1fr));align-items:end;gap:3px;padding:9px 7px 20px;
   border:1px solid var(--stroke);border-radius:10px;background:#f7f9fc}.action-result{height:100%;position:relative;display:flex;align-items:flex-end}
+.action-result{cursor:pointer;border-radius:4px}.action-result:hover,.action-result.selected{background:rgba(15,108,189,.10)}
 .action-result i{display:block;width:100%;height:5%;min-height:3px;border-radius:3px 3px 1px 1px;background:#aeb8c6}.action-result.best i{
   background:linear-gradient(#62b6ee,#0f6cbd)}.action-result span{position:absolute;bottom:-14px;width:100%;text-align:center;font-size:7px;color:#8993a2}
+.space-slots{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}.space-slot{min-height:42px;border:1px solid var(--stroke);border-radius:8px;background:#fff;cursor:pointer;color:var(--muted);font-size:9px}.space-slot strong{display:block;color:var(--text);font-size:11px}.space-slot.active{border-color:rgba(15,108,189,.55);background:var(--accent-soft);color:#075a9e}
+.alignment-note{margin-top:8px;color:var(--muted);font-size:9px;line-height:1.5}.reward-positive{color:var(--success)!important}.reward-negative{color:var(--danger)!important}
 .result-message{margin-top:10px;padding:9px;border-radius:8px;background:#f2f4f8;color:var(--muted);font-size:10px;line-height:1.45}
 .toast-stack{position:fixed;right:20px;top:80px;z-index:50;display:grid;gap:8px;pointer-events:none}.toast{min-width:250px;max-width:360px;
   padding:11px 13px;border:1px solid rgba(255,255,255,.7);border-radius:10px;background:rgba(31,35,43,.91);color:#fff;
@@ -153,7 +152,7 @@ canvas{display:block;width:100%;height:100%;border-radius:13px;background:#111b2
 <body>
 <div class="app">
   <header class="topbar">
-    <div class="brand"><div class="brand-mark" aria-hidden="true">◇</div><div class="brand-copy"><strong>场景实验室</strong><span>Scenario Lab · 前端预览</span></div></div>
+    <div class="brand"><div class="brand-mark" aria-hidden="true">◇</div><div class="brand-copy"><strong>场景实验室</strong><span>Scenario Lab · Reward V2</span></div></div>
     <input id="scene-title" class="scene-title" value="濒临出界压力测试" aria-label="场景名称">
     <div class="command-group">
       <button id="undo" class="icon-button" title="撤销 Ctrl+Z" aria-label="撤销">↶</button>
@@ -245,26 +244,33 @@ canvas{display:block;width:100%;height:100%;border-radius:13px;background:#111b2
         </section>
         <section class="section">
           <div class="run-stack">
-            <button id="settle" class="secondary">运行至稳定</button>
+            <button id="settle" class="secondary">运行探针至稳定</button>
             <button id="evaluate" class="primary">并行评估 21 个动作</button>
           </div>
-          <div class="backend-note"><i></i><span>当前为前端版。点击会生成标准场景请求；接入 CUDA 场景加载接口后返回真实物理与奖励。</span></div>
+          <div class="backend-note"><i></i><span>服务模式会并行运行 21 个真实物理动作；离线页面仍可独立编辑和导出场景。</span></div>
         </section>
       </div>
 
       <div id="tab-result" class="tab-page">
-        <div id="result-empty" class="empty-result"><div class="empty-illustration">⌁</div><strong>等待第一次真实评估</strong><p>结果区不会展示模拟数据。后端接入后，这里将对比 21 个动作的奖励和终局风险。</p></div>
+        <div id="result-empty" class="empty-result"><div class="empty-illustration">⌁</div><strong>等待第一次真实评估</strong><p>连接本地服务后，这里会对比 21 个动作的空间奖励、终局风险与投放后局面。</p></div>
         <div id="result-content" hidden>
           <section class="section">
             <div class="section-title"><strong>动作摘要</strong><span id="result-fps" class="hint">—</span></div>
             <div class="result-summary">
               <div class="result-card"><span>推荐动作</span><strong id="best-action">—</strong></div>
-              <div class="result-card"><span>最高即时奖励</span><strong id="best-reward">—</strong></div>
-              <div class="result-card"><span>最高得分增量</span><strong id="best-score">—</strong></div>
-              <div class="result-card"><span>危险动作</span><strong id="terminal-actions">—</strong></div>
+              <div class="result-card"><span>最高空间奖励</span><strong id="best-reward">—</strong></div>
+              <div class="result-card"><span>当前查看动作</span><strong id="selected-action">—</strong></div>
+              <div class="result-card"><span>当前动作奖励</span><strong id="selected-reward">—</strong></div>
+              <div class="result-card"><span>投放前势能</span><strong id="space-before">—</strong></div>
+              <div class="result-card"><span>投放后势能</span><strong id="space-after">—</strong></div>
+              <div class="result-card"><span>原始空间变化</span><strong id="space-delta">—</strong></div>
+              <div class="result-card"><span>水果占用补偿</span><strong id="space-compensation">—</strong></div>
+              <div class="result-card"><span>当前得分增量</span><strong id="best-score">—</strong></div>
+              <div class="result-card"><span>终局动作</span><strong id="terminal-actions">—</strong></div>
             </div>
           </section>
-          <section class="section"><div class="section-title"><strong>21 动作奖励</strong><span class="hint">当前值</span></div><div id="action-results" class="action-results"></div><div id="result-message" class="result-message"></div></section>
+          <section class="section"><div class="section-title"><strong>未来水果空间</strong><span class="hint">21列近似</span></div><div id="space-slots" class="space-slots"></div><div class="alignment-note">投放前 q1～q3 与投放后 q0～q2 严格对齐；新随机 q3 不参与当前奖励。画布中绿色为新增空间、红色为损失空间，虚线和实线分别表示投放前后可抵达深度。</div></section>
+          <section class="section"><div class="section-title"><strong>21 动作空间奖励</strong><span class="hint">点击切换结果</span></div><div id="action-results" class="action-results"></div><div id="result-message" class="result-message"></div></section>
         </div>
       </div>
     </div></aside>
@@ -300,13 +306,15 @@ const templates={
 let state={fruits:[],queue:[2,1,4,3],selectedId:null,level:1,tool:'place',fps:120,probe:10,
   showAnchors:true,showGrid:true,showWarnings:true,title:'濒临出界压力测试'};
 let nextId=1,hover=null,drag=null,history=[],future=[],historyLock=false;
+let evaluation=null,selectedResultAction=null,selectedSpaceSlot=0,backendConnected=false;
 
 function spec(level){return FRUITS[level-1]}
 function actionX(index,level=state.queue[0]){const radius=spec(level).radius,left=BOARD.wall+radius+2,right=BOARD.width-BOARD.wall-radius-2;return left+(right-left)*index/(BOARD.actions-1)}
 function cloneScene(){return {version:1,board:{...BOARD},name:$('scene-title').value.trim()||'未命名场景',fps:state.fps,queue:[...state.queue],probe_action:state.probe,
-  fruits:state.fruits.map(({id,level,x,y})=>({id,level,x:+x.toFixed(2),y:+y.toFixed(2),vx:0,vy:0,angle:0,angular_velocity:0}))}}
+  fruits:state.fruits.map(({id,level,x,y,physicsRadius})=>({id,level,x:+x.toFixed(2),y:+y.toFixed(2),physics_radius:physicsRadius||spec(level).merged_physics_radius,vx:0,vy:0,angle:0,angular_velocity:0}))}}
 function snapshot(){return JSON.stringify(cloneScene())}
-function remember(){if(historyLock)return;const value=snapshot();if(history.at(-1)!==value){history.push(value);if(history.length>80)history.shift()}future=[];updateUndo()}
+function invalidateEvaluation(){evaluation=null;selectedResultAction=null;draw()}
+function remember(){if(historyLock)return;invalidateEvaluation();const value=snapshot();if(history.at(-1)!==value){history.push(value);if(history.length>80)history.shift()}future=[];updateUndo()}
 function updateUndo(){$('undo').disabled=history.length<2;$('redo').disabled=!future.length}
 function restore(raw){const scene=typeof raw==='string'?JSON.parse(raw):raw;loadScene(scene,{remember:false});draw();renderUi()}
 function undo(){if(history.length<2)return;future.push(history.pop());restore(history.at(-1));updateUndo()}
@@ -315,17 +323,17 @@ function clampFruit(fruit){const r=spec(fruit.level).radius;fruit.x=Math.max(BOA
 function loadTemplate(name){const item=templates[name]||templates.empty;nextId=1;state.fruits=item.fruits.map(([level,x,y])=>({id:nextId++,level,x,y}));state.queue=[...item.queue];state.selectedId=null;state.title=item.title;$('scene-title').value=item.title;remember();renderUi();draw();toast('场景已载入',item.title)}
 function loadScene(scene,{remember:shouldRemember=true}={}){
   if(!scene||!Array.isArray(scene.fruits))throw new Error('场景文件缺少 fruits 数组');
-  nextId=1;state.fruits=scene.fruits.slice(0,64).map(item=>{const level=Math.max(1,Math.min(11,Number(item.level)||1));const fruit={id:Number(item.id)||nextId,level,x:Number(item.x),y:Number(item.y)};nextId=Math.max(nextId,fruit.id+1);if(!Number.isFinite(fruit.x)||!Number.isFinite(fruit.y))throw new Error('水果坐标必须是有限数值');clampFruit(fruit);return fruit});
-  state.queue=(Array.isArray(scene.queue)?scene.queue:[1,2,3,4]).slice(0,4).map(value=>Math.max(1,Math.min(11,Number(value)||1)));while(state.queue.length<4)state.queue.push(1);
+  nextId=1;state.fruits=scene.fruits.slice(0,64).map(item=>{const level=Math.max(1,Math.min(11,Number(item.level)||1));const fruit={id:Number(item.id)||nextId,level,x:Number(item.x),y:Number(item.y),physicsRadius:Number(item.physics_radius)||spec(level).merged_physics_radius};nextId=Math.max(nextId,fruit.id+1);if(!Number.isFinite(fruit.x)||!Number.isFinite(fruit.y))throw new Error('水果坐标必须是有限数值');clampFruit(fruit);return fruit});
+  state.queue=(Array.isArray(scene.queue)?scene.queue:[1,2,3,4]).slice(0,4).map(value=>Math.max(1,Math.min(5,Number(value)||1)));while(state.queue.length<4)state.queue.push(1);
   state.fps=Number(scene.fps)===30?30:120;state.probe=Math.max(0,Math.min(20,Number(scene.probe_action)||10));state.selectedId=null;
   $('scene-title').value=String(scene.name||'导入场景').slice(0,80);if(shouldRemember)remember();renderUi();draw()
 }
 function pointFromEvent(event){const rect=canvas.getBoundingClientRect();return {x:(event.clientX-rect.left)*BOARD.width/rect.width,y:(event.clientY-rect.top)*BOARD.height/rect.height,rect}}
 function hitFruit(point){for(let i=state.fruits.length-1;i>=0;i--){const fruit=state.fruits[i],r=spec(fruit.level).radius;if(Math.hypot(point.x-fruit.x,point.y-fruit.y)<=r)return fruit}return null}
 function overlaps(){const pairs=new Set;for(let a=0;a<state.fruits.length;a++)for(let b=a+1;b<state.fruits.length;b++){const x=state.fruits[a],y=state.fruits[b];if(Math.hypot(x.x-y.x,x.y-y.y)<spec(x.level).radius+spec(y.level).radius-1){pairs.add(x.id);pairs.add(y.id)}}return pairs}
-function place(point){if(state.fruits.length>=64){toast('无法继续放置','场景最多包含 64 个水果');return}const fruit={id:nextId++,level:state.level,x:point.x,y:point.y};clampFruit(fruit);state.fruits.push(fruit);state.selectedId=fruit.id;remember();renderUi();draw()}
+function place(point){if(state.fruits.length>=64){toast('无法继续放置','场景最多包含 64 个水果');return}const fruit={id:nextId++,level:state.level,x:point.x,y:point.y,physicsRadius:spec(state.level).merged_physics_radius};clampFruit(fruit);state.fruits.push(fruit);state.selectedId=fruit.id;remember();renderUi();draw()}
 function removeFruit(id){const index=state.fruits.findIndex(item=>item.id===id);if(index<0)return;state.fruits.splice(index,1);if(state.selectedId===id)state.selectedId=null;remember();renderUi();draw()}
-function cycleLevel(direction,target=null){if(target){target.level=1+(target.level-1+direction+11)%11;clampFruit(target);state.level=target.level}else state.level=1+(state.level-1+direction+11)%11;remember();renderUi();draw()}
+function cycleLevel(direction,target=null){if(target){target.level=1+(target.level-1+direction+11)%11;target.physicsRadius=spec(target.level).merged_physics_radius;clampFruit(target);state.level=target.level}else state.level=1+(state.level-1+direction+11)%11;remember();renderUi();draw()}
 
 function drawFruit(fruit,{ghost=false,invalid=false,selected=false}={}){const r=spec(fruit.level).radius;ctx.save();ctx.globalAlpha=ghost?.46:1;
   if(invalid){ctx.beginPath();ctx.arc(fruit.x,fruit.y,r+5,0,Math.PI*2);ctx.fillStyle='rgba(255,91,77,.22)';ctx.fill()}
@@ -333,32 +341,38 @@ function drawFruit(fruit,{ghost=false,invalid=false,selected=false}={}){const r=
   if(images[fruit.level]&&images[fruit.level].complete)ctx.drawImage(images[fruit.level],fruit.x-r,fruit.y-r,r*2,r*2);else{ctx.beginPath();ctx.arc(fruit.x,fruit.y,r,0,Math.PI*2);ctx.fillStyle=COLORS[fruit.level];ctx.fill()}
   ctx.shadowColor='transparent';if(selected){ctx.beginPath();ctx.arc(fruit.x,fruit.y,r+7,0,Math.PI*2);ctx.strokeStyle='#76c7ff';ctx.lineWidth=3;ctx.stroke();ctx.setLineDash([5,5]);ctx.beginPath();ctx.arc(fruit.x,fruit.y,r+12,0,Math.PI*2);ctx.strokeStyle='rgba(118,199,255,.48)';ctx.lineWidth=1.5;ctx.stroke()}
   ctx.restore()}
+function activeResult(){return evaluation&&selectedResultAction!==null?evaluation.actions[selectedResultAction]:null}
+function drawSpaceOverlay(){const action=activeResult(),slot=action?.space_slots?.[selectedSpaceSlot];if(!slot)return;const before=slot.before,after=slot.after,xs=after.drop_x||before.drop_x||[];ctx.save();ctx.lineWidth=1;
+  xs.forEach((x,index)=>{const beforeEnd=BOARD.spawnY+(before.depths[index]||0),afterEnd=BOARD.spawnY+(after.depths[index]||0),common=Math.min(beforeEnd,afterEnd);ctx.fillStyle='rgba(76,180,224,.095)';ctx.fillRect(x-4,BOARD.spawnY,8,Math.max(0,common-BOARD.spawnY));if(afterEnd>beforeEnd){ctx.fillStyle='rgba(46,184,92,.28)';ctx.fillRect(x-4,beforeEnd,8,afterEnd-beforeEnd)}else if(afterEnd<beforeEnd){ctx.fillStyle='rgba(221,76,66,.30)';ctx.fillRect(x-4,afterEnd,8,beforeEnd-afterEnd)}ctx.save();ctx.setLineDash([3,3]);ctx.strokeStyle='rgba(177,213,239,.72)';ctx.beginPath();ctx.moveTo(x-6,beforeEnd);ctx.lineTo(x+6,beforeEnd);ctx.stroke();ctx.restore();ctx.strokeStyle=afterEnd>=beforeEnd?'rgba(83,222,133,.92)':'rgba(255,110,96,.94)';ctx.beginPath();ctx.moveTo(x-6,afterEnd);ctx.lineTo(x+6,afterEnd);ctx.stroke()});ctx.restore()}
 function draw(){ctx.clearRect(0,0,BOARD.width,BOARD.height);const bg=ctx.createLinearGradient(0,0,0,BOARD.height);bg.addColorStop(0,'#17263a');bg.addColorStop(1,'#0e1724');ctx.fillStyle=bg;ctx.fillRect(0,0,BOARD.width,BOARD.height);
   if(state.showGrid){ctx.strokeStyle='rgba(148,177,207,.085)';ctx.lineWidth=1;for(let y=BOARD.spawnY;y<BOARD.height;y+=56){ctx.beginPath();ctx.moveTo(BOARD.wall,y+.5);ctx.lineTo(BOARD.width-BOARD.wall,y+.5);ctx.stroke()}for(let x=BOARD.wall;x<BOARD.width;x+=56){ctx.beginPath();ctx.moveTo(x,BOARD.spawnY);ctx.lineTo(x,BOARD.height-BOARD.wall);ctx.stroke()}}
   ctx.fillStyle='#795b43';ctx.fillRect(0,BOARD.spawnY,BOARD.wall,BOARD.height-BOARD.spawnY);ctx.fillRect(BOARD.width-BOARD.wall,BOARD.spawnY,BOARD.wall,BOARD.height-BOARD.spawnY);ctx.fillRect(0,BOARD.height-BOARD.wall,BOARD.width,BOARD.wall);
   ctx.fillStyle='rgba(255,255,255,.12)';ctx.fillRect(BOARD.wall,BOARD.spawnY,2,BOARD.height-BOARD.spawnY);ctx.fillRect(BOARD.width-BOARD.wall-2,BOARD.spawnY,2,BOARD.height-BOARD.spawnY);
   ctx.save();ctx.setLineDash([8,7]);ctx.strokeStyle='rgba(255,112,94,.82)';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(BOARD.wall+4,BOARD.spawnY);ctx.lineTo(BOARD.width-BOARD.wall-4,BOARD.spawnY);ctx.stroke();ctx.restore();ctx.fillStyle='rgba(255,170,156,.82)';ctx.font='600 11px "Segoe UI"';ctx.fillText('危险线',BOARD.wall+10,BOARD.spawnY-10);
+  drawSpaceOverlay();
   if(state.showAnchors){for(let i=0;i<BOARD.actions;i++){const x=actionX(i);ctx.beginPath();ctx.arc(x,BOARD.spawnY,i===state.probe?4:2.2,0,Math.PI*2);ctx.fillStyle=i===state.probe?'#83d2ff':'rgba(189,214,238,.48)';ctx.fill()}ctx.fillStyle='rgba(194,216,237,.58)';ctx.font='9px "Segoe UI"';ctx.textAlign='center';ctx.fillText('A0',actionX(0),BOARD.spawnY+17);ctx.fillText('A10',actionX(10),BOARD.spawnY+17);ctx.fillText('A20',actionX(20),BOARD.spawnY+17)}
-  const probeX=actionX(state.probe);ctx.save();ctx.setLineDash([7,8]);ctx.strokeStyle='rgba(109,203,255,.70)';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(probeX,74);ctx.lineTo(probeX,BOARD.height-BOARD.wall);ctx.stroke();ctx.restore();drawFruit({level:state.queue[0],x:probeX,y:118},{ghost:true});
-  const invalid=state.showWarnings?overlaps():new Set;state.fruits.forEach(fruit=>drawFruit(fruit,{invalid:invalid.has(fruit.id),selected:fruit.id===state.selectedId}));
+  const shownAction=selectedResultAction===null?state.probe:selectedResultAction,probeX=actionX(shownAction);ctx.save();ctx.setLineDash([7,8]);ctx.strokeStyle='rgba(109,203,255,.70)';ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(probeX,74);ctx.lineTo(probeX,BOARD.height-BOARD.wall);ctx.stroke();ctx.restore();if(!activeResult())drawFruit({level:state.queue[0],x:probeX,y:118},{ghost:true});
+  const invalid=state.showWarnings&&!activeResult()?overlaps():new Set,visibleFruits=activeResult()?.result_fruits||state.fruits;visibleFruits.forEach(fruit=>drawFruit(fruit,{invalid:invalid.has(fruit.id),selected:!activeResult()&&fruit.id===state.selectedId}));
   if(hover&&state.tool==='place'&&!drag&&!hitFruit(hover)){const ghost={level:state.level,x:hover.x,y:hover.y};clampFruit(ghost);drawFruit(ghost,{ghost:true})}
 }
 
 function renderFruitGrid(){const grid=$('fruit-grid');grid.replaceChildren(...FRUITS.map(item=>{const button=document.createElement('button');button.className='fruit-choice'+(item.level===state.level?' active':'');button.title=`${item.level}级 · ${item.name} · 半径 ${item.radius}`;button.innerHTML=`<img src="${TEXTURES[item.level]}" alt=""><span>${item.name}</span><i>${item.level}</i>`;button.onclick=()=>{state.level=item.level;state.tool='place';renderUi();draw()};return button}))}
-function renderQueue(){const root=$('queue');root.replaceChildren(...state.queue.map((level,index)=>{const button=document.createElement('button');button.className='queue-slot';button.title='点击升级；Shift+点击降级';button.innerHTML=`<em>q${index}</em><img src="${TEXTURES[level]}" alt=""><span>${spec(level).name}</span>`;button.onclick=event=>{state.queue[index]=1+(level-1+(event.shiftKey?-1:1)+11)%11;remember();renderUi();draw()};return button}))}
+function renderQueue(){const root=$('queue');root.replaceChildren(...state.queue.map((level,index)=>{const button=document.createElement('button');button.className='queue-slot';button.title='点击升级；Shift+点击降级';button.innerHTML=`<em>q${index}</em><img src="${TEXTURES[level]}" alt=""><span>${spec(level).name}</span>`;button.onclick=event=>{state.queue[index]=1+(level-1+(event.shiftKey?-1:1)+5)%5;remember();renderUi();draw()};return button}))}
 function renderSelection(){const fruit=state.fruits.find(item=>item.id===state.selectedId),root=$('selection');if(!fruit){root.className='selection-card empty';root.textContent='尚未选择场上水果';return}root.className='selection-card';root.innerHTML=`<img src="${TEXTURES[fruit.level]}" alt=""><div class="selection-copy"><strong>${fruit.level}级 · ${spec(fruit.level).name}</strong><span>x ${fruit.x.toFixed(1)} · y ${fruit.y.toFixed(1)} · 半径 ${spec(fruit.level).radius}</span></div><button class="small-danger" title="删除水果">⌫</button>`;root.querySelector('button').onclick=()=>removeFruit(fruit.id)}
 function renderValidation(){const invalid=overlaps(),danger=state.fruits.filter(fruit=>fruit.y-spec(fruit.level).radius<BOARD.spawnY).length;$('fruit-count').textContent=state.fruits.length;$('danger-count').textContent=danger;$('overlap-count').textContent=invalid.size;
   $('danger-count').parentElement.className='mini-stat'+(danger?' danger':'');$('overlap-count').parentElement.className='mini-stat'+(invalid.size?' warning':'');const box=$('validation');
   if(invalid.size){box.className='validation warning';box.querySelector('span').textContent=`检测到 ${invalid.size} 个水果参与重叠。可以保留以测试极端状态，但后端载入时应再次校验。`}else if(danger){box.className='validation warning';box.querySelector('span').textContent=`有 ${danger} 个水果越过危险线，适合验证终局与奖励边界。`}else{box.className='validation';box.querySelector('span').textContent='场景几何检查通过，可以接入物理模拟。'}}
 function renderProbe(){const x=actionX(state.probe);$('probe').value=state.probe;$('probe-action').textContent=`A${state.probe}`;$('probe-x').textContent=`x = ${x.toFixed(1)}`}
 function renderUi(){document.querySelectorAll('.tool').forEach(button=>button.classList.toggle('active',button.dataset.tool===state.tool));renderFruitGrid();renderQueue();renderSelection();renderValidation();renderProbe();
-  $('show-anchors').checked=state.showAnchors;$('show-grid').checked=state.showGrid;$('show-warnings').checked=state.showWarnings;document.querySelectorAll('[data-fps]').forEach(button=>button.classList.toggle('active',Number(button.dataset.fps)===state.fps));$('canvas-status').textContent=`编辑模式 · ${state.fps} FPS`;updateUndo()}
+  $('show-anchors').checked=state.showAnchors;$('show-grid').checked=state.showGrid;$('show-warnings').checked=state.showWarnings;document.querySelectorAll('[data-fps]').forEach(button=>button.classList.toggle('active',Number(button.dataset.fps)===state.fps));$('canvas-status').textContent=`${backendConnected?'物理已连接':'编辑模式'} · ${state.fps} FPS`;updateUndo()}
 function toast(title,message){const item=document.createElement('div');item.className='toast';item.innerHTML=`<strong></strong><span></span>`;item.querySelector('strong').textContent=title;item.querySelector('span').textContent=message;$('toasts').append(item);setTimeout(()=>{item.classList.add('out');setTimeout(()=>item.remove(),220)},3200)}
 function selectTab(name){document.querySelectorAll('.side-tab').forEach(tab=>tab.classList.toggle('active',tab.dataset.tab===name));document.querySelectorAll('.tab-page').forEach(page=>page.classList.toggle('active',page.id===`tab-${name}`))}
-function requestEvaluation(mode='all'){const detail={mode,scene:cloneScene()};window.dispatchEvent(new CustomEvent('daxigua:scenario-request',{detail}));selectTab('result');toast('已生成场景请求','物理与模型后端尚未连接，未产生虚构评估结果。')}
-function applyEvaluation(payload){if(!payload||!Array.isArray(payload.actions))throw new Error('评估结果必须包含 actions 数组');$('result-empty').hidden=true;$('result-content').hidden=false;const actions=payload.actions.slice(0,21),rewards=actions.map(x=>Number(x.reward)||0),best=rewards.length?Math.max(...rewards):0,bestIndex=rewards.length?rewards.indexOf(best):0,bestItem=actions[bestIndex]||{};
-  $('best-action').textContent=`A${bestIndex}`;$('best-reward').textContent=best.toFixed(3);$('best-score').textContent=String(bestItem.score_delta??'—');$('terminal-actions').textContent=String(actions.filter(x=>x.done||x.terminal).length);$('result-fps').textContent=`${payload.physics_fps||state.fps} FPS`;
-  const min=Math.min(0,...rewards),span=Math.max(1e-8,best-min),root=$('action-results');root.replaceChildren(...Array.from({length:21},(_,index)=>{const value=rewards[index]??0,item=document.createElement('div');item.className='action-result'+(index===bestIndex?' best':'');item.title=`A${index} · reward ${value.toFixed(4)}`;item.innerHTML=`<i style="height:${8+82*(value-min)/span}%"></i><span>${index}</span>`;return item}));$('result-message').textContent=payload.message||'结果来自已连接的真实物理与模型评估。';selectTab('result')}
+function rewardClass(value){return value>0?'reward-positive':value<0?'reward-negative':''}
+function renderEvaluation(){if(!evaluation)return;const actions=evaluation.actions.slice(0,21),rewards=actions.map(item=>Number(item.reward)||0),bestIndex=Number.isInteger(evaluation.best_action)?evaluation.best_action:rewards.indexOf(Math.max(...rewards)),best=rewards[bestIndex]||0,current=actions[selectedResultAction]||actions[bestIndex];$('best-action').textContent=`A${bestIndex}`;$('best-reward').textContent=best.toFixed(4);$('best-reward').className=rewardClass(best);$('selected-action').textContent=`A${selectedResultAction}`;$('selected-reward').textContent=Number(current.reward).toFixed(4);$('selected-reward').className=rewardClass(Number(current.reward));$('space-before').textContent=Number(current.previous_potential).toFixed(4);$('space-after').textContent=Number(current.next_potential).toFixed(4);$('space-delta').textContent=Number(current.raw_space_delta).toFixed(5);$('space-delta').className=rewardClass(Number(current.raw_space_delta));$('space-compensation').textContent=Number(current.compensation).toFixed(5);$('best-score').textContent=String(current.score_delta??'—');$('terminal-actions').textContent=String(actions.filter(item=>item.done).length);$('result-fps').textContent=`${evaluation.physics_fps||state.fps} FPS · Reward V2`;
+  const min=Math.min(0,...rewards),max=Math.max(0,...rewards),span=Math.max(1e-8,max-min),root=$('action-results');root.replaceChildren(...Array.from({length:21},(_,index)=>{const value=rewards[index]??0,item=document.createElement('div');item.className='action-result'+(index===bestIndex?' best':'')+(index===selectedResultAction?' selected':'');item.title=`A${index} · Reward V2 ${value.toFixed(5)}`;item.innerHTML=`<i style="height:${8+82*(value-min)/span}%;background:${value<0?'linear-gradient(#f08b82,#c42b1c)':''}"></i><span>${index}</span>`;item.onclick=()=>{selectedResultAction=index;renderEvaluation();draw()};return item}));
+  const slots=current.space_slots||[];$('space-slots').replaceChildren(...slots.map((slot,index)=>{const button=document.createElement('button'),area=slot.after.effective_normalized_area??slot.after.normalized_area;button.className='space-slot'+(index===selectedSpaceSlot?' active':'');button.innerHTML=`<strong>q${index+1} · ${spec(slot.level).name}</strong>权重 ${Number(slot.weight).toFixed(1)} · 有效面积 ${Number(area).toFixed(3)}${current.done?' · 终局':''}`;button.onclick=()=>{selectedSpaceSlot=index;renderEvaluation();draw()};return button}));$('result-message').textContent=evaluation.message||'结果来自已连接的真实物理与Reward V2后端。';draw()}
+async function requestEvaluation(mode='all'){const requestMode=mode==='settle'?'probe':mode,detail={mode:requestMode,scene:cloneScene()};window.dispatchEvent(new CustomEvent('daxigua:scenario-request',{detail}));selectTab('result');if(!backendConnected){toast('后端未连接','请使用 --serve 启动真实物理与Reward V2服务。');return}toast('开始真实评估','正在并行执行21个投放动作…');try{const response=await fetch('/api/evaluate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(detail)}),payload=await response.json();if(!response.ok)throw new Error(payload.error||`HTTP ${response.status}`);applyEvaluation(payload);toast('评估完成',`已返回 ${payload.actions.length} 个真实物理结果`)}catch(error){toast('评估失败',String(error.message||error))}}
+function applyEvaluation(payload){if(!payload||!Array.isArray(payload.actions)||payload.actions.length!==21)throw new Error('评估结果必须包含21个 actions');evaluation=payload;selectedResultAction=Number.isInteger(payload.selected_action)?payload.selected_action:(Number.isInteger(payload.best_action)?payload.best_action:0);selectedSpaceSlot=0;$('result-empty').hidden=true;$('result-content').hidden=false;renderEvaluation();selectTab('result')}
 
 canvas.addEventListener('contextmenu',event=>event.preventDefault());
 canvas.addEventListener('pointerdown',event=>{const point=pointFromEvent(event),hit=hitFruit(point);canvas.setPointerCapture(event.pointerId);if(event.button===2||state.tool==='erase'){if(hit)removeFruit(hit.id);return}if(hit){state.selectedId=hit.id;drag={fruit:hit,dx:hit.x-point.x,dy:hit.y-point.y,before:snapshot()};renderUi();draw();return}if(state.tool==='select'){state.selectedId=null;renderUi();draw();return}place(point)});
@@ -374,8 +388,10 @@ $('template').onchange=event=>loadTemplate(event.target.value);$('probe').oninpu
 $('scene-title').onchange=remember;$('undo').onclick=undo;$('redo').onclick=redo;$('clear-scene').onclick=()=>loadTemplate('empty');$('center-view').onclick=()=>toast('视图已居中','当前画布始终保持完整场地比例。');$('settle').onclick=()=>requestEvaluation('settle');$('evaluate').onclick=()=>requestEvaluation('all');$('evaluate-top').onclick=()=>requestEvaluation('all');
 $('export').onclick=()=>{const blob=new Blob([JSON.stringify(cloneScene(),null,2)],{type:'application/json'}),link=document.createElement('a');link.href=URL.createObjectURL(blob);link.download=($('scene-title').value.trim()||'scenario').replace(/[\\/:*?"<>|]/g,'_')+'.json';link.click();setTimeout(()=>URL.revokeObjectURL(link.href),1000);toast('场景已导出',`${state.fruits.length} 个水果 · ${state.fps} FPS`)};
 $('import').onclick=()=>$('import-file').click();$('import-file').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{loadScene(JSON.parse(await file.text()));$('template').value='empty';toast('场景已导入',file.name)}catch(error){toast('导入失败',String(error.message||error))}event.target.value=''};
-window.daxiguaScenarioLab={getScene:cloneScene,loadScene,applyEvaluation,setBackendStatus(connected,message=''){const dot=document.querySelector('.canvas-badge i');dot.style.background=connected?'#79d7a8':'#f2c14e';$('canvas-status').textContent=connected?`物理已连接 · ${state.fps} FPS`:`编辑模式 · ${state.fps} FPS`;if(message)toast(connected?'后端已连接':'后端状态',message)}};
-loadTemplate('critical');history=[snapshot()];future=[];renderUi();draw();
+function setBackendStatus(connected,message=''){backendConnected=Boolean(connected);const dot=document.querySelector('.canvas-badge i');dot.style.background=backendConnected?'#79d7a8':'#f2c14e';renderUi();if(message)toast(backendConnected?'后端已连接':'后端状态',message)}
+async function connectBackend(){if(location.protocol==='file:'){setBackendStatus(false);return}try{const response=await fetch('/api/health',{cache:'no-store'}),payload=await response.json();if(!response.ok||!payload.ready)throw new Error(payload.error||'后端未就绪');setBackendStatus(true,`${payload.reward_version||'Reward V2'} · ${payload.device||'未知设备'}`)}catch(error){setBackendStatus(false,String(error.message||error))}}
+window.daxiguaScenarioLab={getScene:cloneScene,loadScene,applyEvaluation,setBackendStatus};
+loadTemplate('critical');history=[snapshot()];future=[];renderUi();draw();connectBackend();
 })();
 </script>
 </body>
