@@ -42,12 +42,23 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('按住编辑 · 松手恢复', html)
         self.assertIn("await pushLiveScene(true);await sendLiveCommand({type:'resume'})", html)
         self.assertIn(
-            "button.disabled=busy||(!editable&&button.dataset.tool==='erase')",
+            "button.disabled=busy||viewLocked||(!editable&&button.dataset.tool==='erase')",
             html,
         )
         self.assertIn('物理 ${state.physicsFps||120} FPS · 显示同步', html)
         self.assertIn('暂停并进入编辑', html)
         self.assertIn('effective_normalized_area', html)
+        self.assertIn('data-evaluation-phase="before"', html)
+        self.assertIn('data-evaluation-phase="after"', html)
+        self.assertIn('evaluationScene', html)
+        self.assertIn('evaluationViewFruits', html)
+        self.assertIn('result_fruits', html)
+        self.assertIn('applyEvaluation(payload,detail.scene)', html)
+        self.assertIn("if(activeSideTab!=='result')return", html)
+        self.assertNotIn(
+            "if(backendConnected&&!state.livePaused)return;const action=activeResult()",
+            html,
+        )
         self.assertNotIn('回放轨迹', html)
         self.assertNotIn('文件(F)', html)
 
