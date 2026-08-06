@@ -18,7 +18,7 @@
 | --- | --- | --- | --- | --- |
 | `baseline-r1` | 游戏合成分数 | `0836ffd` | [`model-baseline-r1.md`](model-baseline-r1.md) | 当前效果基准，保留 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
-| `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线，外侧动作偏置增强 |
+| `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线；墙边投放增加属于常见策略，不能单独判为缺陷 |
 
 新报告从 [`TEMPLATE.md`](TEMPLATE.md) 复制结构，不得删除证据边界、原因假设或反证实验栏目。
 

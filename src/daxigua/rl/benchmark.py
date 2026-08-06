@@ -46,6 +46,10 @@ class PipelineBenchmarkResult:
     reward_kind: str
     reward_scale: float
     seed: int
+    model_hidden_dim: int
+    model_edge_hidden_dim: int
+    model_message_layers: int
+    model_parameter_count: int
     profile_trace: str | None
 
     def to_dict(self):
@@ -106,6 +110,7 @@ def benchmark_training_candidate(
         reward_kind='spatial_v2_1',
         reward_scale=1.0,
         seed=20260806,
+        model_config=None,
         profiler_output=None):
     device = torch.device(device)
     if device.type == 'cuda' and device.index is None:
@@ -116,7 +121,9 @@ def benchmark_training_candidate(
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.set_float32_matmul_precision('high')
     torch.manual_seed(int(seed))
-    model_config = ModelConfig()
+    model_config = model_config or ModelConfig()
+    if not isinstance(model_config, ModelConfig):
+        raise TypeError('model_config must be ModelConfig')
     simulator_config = SimulatorConfig.training_fast(
         max_fruits=model_config.max_fruits,
         use_cuda_extension=device.type == 'cuda',
@@ -143,6 +150,10 @@ def benchmark_training_candidate(
     if reward_kind not in ('score_v1', 'spatial_v2', 'spatial_v2_1'):
         raise ValueError('unsupported reward_kind')
     base_model = BaselineGnnDqn(model_config).to(device)
+    model_parameter_count = sum(
+        parameter.numel() for parameter in base_model.parameters()
+        if parameter.requires_grad
+    )
     learner = DqnLearner(
         base_model,
         DqnConfig(
@@ -325,5 +336,9 @@ def benchmark_training_candidate(
         reward_kind=str(reward_kind),
         reward_scale=float(reward_scale),
         seed=int(seed),
+        model_hidden_dim=int(model_config.hidden_dim),
+        model_edge_hidden_dim=int(model_config.edge_hidden_dim),
+        model_message_layers=int(model_config.message_layers),
+        model_parameter_count=int(model_parameter_count),
         profile_trace=str(profile_path) if profile_path is not None else None,
     )

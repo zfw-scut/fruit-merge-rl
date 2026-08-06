@@ -201,12 +201,20 @@ class RewardTrainingConfigTest(unittest.TestCase):
         reward_v2_1 = TrainingConfig.from_toml(
             project_root / 'configs' / 'gnn_dqn_reward_v2_1.toml'
         )
+        baseline_scale_v1 = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_baseline_scale_v1.toml'
+        )
 
         self.assertEqual(baseline.reward.kind, 'score_v1')
         self.assertEqual(reward_v2.reward.kind, 'spatial_v2')
         self.assertEqual(reward_v2_1.reward.kind, 'spatial_v2_1')
         self.assertEqual(reward_v2.reward.queue_weights, (0.5, 0.3, 0.2))
         self.assertEqual(reward_v2_1.replay.batch_size, 1792)
+        self.assertEqual(baseline_scale_v1.reward.kind, 'score_v1')
+        self.assertEqual(baseline_scale_v1.model.message_layers, 5)
+        self.assertEqual(baseline_scale_v1.model.hidden_dim, 128)
+        self.assertEqual(baseline_scale_v1.total_transitions, 16_000_000)
+        self.assertEqual(baseline_scale_v1.max_wall_seconds, 7200.0)
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):

@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from daxigua.rl.benchmark import benchmark_training_candidate
+from daxigua.rl.config import TrainingConfig
 
 
 def _integer_list(value):
@@ -35,6 +36,10 @@ def parse_args():
     parser.add_argument('--measured-steps', type=int, default=3)
     parser.add_argument('--pre-roll-steps', type=int, default=8)
     parser.add_argument('--device', default='cuda')
+    parser.add_argument(
+        '--config', type=Path,
+        help='读取指定训练配置中的模型结构；其余性能参数仍由命令行控制',
+    )
     parser.add_argument('--compile-model', action='store_true')
     parser.add_argument('--fp32', action='store_true')
     parser.add_argument(
@@ -57,6 +62,10 @@ def parse_args():
 
 
 def _run_single(args):
+    model_config = (
+        TrainingConfig.from_toml(args.config).model
+        if args.config is not None else None
+    )
     result = benchmark_training_candidate(
         num_envs=args.single_envs,
         batch_size=args.single_batch_size,
@@ -68,6 +77,7 @@ def _run_single(args):
         reward_kind=args.reward_kind,
         reward_scale=args.reward_scale,
         seed=args.seed,
+        model_config=model_config,
         profiler_output=args.profiler_output,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +114,8 @@ def _subprocess_result(
         '--seed', str(args.seed),
         '--output', str(single_output),
     )
+    if args.config is not None:
+        command += ('--config', str(args.config))
     compile_model = args.compile_model if compile_model is None else compile_model
     fp32 = args.fp32 if fp32 is None else fp32
     if compile_model:
@@ -297,6 +309,11 @@ def main():
         'reward_kind': args.reward_kind,
         'reward_scale': args.reward_scale,
         'seed': args.seed,
+        'config': str(args.config) if args.config is not None else None,
+        'model_hidden_dim': best['model_hidden_dim'],
+        'model_edge_hidden_dim': best['model_edge_hidden_dim'],
+        'model_message_layers': best['model_message_layers'],
+        'model_parameter_count': best['model_parameter_count'],
         'selected_num_envs': best['num_envs'],
         'selected_batch_size': best['batch_size'],
         'selected_compile_model': best.get('compile_model', False),
