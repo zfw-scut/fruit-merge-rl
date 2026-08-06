@@ -3,7 +3,10 @@ import unittest
 from pathlib import Path
 
 from daxigua.simulator.scenario_lab import fruit_specs, write_scenario_lab_html
-from daxigua.simulator.scenario_lab_service import validate_scenario
+from daxigua.simulator.scenario_lab_service import (
+    ScenarioLabEvaluator,
+    validate_scenario,
+)
 from daxigua.simulator.scenario_lab_web import render_scenario_lab_document
 
 
@@ -82,6 +85,23 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
                     {'id': 1, 'level': 2, 'x': 200.0, 'y': 900.0},
                 ],
             })
+
+    def test_cpu_evaluator_returns_real_results_for_all_actions(self):
+        evaluator = ScenarioLabEvaluator(device='cpu')
+
+        payload = evaluator.evaluate({
+            'name': '空场动作检查',
+            'fps': 30,
+            'queue': [1, 2, 3, 4],
+            'probe_action': 6,
+            'fruits': [],
+        }, mode='probe')
+
+        self.assertEqual('spatial_v2', payload['reward_version'])
+        self.assertEqual(21, len(payload['actions']))
+        self.assertEqual(6, payload['selected_action'])
+        self.assertEqual(3, len(payload['actions'][6]['space_slots']))
+        self.assertTrue(payload['actions'][6]['result_fruits'])
 
 
 if __name__ == '__main__':

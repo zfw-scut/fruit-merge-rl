@@ -487,9 +487,10 @@ def diagnose_spatial_reward(
     next_potential = calculator.weighted_potential(after_areas)
     compensation = calculator.weighted_potential(per_slot_compensation)
     raw_space_delta = next_potential - previous_potential
-    reward = (
-        calculator.reward_config.reward_scale
-        * calculator.weighted_potential(per_slot_unscaled)
+    # 与训练热路径保持完全相同的浮点运算顺序，避免诊断显示与实际奖励
+    # 因加权求和结合顺序不同而产生约1e-7的偏差。
+    reward = calculator.reward_config.reward_scale * (
+        raw_space_delta + compensation
     )
     return SpatialRewardDiagnostics(
         before=before,
