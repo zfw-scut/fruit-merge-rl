@@ -34,6 +34,12 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('/api/live/events', html)
         self.assertIn('new EventSource', html)
         self.assertIn('dropPreviews', html)
+        self.assertIn('interpolateLiveFruits', html)
+        self.assertIn('requestAnimationFrame(renderLiveFrame)', html)
+        self.assertIn(
+            "button.disabled=!editable&&button.dataset.tool==='erase'", html
+        )
+        self.assertIn('物理 ${state.physicsFps||120} FPS · 显示同步', html)
         self.assertIn('暂停并进入编辑', html)
         self.assertIn('effective_normalized_area', html)
         self.assertNotIn('回放轨迹', html)
