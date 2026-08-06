@@ -18,7 +18,7 @@
 | --- | --- | --- | --- | --- |
 | `baseline-r1` | 游戏合成分数 | `0836ffd` | [`model-baseline-r1.md`](model-baseline-r1.md) | 当前效果基准，保留 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
-| `reward-v2.1-r1` | 状态相关无合成参考空间 | 待训练 | [`../model/REWARD_V2_ACCESSIBLE_SPACE.md`](../model/REWARD_V2_ACCESSIBLE_SPACE.md) | 代码与本地门禁完成，尚无正式效果结论 |
+| `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线，外侧动作偏置增强 |
 
 新报告从 [`TEMPLATE.md`](TEMPLATE.md) 复制结构，不得删除证据边界、原因假设或反证实验栏目。
 
@@ -55,5 +55,7 @@
 - 两代模型只有单个训练 seed，不能估计训练过程的跨 seed 方差；
 - 场景实验室人工观察尚未形成固定场景集和结构化结果；
 - 当前没有同训练量、同评估频率的完整 `score_v1` / `spatial_v2` 成对长训；
-- 尚未按场面阶段、堆叠密度和动作位置统计 Reward V2 的奖励分布。
-- Reward V2.1尚未在RTX 5090上完成正式规模吞吐门禁和训练。
+- 尚未保存带q0谱系的真实合成标签；现有Replay只能通过水果数变化近似判断是否合成；
+- Reward V2.1已完成正式训练和按阶段/动作/水果等级的离线统计，但固定场景动作排序集仍未建立；
+- V2.1只完成一个训练seed，约1%的相对V2增益尚未验证跨seed可复现性；
+- 训练完成事件在产物清单生成后追加，导致`monitoring.jsonl`比内部清单多272字节，需修复清单顺序。
