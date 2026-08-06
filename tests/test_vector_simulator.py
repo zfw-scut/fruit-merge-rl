@@ -138,6 +138,30 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         self.assertEqual(int(simulator.step_count[0]), 0)
         self.assertEqual(int(result.observation.fruit_count[0]), 1)
 
+    def test_settle_trace_preserves_real_fall_frames(self):
+        simulator = TensorVectorSimulator(
+            1, config=self._config(), device='cpu'
+        )
+        self._install_fruit(simulator, 0, 0, 1, 160, 140, 1)
+        queue_before = simulator.fruit_queue.clone()
+
+        result, trace = simulator.settle_with_trace(frame_stride=2)
+
+        self.assertGreater(len(trace.frame_numbers), 2)
+        self.assertEqual(int(trace.frame_numbers[0]), 0)
+        self.assertTrue(bool(torch.all(
+            trace.frame_numbers[1:] > trace.frame_numbers[:-1]
+        )))
+        self.assertAlmostEqual(float(trace.positions[0, 0, 1]), 140.0)
+        self.assertAlmostEqual(
+            float(trace.positions[-1, 0, 1]),
+            float(result.observation.positions[0, 0, 1]),
+        )
+        self.assertGreater(float(trace.positions[-1, 0, 1]), 140.0)
+        self.assertTrue(torch.equal(queue_before, simulator.fruit_queue))
+        self.assertEqual(2, trace.frame_stride)
+        self.assertEqual(60, trace.physics_fps)
+
     def test_kinematic_rest_correction_is_per_fruit(self):
         simulator = TensorVectorSimulator(
             1,

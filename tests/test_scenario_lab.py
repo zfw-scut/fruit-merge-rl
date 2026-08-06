@@ -26,6 +26,9 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('/api/evaluate', html)
         self.assertIn('/api/settle', html)
         self.assertIn('requestNaturalSettle', html)
+        self.assertIn('playSettleTrace', html)
+        self.assertIn('heldPlacement', html)
+        self.assertIn('松手后自然下落', html)
         self.assertIn('effective_normalized_area', html)
         self.assertNotIn('文件(F)', html)
 
@@ -129,6 +132,16 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(1, len(payload['fruits']))
         self.assertEqual(8, payload['fruits'][0]['id'])
         self.assertGreater(payload['fruits'][0]['y'], 400.0)
+        self.assertGreater(len(payload['trace_frames']), 2)
+        self.assertEqual(0, payload['trace_frames'][0]['frame'])
+        self.assertAlmostEqual(
+            400.0, payload['trace_frames'][0]['fruits'][0]['y']
+        )
+        self.assertEqual(1, payload['trace_frame_stride'])
+        self.assertEqual(
+            payload['fruits'][0]['y'],
+            payload['trace_frames'][-1]['fruits'][0]['y'],
+        )
 
 
 if __name__ == '__main__':

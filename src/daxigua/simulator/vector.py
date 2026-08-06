@@ -30,6 +30,7 @@ from .types import (
     BatchSettleResult,
     BatchSimulationTrace,
     BatchStepResult,
+    SettleTrace,
 )
 
 
@@ -1585,7 +1586,9 @@ class TensorVectorSimulator:
             *,
             score_before,
             frames_simulated,
-            fast_forwarded_frames):
+            fast_forwarded_frames,
+            trace_records=None,
+            trace_stride=1):
         """用Tensor物理把已存在的场景推进到决策边界。"""
 
         collision_substeps = torch.zeros_like(frames_simulated)
@@ -1636,6 +1639,16 @@ class TensorVectorSimulator:
             budget_exhausted |= newly_exhausted
             running &= ~newly_exhausted
 
+            if trace_records is not None:
+                current_frame = int(frames_simulated[0].item())
+                if (
+                    current_frame % trace_stride == 0
+                    or not bool(running[0].item())
+                ):
+                    self._append_settle_trace_record(
+                        trace_records, current_frame
+                    )
+
             should_sync = (
                 (frame_index + 1) % self.config.sync_interval_frames == 0
                 or frame_index + 1 == self.config.max_physics_frames
@@ -1659,6 +1672,20 @@ class TensorVectorSimulator:
             merge_events=self._merge_event_view(),
         )
 
+    def _append_settle_trace_record(self, records, frame_number):
+        """记录单环境落稳帧；仅由显式诊断接口调用。"""
+
+        if records and records[-1][0] == frame_number:
+            return
+        records.append((
+            frame_number,
+            self.positions[0].clone(),
+            self.levels[0].clone(),
+            self.physics_radii[0].clone(),
+            self.fruit_ids[0].clone(),
+            self.active[0].clone(),
+        ))
+
     @torch.no_grad()
     def settle(self):
         """不投放新水果，只把当前场景自然推进至稳定或终局。
@@ -1679,6 +1706,54 @@ class TensorVectorSimulator:
             observation=self.observe(),
             physics=physics,
         )
+
+    @torch.no_grad()
+    def settle_with_trace(self, *, frame_stride=1):
+        """自然推进单个场景，并返回用于可视化的真实逐帧轨迹。
+
+        轨迹采样只服务场景实验室和诊断，不进入训练热路径。
+        """
+
+        if self.num_envs != 1:
+            raise ValueError('settle_with_trace requires exactly one environment')
+        if (
+            isinstance(frame_stride, bool)
+            or not isinstance(frame_stride, Integral)
+            or frame_stride < 1
+        ):
+            raise ValueError('frame_stride must be a positive integer')
+
+        score_before = self.score.clone()
+        self._clear_event_buffers()
+        frames_simulated = torch.zeros_like(self.score)
+        records = []
+        self._append_settle_trace_record(records, 0)
+        physics = self._advance_until_stable(
+            score_before=score_before,
+            frames_simulated=frames_simulated,
+            fast_forwarded_frames=torch.zeros_like(frames_simulated),
+            trace_records=records,
+            trace_stride=int(frame_stride),
+        )
+        result = BatchSettleResult(
+            observation=self.observe(),
+            physics=physics,
+        )
+        trace = SettleTrace(
+            frame_numbers=torch.tensor(
+                [record[0] for record in records],
+                dtype=torch.int64,
+                device=self.device,
+            ),
+            positions=torch.stack([record[1] for record in records]),
+            levels=torch.stack([record[2] for record in records]),
+            physics_radii=torch.stack([record[3] for record in records]),
+            fruit_ids=torch.stack([record[4] for record in records]),
+            active=torch.stack([record[5] for record in records]),
+            physics_fps=self.config.physics_fps,
+            frame_stride=int(frame_stride),
+        )
+        return result, trace
 
     @torch.no_grad()
     def step(self, actions):

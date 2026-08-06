@@ -42,6 +42,7 @@ from .types import (
     BatchSettleResult,
     BatchSimulationTrace,
     BatchStepResult,
+    SettleTrace,
 )
 from .vector import SingleEnvAdapter, TensorVectorSimulator, VectorEnv
 
@@ -53,6 +54,7 @@ __all__ = [
     'BatchSettleResult',
     'BatchSimulationTrace',
     'BatchStepResult',
+    'SettleTrace',
     'AccessibleSpaceBatch',
     'AccessibleSpaceCalculator',
     'GameScoreReward',

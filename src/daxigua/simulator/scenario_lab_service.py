@@ -237,6 +237,30 @@ def _result_fruits(observation, env_index):
     return fruits
 
 
+def _settle_trace_frames(trace):
+    """把单场景Tensor轨迹转成浏览器可直接播放的紧凑帧。"""
+
+    trace = trace.cpu()
+    frames = []
+    for record_index, frame_number in enumerate(trace.frame_numbers.tolist()):
+        rows = torch.nonzero(
+            trace.active[record_index], as_tuple=False
+        ).flatten()
+        fruits = []
+        for slot in rows.tolist():
+            fruits.append({
+                'id': int(trace.fruit_ids[record_index, slot]),
+                'level': int(trace.levels[record_index, slot]),
+                'x': round(float(trace.positions[record_index, slot, 0]), 3),
+                'y': round(float(trace.positions[record_index, slot, 1]), 3),
+                'physics_radius': round(
+                    float(trace.physics_radii[record_index, slot]), 3
+                ),
+            })
+        frames.append({'frame': int(frame_number), 'fruits': fruits})
+    return frames
+
+
 class ScenarioLabEvaluator:
     """复用21环境模拟器，串行处理浏览器场景评估请求。"""
 
@@ -285,13 +309,18 @@ class ScenarioLabEvaluator:
         with self._lock:
             simulator = self._settle_runtime(physics_fps)
             _load_scenario(simulator, scene)
-            result = simulator.settle()
+            frame_stride = max(1, physics_fps // 30)
+            result, trace = simulator.settle_with_trace(
+                frame_stride=frame_stride
+            )
             physics = result.physics
             return {
                 'format_version': 1,
                 'physics_fps': physics_fps,
                 'requested_fps': scene['fps'],
                 'fast': fast,
+                'trace_frame_stride': frame_stride,
+                'trace_frames': _settle_trace_frames(trace),
                 'queue': list(scene['queue']),
                 'fruits': _result_fruits(result.observation, 0),
                 'stable': bool(physics.stable[0]),

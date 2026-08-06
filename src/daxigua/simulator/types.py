@@ -135,6 +135,33 @@ class BatchSettleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SettleTrace:
+    """单场景自然落稳过程中按固定间隔采样的真实物理轨迹。"""
+
+    frame_numbers: torch.Tensor
+    positions: torch.Tensor
+    levels: torch.Tensor
+    physics_radii: torch.Tensor
+    fruit_ids: torch.Tensor
+    active: torch.Tensor
+    physics_fps: int
+    frame_stride: int
+
+    def cpu(self):
+        """返回可长期保存且与模拟器设备解耦的 CPU 副本。"""
+
+        values = {}
+        for field_name in self.__dataclass_fields__:
+            value = getattr(self, field_name)
+            values[field_name] = (
+                value.detach().cpu().clone()
+                if isinstance(value, torch.Tensor)
+                else value
+            )
+        return type(self)(**values)
+
+
+@dataclass(frozen=True, slots=True)
 class BatchSimulationTrace:
     """指定 CUDA 环境的一次投放逐帧记录。
 
