@@ -33,6 +33,7 @@ from .scenario_lab import (
     write_scenario_lab_html,
 )
 from .scenario_lab_server import ScenarioLabServer
+from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import ScenarioLabEvaluator, validate_scenario
 from .types import (
     BatchDropResult,
@@ -59,6 +60,7 @@ __all__ = [
     'load_trace_archive',
     'RewardComputer',
     'ScenarioLabEvaluator',
+    'ScenarioLabLiveSession',
     'ScenarioLabServer',
     'SimulatorConfig',
     'SingleEnvAdapter',

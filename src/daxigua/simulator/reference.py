@@ -127,7 +127,22 @@ class PymunkReferenceGame:
                 handler.post_solve = _post_solve_merge
                 handler.data['game'] = self
 
-    def _create_ball(self, x, y, level, *, physics_radius=None):
+    def _create_ball(
+            self,
+            x,
+            y,
+            level,
+            *,
+            physics_radius=None,
+            fruit_id=None,
+            age_frames=0):
+        resolved_id = self._next_fruit_id if fruit_id is None else int(fruit_id)
+        if resolved_id <= 0:
+            raise ValueError('fruit_id must be positive')
+        if any(
+                meta.fruit_id == resolved_id
+                for meta in self._fruit_meta.values()):
+            raise ValueError('fruit_id must be unique')
         radius = float(
             dropped_fruit_physics_radius(level)
             if physics_radius is None
@@ -146,10 +161,11 @@ class PymunkReferenceGame:
         self.space.add(body, shape)
         self.balls.append(shape)
         self._fruit_meta[id(shape)] = _FruitRuntime(
-            fruit_id=self._next_fruit_id,
+            fruit_id=resolved_id,
             level=level,
+            age_frames=int(age_frames),
         )
-        self._next_fruit_id += 1
+        self._next_fruit_id = max(self._next_fruit_id, resolved_id + 1)
         return shape
 
     def _remove_ball(self, shape):
@@ -267,6 +283,87 @@ class PymunkReferenceGame:
             for index in range(self.config.action_count)
         )
 
+    def spawn_fruit(
+            self,
+            level,
+            x,
+            *,
+            y=None,
+            vx=0.0,
+            vy=80.0,
+            angle=0.0,
+            angular_velocity=0.0,
+            physics_radius=None,
+            fruit_id=None,
+            age_frames=0,
+            count_step=True):
+        """立即向当前物理世界加入水果，不等待已有水果稳定。"""
+
+        if isinstance(level, bool) or not isinstance(level, int):
+            raise TypeError('level must be an integer')
+        if level < 1 or level > MAX_FRUIT_LEVEL:
+            raise ValueError('level is outside the supported range')
+        if len(self.balls) >= self.config.max_fruits:
+            raise RuntimeError('fruit capacity is exhausted')
+        if not self.alive:
+            raise RuntimeError('cannot spawn fruit after game is done')
+        radius = float(fruit_radius(level))
+        left = self.config.wall_width + radius + 2.0
+        right = self.config.board_width - self.config.wall_width - radius - 2.0
+        drop_x = max(left, min(right, float(x)))
+        drop_y = self.config.spawn_y if y is None else float(y)
+        shape = self._create_ball(
+            drop_x,
+            drop_y,
+            level,
+            physics_radius=physics_radius,
+            fruit_id=fruit_id,
+            age_frames=age_frames,
+        )
+        shape.body.velocity = float(vx), float(vy)
+        shape.body.angle = float(angle)
+        shape.body.angular_velocity = float(angular_velocity)
+        if count_step:
+            self.step_count += 1
+        return self._fruit_meta[id(shape)].fruit_id
+
+    def replace_state(
+            self,
+            fruits,
+            *,
+            fruit_queue,
+            score=0,
+            last_score=None,
+            step_count=0,
+            physics_frame=0):
+        """用公开水果快照替换当前世界，供调试会话和存档恢复使用。"""
+
+        fruits = tuple(fruits)
+        if len(fruits) > self.config.max_fruits:
+            raise ValueError('fruit count exceeds simulator capacity')
+        self.reset(fruit_queue=fruit_queue)
+        for fruit in fruits:
+            if not isinstance(fruit, FruitState):
+                raise TypeError('fruits must contain FruitState values')
+            self.spawn_fruit(
+                fruit.level,
+                fruit.x,
+                y=fruit.y,
+                vx=fruit.vx,
+                vy=fruit.vy,
+                angle=fruit.angle,
+                angular_velocity=fruit.angular_velocity,
+                physics_radius=fruit.physics_radius,
+                fruit_id=fruit.fruit_id,
+                age_frames=fruit.age_frames,
+                count_step=False,
+            )
+        self.score = int(score)
+        self.last_score = self.score if last_score is None else int(last_score)
+        self.step_count = int(step_count)
+        self.physics_frame = int(physics_frame)
+        return self.get_state()
+
     def drop(self, action_index):
         if not self.alive:
             raise RuntimeError('cannot drop fruit after game is done')
@@ -276,9 +373,7 @@ class PymunkReferenceGame:
         queue_before = tuple(self.fruit_queue)
         level = self.current_level()
         drop_x = candidates[action_index].drop_x
-        shape = self._create_ball(drop_x, self.config.spawn_y, level)
-        shape.body.velocity = (0.0, 80.0)
-        fruit_id = self._fruit_meta[id(shape)].fruit_id
+        fruit_id = self.spawn_fruit(level, drop_x, count_step=False)
         self._advance_queue()
         self.step_count += 1
         return DropResult(
@@ -298,6 +393,11 @@ class PymunkReferenceGame:
             for shape in self.balls
         )
 
+    def is_stable(self):
+        """返回当前世界是否已经静止，不推进物理时间。"""
+
+        return self._is_stable()
+
     def _check_fail(self):
         over_line = any(
             int(shape.body.position.y) < self.config.spawn_y
@@ -308,20 +408,43 @@ class PymunkReferenceGame:
             self.alive = False
         return not self.alive
 
+    def _advance_one_frame(self):
+        self.space.step(self.config.dt)
+        self.physics_frame += 1
+        for shape in self.balls:
+            meta = self._fruit_meta.get(id(shape))
+            if meta is not None:
+                meta.age_frames += 1
+        self._check_fail()
+
+    def advance_frame(self):
+        """只推进一个固定物理帧，供实时交互循环持续调用。"""
+
+        score_before = self.score
+        self._last_merge_events = []
+        frames = 0
+        if self.alive:
+            self._advance_one_frame()
+            frames = 1
+        return PhysicsResult(
+            frames_simulated=frames,
+            stable=self._is_stable(),
+            done=not self.alive,
+            truncated=False,
+            score_delta=self.score - score_before,
+            merge_events=tuple(self._last_merge_events),
+            settle_timeout=False,
+        )
+
     def advance_physics(self):
         frames = 0
         stable_count = 0
         score_before = self.score
         self._last_merge_events = []
         while frames < self.config.max_physics_frames and self.alive:
-            self.space.step(self.config.dt)
+            self._advance_one_frame()
             frames += 1
-            self.physics_frame += 1
-            for shape in self.balls:
-                meta = self._fruit_meta.get(id(shape))
-                if meta is not None:
-                    meta.age_frames += 1
-            if self._check_fail():
+            if not self.alive:
                 break
             if self._is_stable():
                 stable_count += 1

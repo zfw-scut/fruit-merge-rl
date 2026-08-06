@@ -935,6 +935,28 @@ class CudaVectorSimulatorTest(unittest.TestCase):
     'Pymunk is not installed',
 )
 class PymunkReferenceGameTest(unittest.TestCase):
+    def test_reference_can_spawn_again_while_fruits_are_moving(self):
+        from daxigua.simulator.reference import PymunkReferenceGame
+
+        game = PymunkReferenceGame(
+            SimulatorConfig(max_fruits=8, use_cuda_extension=False),
+            seed=1,
+        )
+
+        first_id = game.spawn_fruit(1, 180)
+        game.advance_frame()
+        second_id = game.spawn_fruit(2, 380)
+        before = game.get_state()
+        game.advance_frame()
+        after = game.get_state()
+
+        self.assertEqual((1, 2), (first_id, second_id))
+        self.assertEqual(2, before.fruit_count)
+        self.assertEqual(2, after.fruit_count)
+        self.assertEqual(2, after.step_count)
+        self.assertGreater(after.physics_frame, before.physics_frame)
+        self.assertTrue(any(fruit.vy > 80.0 for fruit in after.board_fruits))
+
     def test_reference_uses_current_merge_score_and_midpoint(self):
         from daxigua.simulator.reference import PymunkReferenceGame
 
