@@ -13,6 +13,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model/GNN_DQN_BASELINE.md`：第一版 GNN-DQN 基线的模型范围、1-step Double DQN、纯分数奖励和排除项；
 - `model/GNN_DQN_TRAINING_SYSTEM.md`：30 FPS 独占训练、30/120 FPS 隔离评估、GPU Replay、性能标定、动态扩容、实时面板和云端归档规格；
 - `model/LOCAL_MODEL_VIEWER.md`：checkpoint 本地加载、120 FPS greedy 游玩、逐帧浏览器页面和 Q 值展示；
+- `SCENARIO_LAB.md`：鼠标交互式自定义场景实验室前端、场景 JSON、视觉边界和待接入的真实评估接口；
 - `codex/RULES.md`：较大修改的记录规则；
 - `codex/01_建立accelerated_v1最小基线_2026_08_01.md`：本分支首个结构记录；
 - `codex/02_对齐标准合成规则_2026_08_01.md`：当前水果、计分和西瓜相消规则；
@@ -32,6 +33,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/16_升级Win11训练面板与效果曲线_2026_08_05.md`：中文 Win11 Fluent 训练面板、可靠数字格式和分数/损失/吞吐历史曲线。
 - `codex/17_新增本地模型观看器_2026_08_05.md`：复用旧观看器原则重新实现的 checkpoint 浏览器游戏演示链路。
 - `codex/18_常态化保存训练曲线快照_2026_08_06.md`：独立旁路周期生成曲线 PNG、面板自动刷新和最终产物归档。
+- `codex/19_新增自定义场景实验室前端_2026_08_06.md`：实现现代场景编辑页面、鼠标交互、极端状态预设和后端接入边界。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的
