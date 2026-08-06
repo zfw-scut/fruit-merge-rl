@@ -12,6 +12,10 @@ python tools/preflight_training.py \
 python tools/benchmark_training_pipeline.py \
   --output runs/autotune/training_pipeline.json
 
+python tools/compare_reward_throughput.py \
+  --pipeline-report runs/autotune/training_pipeline.json \
+  --output runs/autotune/reward_overhead.json
+
 python tools/run_autotuned_training.py \
   --config configs/gnn_dqn_reward_v2.toml \
   --autotune-report runs/autotune/training_pipeline.json \

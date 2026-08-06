@@ -43,6 +43,7 @@ def parse_args():
         default='spatial_v2',
     )
     parser.add_argument('--reward-scale', type=float, default=1.0)
+    parser.add_argument('--seed', type=int, default=20260806)
     parser.add_argument('--skip-execution-variants', action='store_true')
     parser.add_argument('--skip-profile', action='store_true')
     parser.add_argument('--profiler-output', type=Path)
@@ -66,6 +67,7 @@ def _run_single(args):
         compile_model=args.compile_model,
         reward_kind=args.reward_kind,
         reward_scale=args.reward_scale,
+        seed=args.seed,
         profiler_output=args.profiler_output,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +101,7 @@ def _subprocess_result(
         '--device', args.device,
         '--reward-kind', args.reward_kind,
         '--reward-scale', str(args.reward_scale),
+        '--seed', str(args.seed),
         '--output', str(single_output),
     )
     compile_model = args.compile_model if compile_model is None else compile_model
@@ -293,6 +296,7 @@ def main():
         'selection_metric': 'end_to_end_env_steps_per_second_at_utd_1',
         'reward_kind': args.reward_kind,
         'reward_scale': args.reward_scale,
+        'seed': args.seed,
         'selected_num_envs': best['num_envs'],
         'selected_batch_size': best['batch_size'],
         'selected_compile_model': best.get('compile_model', False),

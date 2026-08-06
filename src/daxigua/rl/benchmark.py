@@ -45,6 +45,7 @@ class PipelineBenchmarkResult:
     compile_model: bool
     reward_kind: str
     reward_scale: float
+    seed: int
     profile_trace: str | None
 
     def to_dict(self):
@@ -104,14 +105,17 @@ def benchmark_training_candidate(
         compile_model=False,
         reward_kind='spatial_v2',
         reward_scale=1.0,
+        seed=20260806,
         profiler_output=None):
     device = torch.device(device)
     if device.type == 'cuda' and device.index is None:
         device = torch.device('cuda', torch.cuda.current_device())
     if device.type == 'cuda':
+        torch.cuda.manual_seed_all(int(seed))
         torch.cuda.reset_peak_memory_stats(device)
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.set_float32_matmul_precision('high')
+    torch.manual_seed(int(seed))
     model_config = ModelConfig()
     simulator_config = SimulatorConfig.training_fast(
         max_fruits=model_config.max_fruits,
@@ -313,5 +317,6 @@ def benchmark_training_candidate(
         compile_model=bool(compile_model),
         reward_kind=str(reward_kind),
         reward_scale=float(reward_scale),
+        seed=int(seed),
         profile_trace=str(profile_path) if profile_path is not None else None,
     )
