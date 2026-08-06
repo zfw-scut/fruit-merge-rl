@@ -3,6 +3,10 @@
 ## 分支边界
 
 - 当前 Reward V2 开发分支为 `reward-v2`，基线来源分支为 `codex/accelerated-v1`。
+- 废弃的第一版场景实验室保存在 `archive/reward-v2-first-scenario-lab`，只用于历史审计，
+  不继续开发或合并其实现。
+- `scenario-lab-realtime` 已并入并更名为正式 `reward-v2` 主线；第一轮云端训练版本固定为
+  `model-reward-v2-r1` 标签。
 - 当前分支通过独立 worktree 开发，不要在原项目工作树中强行切换该分支。
 - 原来的 `codex/work-1` 保留完整训练历史和 Android 成品，不向本分支整批合并。
 - 从旧历史迁移内容时使用文件级白名单，并重新核对依赖；不直接 cherry-pick 大型功能提交。
