@@ -6,6 +6,16 @@
 
 from .config import SimulatorConfig
 from .reward import GameScoreReward, RewardComputer, ZeroReward
+from .spatial_reward import (
+    AccessibleSpaceBatch,
+    AccessibleSpaceCalculator,
+    SpatialRewardComputer,
+    SpatialRewardConfig,
+    SpatialRewardDiagnostics,
+    SpatialRewardStep,
+    build_standard_compensation_table,
+    diagnose_spatial_reward,
+)
 from .replay import (
     DEFAULT_FRUIT_TEXTURE_DIR,
     load_fruit_texture_data_urls,
@@ -34,6 +44,8 @@ __all__ = [
     'BatchPhysicsResult',
     'BatchSimulationTrace',
     'BatchStepResult',
+    'AccessibleSpaceBatch',
+    'AccessibleSpaceCalculator',
     'GameScoreReward',
     'DEFAULT_FRUIT_TEXTURE_DIR',
     'load_fruit_texture_data_urls',
@@ -41,6 +53,12 @@ __all__ = [
     'RewardComputer',
     'SimulatorConfig',
     'SingleEnvAdapter',
+    'SpatialRewardComputer',
+    'SpatialRewardConfig',
+    'SpatialRewardDiagnostics',
+    'SpatialRewardStep',
+    'build_standard_compensation_table',
+    'diagnose_spatial_reward',
     'save_trace_archive',
     'TensorVectorSimulator',
     'trace_to_payload',
