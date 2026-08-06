@@ -1,4 +1,4 @@
-"""生成离线场景页面，或启动真实物理与Reward V2场景实验室。"""
+"""生成离线场景页面，或启动真实物理与Reward V2.1场景实验室。"""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def parse_args(argv=None):
     parser.add_argument(
         '--serve',
         action='store_true',
-        help='启动真实物理与Reward V2后端；不指定时只生成离线前端。',
+        help='启动真实物理与Reward V2.1后端；不指定时只生成离线前端。',
     )
     parser.add_argument(
         '--host',
@@ -48,7 +48,7 @@ def parse_args(argv=None):
         '--reward-scale',
         type=float,
         default=1.0,
-        help='Reward V2 最终缩放，默认 1.0。',
+        help='Reward V2.1 最终缩放，默认 1.0。',
     )
     parser.add_argument(
         '--checkpoint',
@@ -102,7 +102,7 @@ def main(argv=None):
         )
         print(
             f'场景实验室服务：{server.url} '
-            f'（{evaluator.device}，Reward V2 × {args.reward_scale:g}）',
+            f'（{evaluator.device}，Reward V2.1 × {args.reward_scale:g}）',
             flush=True,
         )
         if model_evaluator is not None:

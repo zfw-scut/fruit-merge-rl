@@ -65,8 +65,9 @@ Reward V2 的30 FPS周期评估从 2.10M transition 的 2120.80 上升到 12.58M
 ## 5. 下一轮最低实验
 
 1. 保持模型、seed、环境数、batch、评估频率和 transition 总量一致；
-2. 至少比较 `score_v1`、当前 `spatial_v2`、修正补偿的空间奖励三组；
-3. 每组记录奖励正负率以及 raw delta、compensation、reward 的 p10/p50/p90/p99；
+2. 修正补偿的空间奖励已命名为 `spatial_v2_1`，正式训练后与 `score_v1`、
+   `spatial_v2` 历史结果比较；
+3. 每组记录奖励正负率以及 raw delta、reference loss、reward 的 p10/p50/p90/p99；
 4. 指标按空场/中局/拥挤场、投放等级和21个动作位置分层；
 5. 使用同一固定场景集检查空间、对齐和合成机会冲突时的动作排序；
 6. 仍同时执行30/120 FPS最终评估。

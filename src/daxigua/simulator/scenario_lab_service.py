@@ -1,4 +1,4 @@
-"""自定义场景实验室的真实物理与Reward V2评估服务。"""
+"""自定义场景实验室的真实物理与Reward V2.1评估服务。"""
 
 from __future__ import annotations
 
@@ -244,7 +244,10 @@ class ScenarioLabEvaluator:
         self.device = torch.device(device)
         if self.device.type == 'cuda' and not torch.cuda.is_available():
             raise RuntimeError('CUDA is not available')
-        self.reward_config = SpatialRewardConfig(reward_scale=reward_scale)
+        self.reward_config = SpatialRewardConfig(
+            reward_scale=reward_scale,
+            reference_mode='best_no_merge',
+        )
         self._runtimes = {}
         self._lock = Lock()
 
@@ -293,8 +296,8 @@ class ScenarioLabEvaluator:
         after_depths = after.depths.detach().cpu()
         after_areas = after.normalized_areas.detach().cpu()
         per_slot_raw_delta = diagnostic.per_slot_raw_delta.detach().cpu()
-        per_slot_compensation = (
-            diagnostic.per_slot_compensation.detach().cpu()
+        per_slot_reference_loss = (
+            diagnostic.per_slot_reference_loss.detach().cpu()
         )
         per_slot_unscaled = (
             diagnostic.per_slot_unscaled_reward.detach().cpu()
@@ -302,7 +305,8 @@ class ScenarioLabEvaluator:
         previous_potential = diagnostic.previous_potential.detach().cpu()
         next_potential = diagnostic.next_potential.detach().cpu()
         raw_space_delta = diagnostic.raw_space_delta.detach().cpu()
-        compensation = diagnostic.compensation.detach().cpu()
+        reference_loss = diagnostic.reference_loss.detach().cpu()
+        reference_action = diagnostic.reference_action.detach().cpu()
         reward = diagnostic.reward.detach().cpu()
         terminal = diagnostic.terminal.detach().cpu()
         drop_x = result.drop.drop_x.detach().cpu()
@@ -354,8 +358,8 @@ class ScenarioLabEvaluator:
                     'raw_delta': round(float(
                         per_slot_raw_delta[action_index, slot_index]
                     ), 6),
-                    'compensation': round(float(
-                        per_slot_compensation[action_index, slot_index]
+                    'reference_loss': round(float(
+                        per_slot_reference_loss[action_index, slot_index]
                     ), 6),
                     'unscaled_reward': round(float(
                         per_slot_unscaled[action_index, slot_index]
@@ -374,9 +378,10 @@ class ScenarioLabEvaluator:
                 'raw_space_delta': round(float(
                     raw_space_delta[action_index]
                 ), 6),
-                'compensation': round(float(
-                    compensation[action_index]
+                'reference_loss': round(float(
+                    reference_loss[action_index]
                 ), 6),
+                'reference_action': int(reference_action[action_index]),
                 'score_delta': int(score_delta[action_index]),
                 'done': bool(terminal[action_index]),
                 'stable': bool(stable[action_index]),
@@ -392,8 +397,8 @@ class ScenarioLabEvaluator:
             scene['probe_action'] if mode == 'probe' else best_action
         )
         return {
-            'format_version': 2,
-            'reward_version': 'spatial_v2',
+            'format_version': 3,
+            'reward_version': 'spatial_v2_1',
             'reward_scale': self.reward_config.reward_scale,
             'physics_fps': scene['fps'],
             'mode': mode,
@@ -404,7 +409,8 @@ class ScenarioLabEvaluator:
             'queue_weights': list(weights),
             'actions': actions,
             'message': (
-                '结果来自真实物理与Reward V2后端；新随机q3未参与当前奖励。'
+                '结果来自真实物理与Reward V2.1后端；参考损失取当前状态'
+                '21个无合成幽灵投放的最小值，新随机q3未参与当前奖励。'
             ),
         }
 

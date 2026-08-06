@@ -1,4 +1,4 @@
-"""Reward V2 21列几何、补偿与队列对齐测试。"""
+"""空间奖励21列几何、状态参考损失与队列对齐测试。"""
 
 from dataclasses import replace
 import unittest
@@ -89,6 +89,39 @@ class SpatialRewardGeometryTest(unittest.TestCase):
             SpatialRewardConfig(queue_weights=(0.5, 0.3, 0.3))
         with self.assertRaisesRegex(ValueError, 'positive'):
             SpatialRewardConfig(reward_scale=0.0)
+        with self.assertRaisesRegex(ValueError, 'reference_mode'):
+            SpatialRewardConfig(reference_mode='unknown')
+
+    def test_empty_board_best_reference_is_below_old_average(self):
+        queue = torch.tensor(((1, 2, 3, 4), (5, 4, 3, 2)))
+        analysis = self.calculator.analyze(
+            self.simulator.observe(), queue
+        )
+        reference = self.calculator.no_merge_reference(analysis)
+        old_per_slot = self.calculator.compensation_by_slot(
+            queue[:, 0], queue[:, 1:4]
+        )
+        old_average = self.calculator.weighted_potential(old_per_slot)
+
+        self.assertEqual(reference.loss.shape, (2,))
+        self.assertEqual(reference.per_slot_loss.shape, (2, 3))
+        self.assertTrue(bool(torch.all(reference.loss > 0.0)))
+        self.assertTrue(bool(torch.all(reference.loss < old_average)))
+        self.assertTrue(bool(torch.all(
+            (reference.action == 0) | (reference.action == 20)
+        )))
+
+    def test_empty_reference_lookup_matches_full_geometry(self):
+        queue = torch.tensor(((1, 2, 3, 4), (5, 4, 3, 2)))
+        full = self.calculator.no_merge_reference(
+            self.calculator.analyze(self.simulator.observe(), queue)
+        )
+        lookup = self.calculator.empty_no_merge_reference(queue)
+
+        self.assertTrue(torch.allclose(full.loss, lookup.loss, atol=1e-6))
+        self.assertTrue(bool(torch.all(
+            (lookup.action == 0) | (lookup.action == 20)
+        )))
 
 
 class SpatialRewardTransitionTest(unittest.TestCase):
@@ -110,7 +143,10 @@ class SpatialRewardTransitionTest(unittest.TestCase):
         previous = self.simulator.observe().clone()
         computer = SpatialRewardComputer(
             self.config, device='cpu',
-            reward_config=SpatialRewardConfig(reward_scale=7.0),
+            reward_config=SpatialRewardConfig(
+                reward_scale=7.0,
+                reference_mode='best_no_merge',
+            ),
         )
         computer.initialize(previous)
 
@@ -156,13 +192,41 @@ class SpatialRewardTransitionTest(unittest.TestCase):
         self.assertLess(float(diagnostic.raw_space_delta[0]), 0.0)
 
     def test_reset_rows_restores_empty_board_cached_potential(self):
-        computer = SpatialRewardComputer(self.config, device='cpu')
+        computer = SpatialRewardComputer(
+            self.config,
+            device='cpu',
+            reward_config=SpatialRewardConfig(
+                reference_mode='best_no_merge'
+            ),
+        )
         computer.initialize(self.simulator.observe())
         computer._previous_potential[0] = 0.25
+        computer._reference_loss[0] = 0.25
 
-        computer.reset_rows(torch.tensor((True,)))
+        observation = self.simulator.reset(torch.tensor((True,)))
+        computer.reset_rows(torch.tensor((True,)), observation)
 
         self.assertEqual(float(computer._previous_potential[0]), 1.0)
+        expected = computer.calculator.empty_no_merge_reference(
+            observation.fruit_queue
+        ).loss
+        self.assertTrue(torch.allclose(computer._reference_loss, expected))
+
+    def test_ordinary_empty_board_drop_is_never_positive(self):
+        computer = SpatialRewardComputer(
+            self.config,
+            device='cpu',
+            reward_config=SpatialRewardConfig(
+                reference_mode='best_no_merge'
+            ),
+        )
+        computer.initialize(self.simulator.observe())
+
+        result = self.simulator.step(torch.tensor((10,)))
+        step = computer.step(result)
+
+        self.assertLessEqual(float(step.reward[0]), 1e-6)
+        self.assertLess(float(step.reward[0]), -1e-4)
 
 
 if __name__ == '__main__':

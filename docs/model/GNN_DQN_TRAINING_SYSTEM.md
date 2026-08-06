@@ -2,7 +2,8 @@
 
 本文保留 `score_v1` 基线的冻结训练规格，作为后续代际比较依据。`reward-v2` 分支保持
 相同模型、1-step TD、Replay 和30 FPS训练流程，只通过
-`configs/gnn_dqn_reward_v2.toml` 显式替换为空间奖励；具体公式和性能门禁见
+`configs/gnn_dqn_reward_v2.toml` 保留首轮空间奖励，
+`configs/gnn_dqn_reward_v2_1.toml` 是当前默认空间奖励；具体公式和性能门禁见
 `REWARD_V2_ACCESSIBLE_SPACE.md`。
 
 - 状态：第一版基线训练系统已确认

@@ -89,9 +89,9 @@ def _random_transition(
         rewards,
         result.physics.done,
     )
+    observation = simulator.reset(result.physics.done)
     if reward_computer is not None:
-        reward_computer.reset_rows(result.physics.done)
-    simulator.reset(result.physics.done)
+        reward_computer.reset_rows(result.physics.done, observation)
 
 
 def benchmark_training_candidate(
@@ -103,7 +103,7 @@ def benchmark_training_candidate(
         pre_roll_steps=8,
         use_bfloat16=True,
         compile_model=False,
-        reward_kind='spatial_v2',
+        reward_kind='spatial_v2_1',
         reward_scale=1.0,
         seed=20260806,
         profiler_output=None):
@@ -129,13 +129,18 @@ def benchmark_training_candidate(
             simulator_config,
             device=device,
             reward_config=SpatialRewardConfig(
-                reward_scale=reward_scale
+                reward_scale=reward_scale,
+                reference_mode=(
+                    'best_no_merge'
+                    if reward_kind == 'spatial_v2_1'
+                    else 'empty_average'
+                ),
             ),
         )
-        if reward_kind == 'spatial_v2'
+        if reward_kind in ('spatial_v2', 'spatial_v2_1')
         else None
     )
-    if reward_kind not in ('score_v1', 'spatial_v2'):
+    if reward_kind not in ('score_v1', 'spatial_v2', 'spatial_v2_1'):
         raise ValueError('unsupported reward_kind')
     base_model = BaselineGnnDqn(model_config).to(device)
     learner = DqnLearner(
@@ -244,9 +249,11 @@ def benchmark_training_candidate(
                 rewards,
                 result.physics.done,
             )
+            observation = simulator.reset(result.physics.done)
             if reward_computer is not None:
-                reward_computer.reset_rows(result.physics.done)
-            simulator.reset(result.physics.done)
+                reward_computer.reset_rows(
+                    result.physics.done, observation
+                )
             update_credit += num_envs / batch_size
             updates = int(update_credit)
             update_credit -= updates

@@ -88,14 +88,16 @@ class DqnConfig:
 class RewardConfig:
     """训练奖励的可比较配置。"""
 
-    kind: str = 'spatial_v2'
+    kind: str = 'spatial_v2_1'
     score_divisor: float = 66.0
     reward_scale: float = 1.0
     queue_weights: tuple[float, float, float] = (0.5, 0.3, 0.2)
 
     def __post_init__(self):
-        if self.kind not in ('score_v1', 'spatial_v2'):
-            raise ValueError('reward kind must be score_v1 or spatial_v2')
+        if self.kind not in ('score_v1', 'spatial_v2', 'spatial_v2_1'):
+            raise ValueError(
+                'reward kind must be score_v1, spatial_v2 or spatial_v2_1'
+            )
         score_divisor = float(self.score_divisor)
         reward_scale = float(self.reward_scale)
         weights = tuple(float(value) for value in self.queue_weights)

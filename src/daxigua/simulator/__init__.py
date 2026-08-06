@@ -9,6 +9,7 @@ from .reward import GameScoreReward, RewardComputer, ZeroReward
 from .spatial_reward import (
     AccessibleSpaceBatch,
     AccessibleSpaceCalculator,
+    NoMergeReferenceBatch,
     SpatialRewardComputer,
     SpatialRewardConfig,
     SpatialRewardDiagnostics,
@@ -54,6 +55,7 @@ __all__ = [
     'BatchStepResult',
     'AccessibleSpaceBatch',
     'AccessibleSpaceCalculator',
+    'NoMergeReferenceBatch',
     'GameScoreReward',
     'DEFAULT_FRUIT_TEXTURE_DIR',
     'load_fruit_texture_data_urls',

@@ -25,6 +25,7 @@ class SpatialRewardConfig:
 
     queue_weights: tuple[float, float, float] = (0.5, 0.3, 0.2)
     reward_scale: float = 1.0
+    reference_mode: str = 'empty_average'
 
     def __post_init__(self):
         if len(self.queue_weights) != 3:
@@ -37,6 +38,10 @@ class SpatialRewardConfig:
         reward_scale = float(self.reward_scale)
         if not math.isfinite(reward_scale) or reward_scale <= 0.0:
             raise ValueError('reward_scale must be finite and positive')
+        if self.reference_mode not in ('empty_average', 'best_no_merge'):
+            raise ValueError(
+                'reference_mode must be empty_average or best_no_merge'
+            )
         object.__setattr__(self, 'queue_weights', weights)
         object.__setattr__(self, 'reward_scale', reward_scale)
 
@@ -59,8 +64,14 @@ class SpatialRewardStep:
     previous_potential: torch.Tensor
     next_potential: torch.Tensor
     raw_space_delta: torch.Tensor
-    compensation: torch.Tensor
+    reference_loss: torch.Tensor
     unscaled_reward: torch.Tensor
+
+    @property
+    def compensation(self):
+        """兼容旧监控读取；V2.1中该值是当前状态参考损失。"""
+
+        return self.reference_loss
 
     def scalar_metrics(self):
         """返回可直接送入GPU指标累加器的标量 Tensor。"""
@@ -69,7 +80,7 @@ class SpatialRewardStep:
             'spatial_previous_potential': self.previous_potential.mean(),
             'spatial_next_potential': self.next_potential.mean(),
             'spatial_raw_delta': self.raw_space_delta.mean(),
-            'spatial_compensation': self.compensation.mean(),
+            'spatial_reference_loss': self.reference_loss.mean(),
             'spatial_unscaled_reward': self.unscaled_reward.mean(),
             'spatial_reward': self.reward.mean(),
             'spatial_positive_rate': (self.reward > 0).float().mean(),
@@ -83,15 +94,33 @@ class SpatialRewardDiagnostics:
 
     before: AccessibleSpaceBatch
     after: AccessibleSpaceBatch
-    per_slot_compensation: torch.Tensor
+    per_slot_reference_loss: torch.Tensor
     per_slot_raw_delta: torch.Tensor
     per_slot_unscaled_reward: torch.Tensor
     previous_potential: torch.Tensor
     next_potential: torch.Tensor
-    compensation: torch.Tensor
+    reference_loss: torch.Tensor
+    reference_action: torch.Tensor
     raw_space_delta: torch.Tensor
     reward: torch.Tensor
     terminal: torch.Tensor
+
+    @property
+    def per_slot_compensation(self):
+        return self.per_slot_reference_loss
+
+    @property
+    def compensation(self):
+        return self.reference_loss
+
+
+@dataclass(frozen=True, slots=True)
+class NoMergeReferenceBatch:
+    """当前状态中最佳普通无合成投放的空间损失。"""
+
+    loss: torch.Tensor
+    action: torch.Tensor
+    per_slot_loss: torch.Tensor
 
 
 def _rule_table(function):
@@ -116,13 +145,16 @@ def _action_positions(simulator_config, display_radius):
     )
 
 
-def build_standard_compensation_table(simulator_config):
-    """按同一21列几何生成1～5级水果的标准空间占用补偿表。"""
+def _build_empty_action_loss_table(simulator_config):
+    """生成空场中每种投放/未来水果组合的21动作空间损失。"""
 
     if not isinstance(simulator_config, SimulatorConfig):
         raise TypeError('simulator_config must be SimulatorConfig')
     table = [
-        [0.0 for _ in range(MAX_FRUIT_LEVEL + 1)]
+        [
+            [0.0 for _ in range(simulator_config.action_count)]
+            for _ in range(MAX_FRUIT_LEVEL + 1)
+        ]
         for _ in range(MAX_FRUIT_LEVEL + 1)
     ]
     spawn_y = float(simulator_config.spawn_y)
@@ -182,8 +214,23 @@ def build_standard_compensation_table(simulator_config):
                     + 0.5 * depths[-1]
                 )
                 losses.append(max(0.0, min(1.0, 1.0 - area / empty_area)))
-            table[drop_level][future_level] = sum(losses) / len(losses)
-    return tuple(tuple(row) for row in table)
+            table[drop_level][future_level] = losses
+    return tuple(
+        tuple(tuple(actions) for actions in future_rows)
+        for future_rows in table
+    )
+
+
+def build_standard_compensation_table(simulator_config):
+    """生成旧版空场21动作平均空间占用补偿表。"""
+
+    action_losses = _build_empty_action_loss_table(simulator_config)
+    table = []
+    for future_rows in action_losses:
+        table.append(tuple(
+            sum(actions) / len(actions) for actions in future_rows
+        ))
+    return tuple(table)
 
 
 class AccessibleSpaceCalculator:
@@ -234,11 +281,12 @@ class AccessibleSpaceCalculator:
             dtype=torch.float32,
             device=self.device,
         )
-        self.compensation_table = torch.tensor(
-            build_standard_compensation_table(simulator_config),
+        self.empty_action_loss_table = torch.tensor(
+            _build_empty_action_loss_table(simulator_config),
             dtype=torch.float32,
             device=self.device,
         )
+        self.compensation_table = self.empty_action_loss_table.mean(dim=-1)
 
     def _candidate_geometry(self, candidate_levels):
         display_radius = self.display_radii[candidate_levels]
@@ -358,6 +406,113 @@ class AccessibleSpaceCalculator:
             drop_levels[..., None], future_levels
         ]
 
+    def _validate_reference_analysis(self, analysis):
+        if not isinstance(analysis, AccessibleSpaceBatch):
+            raise TypeError('analysis must be AccessibleSpaceBatch')
+        if analysis.candidate_levels.shape[-1] != 4:
+            raise ValueError('no-merge reference requires q0 through q3')
+
+    @torch.no_grad()
+    def no_merge_reference(self, analysis):
+        """计算当前状态下21个无合成幽灵投放中的最小空间损失。"""
+
+        self._validate_reference_analysis(analysis)
+        levels = analysis.candidate_levels
+        drop_radius = self.drop_radii[levels[:, 0]]
+        future_radius = self.drop_radii[levels[:, 1:4]]
+        ghost_x = analysis.drop_x[:, 0]
+        ghost_y = float(self.simulator_config.spawn_y) + analysis.depths[:, 0]
+        future_x = analysis.drop_x[:, 1:4]
+
+        dx = (
+            future_x[:, :, None, :]
+            - ghost_x[:, None, :, None]
+        ).abs()
+        radius_sum = (
+            future_radius[:, :, None, None]
+            + drop_radius[:, None, None, None]
+        )
+        intersects = dx < radius_sum
+        half_height = (
+            radius_sum.square() - dx.square()
+        ).clamp_min(0.0).sqrt()
+        upper = ghost_y[:, None, :, None] - half_height
+        lower = ghost_y[:, None, :, None] + half_height
+        spawn_y = float(self.simulator_config.spawn_y)
+        blocks = intersects & (lower >= spawn_y)
+        ghost_depth = (upper.clamp_min(spawn_y) - spawn_y).clamp_min(0.0)
+        ghost_depth = torch.where(
+            blocks,
+            ghost_depth,
+            torch.full_like(ghost_depth, float('inf')),
+        )
+        depths = torch.minimum(
+            analysis.depths[:, 1:4, None, :], ghost_depth
+        )
+
+        _, left, right, floor_y, _ = self._candidate_geometry(levels[:, 1:4])
+        horizontal_span = (right - left).clamp_min(0.0)
+        column_step = horizontal_span / (
+            self.simulator_config.action_count - 1
+        )
+        area = (
+            depths * self.trapezoid_weights
+        ).sum(dim=-1) * column_step[:, :, None]
+        empty_depth = (
+            floor_y - float(self.simulator_config.spawn_y)
+        ).clamp_min(0.0)
+        empty_area = (horizontal_span * empty_depth).clamp_min(1e-9)
+        ghost_areas = (area / empty_area[:, :, None]).clamp(0.0, 1.0)
+        per_slot_action_loss = (
+            analysis.normalized_areas[:, 1:4, None] - ghost_areas
+        ).clamp_min(0.0)
+        action_loss = (
+            per_slot_action_loss * self.queue_weights[None, :, None]
+        ).sum(dim=1)
+        best_loss, best_action = action_loss.min(dim=-1)
+        best_slot_loss = per_slot_action_loss.gather(
+            2,
+            best_action[:, None, None].expand(-1, 3, 1),
+        ).squeeze(-1)
+        return NoMergeReferenceBatch(
+            loss=best_loss,
+            action=best_action,
+            per_slot_loss=best_slot_loss,
+        )
+
+    def empty_no_merge_reference(self, fruit_queue):
+        """不运行场景几何，直接查表得到reset空场的最佳参考损失。"""
+
+        fruit_queue = torch.as_tensor(
+            fruit_queue, dtype=torch.int64, device=self.device
+        )
+        if fruit_queue.ndim != 2 or fruit_queue.shape[-1] < 4:
+            raise ValueError('fruit_queue must have shape [B, >=4]')
+        batch_size = fruit_queue.shape[0]
+        actions = torch.arange(
+            self.simulator_config.action_count,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        per_slot_action_loss = self.empty_action_loss_table[
+            fruit_queue[:, 0, None, None],
+            fruit_queue[:, 1:4, None],
+            actions[None, None, :],
+        ]
+        action_loss = (
+            per_slot_action_loss * self.queue_weights[None, :, None]
+        ).sum(dim=1)
+        best_loss, best_action = action_loss.min(dim=-1)
+        best_slot_loss = per_slot_action_loss.gather(
+            2,
+            best_action[:, None, None].expand(batch_size, 3, 1),
+        ).squeeze(-1)
+        return NoMergeReferenceBatch(
+            loss=best_loss,
+            action=best_action,
+            per_slot_loss=best_slot_loss,
+        )
+
 
 class SpatialRewardComputer:
     """复用相邻决策状态势能的正式训练热路径Reward V2。"""
@@ -377,6 +532,7 @@ class SpatialRewardComputer:
         )
         self.reward_config = self.calculator.reward_config
         self._previous_potential = None
+        self._reference_loss = None
 
     @property
     def initialized(self):
@@ -384,16 +540,20 @@ class SpatialRewardComputer:
 
     @torch.no_grad()
     def initialize(self, observation):
-        queue_levels = observation.fruit_queue[:, 1:4]
-        areas = self.calculator.normalized_areas(
-            observation, queue_levels
+        queue_levels = observation.fruit_queue[:, :4]
+        analysis = self.calculator.analyze(observation, queue_levels)
+        self._previous_potential = self.calculator.weighted_potential(
+            analysis.normalized_areas[:, 1:4]
         )
-        self._previous_potential = self.calculator.weighted_potential(areas)
+        if self.reward_config.reference_mode == 'best_no_merge':
+            self._reference_loss = self.calculator.no_merge_reference(
+                analysis
+            ).loss
         return self._previous_potential
 
     @torch.no_grad()
-    def reset_rows(self, reset_mask):
-        """空场reset的三个队列水果势能都为1，无需重新运行几何。"""
+    def reset_rows(self, reset_mask, observation=None):
+        """重置势能；V2.1同时按新队列查表恢复状态相关参考损失。"""
 
         if self._previous_potential is None:
             return
@@ -403,6 +563,15 @@ class SpatialRewardComputer:
             device=self._previous_potential.device,
         )
         self._previous_potential.masked_fill_(reset_mask, 1.0)
+        if self.reward_config.reference_mode == 'best_no_merge':
+            if observation is None:
+                raise ValueError(
+                    'best_no_merge reset requires the reset observation'
+                )
+            reference = self.calculator.empty_no_merge_reference(
+                observation.fruit_queue[reset_mask]
+            )
+            self._reference_loss[reset_mask] = reference.loss
 
     @torch.no_grad()
     def step(self, result, *, batch_size=None):
@@ -417,33 +586,38 @@ class SpatialRewardComputer:
         queue_after = result.drop.queue_after[:batch_size]
 
         # 新状态一次计算q0～q3：前三项完成当前奖励，后三项缓存给下一步。
-        areas = self.calculator.normalized_areas(
-            result.observation, queue_after
-        )
+        analysis = self.calculator.analyze(result.observation, queue_after)
+        areas = analysis.normalized_areas
         measured_next = self.calculator.weighted_potential(areas[:, :3])
         terminals = result.physics.done[:batch_size]
         next_potential = torch.where(
             terminals, torch.zeros_like(measured_next), measured_next
         )
         previous_potential = self._previous_potential[:batch_size].clone()
-        per_slot_compensation = self.calculator.compensation_by_slot(
-            queue_before[:, 0], queue_before[:, 1:4]
-        )
-        compensation = self.calculator.weighted_potential(
-            per_slot_compensation
-        )
+        if self.reward_config.reference_mode == 'best_no_merge':
+            reference_loss = self._reference_loss[:batch_size].clone()
+        else:
+            per_slot_reference = self.calculator.compensation_by_slot(
+                queue_before[:, 0], queue_before[:, 1:4]
+            )
+            reference_loss = self.calculator.weighted_potential(
+                per_slot_reference
+            )
         raw_space_delta = next_potential - previous_potential
-        unscaled_reward = raw_space_delta + compensation
+        unscaled_reward = raw_space_delta + reference_loss
         reward = self.reward_config.reward_scale * unscaled_reward
 
         following_potential = self.calculator.weighted_potential(areas[:, 1:4])
         self._previous_potential[:batch_size].copy_(following_potential)
+        if self.reward_config.reference_mode == 'best_no_merge':
+            following_reference = self.calculator.no_merge_reference(analysis)
+            self._reference_loss[:batch_size].copy_(following_reference.loss)
         return SpatialRewardStep(
             reward=reward,
             previous_potential=previous_potential,
             next_potential=next_potential,
             raw_space_delta=raw_space_delta,
-            compensation=compensation,
+            reference_loss=reference_loss,
             unscaled_reward=unscaled_reward,
         )
 
@@ -468,7 +642,13 @@ def diagnose_spatial_reward(
     batch_size = int(batch_size)
     queue_before = result.drop.queue_before[:batch_size]
     aligned_levels = queue_before[:, 1:4]
-    before = calculator.analyze(previous_observation, aligned_levels)
+    before_all = calculator.analyze(previous_observation, queue_before[:, :4])
+    before = AccessibleSpaceBatch(
+        candidate_levels=before_all.candidate_levels[:, 1:4],
+        drop_x=before_all.drop_x[:, 1:4],
+        depths=before_all.depths[:, 1:4],
+        normalized_areas=before_all.normalized_areas[:, 1:4],
+    )
     after = calculator.analyze(result.observation, aligned_levels)
     terminal = result.physics.done[:batch_size, None]
     after_areas = torch.where(
@@ -477,30 +657,40 @@ def diagnose_spatial_reward(
         after.normalized_areas,
     )
     per_slot_raw_delta = after_areas - before.normalized_areas
-    per_slot_compensation = calculator.compensation_by_slot(
-        queue_before[:, 0], aligned_levels
-    )
-    per_slot_unscaled = per_slot_raw_delta + per_slot_compensation
+    if calculator.reward_config.reference_mode == 'best_no_merge':
+        reference = calculator.no_merge_reference(before_all)
+        per_slot_reference = reference.per_slot_loss
+        reference_loss = reference.loss
+        reference_action = reference.action
+    else:
+        per_slot_reference = calculator.compensation_by_slot(
+            queue_before[:, 0], aligned_levels
+        )
+        reference_loss = calculator.weighted_potential(per_slot_reference)
+        reference_action = torch.full(
+            (batch_size,), -1, dtype=torch.int64, device=calculator.device
+        )
+    per_slot_unscaled = per_slot_raw_delta + per_slot_reference
     previous_potential = calculator.weighted_potential(
         before.normalized_areas
     )
     next_potential = calculator.weighted_potential(after_areas)
-    compensation = calculator.weighted_potential(per_slot_compensation)
     raw_space_delta = next_potential - previous_potential
     # 与训练热路径保持完全相同的浮点运算顺序，避免诊断显示与实际奖励
     # 因加权求和结合顺序不同而产生约1e-7的偏差。
     reward = calculator.reward_config.reward_scale * (
-        raw_space_delta + compensation
+        raw_space_delta + reference_loss
     )
     return SpatialRewardDiagnostics(
         before=before,
         after=after,
-        per_slot_compensation=per_slot_compensation,
+        per_slot_reference_loss=per_slot_reference,
         per_slot_raw_delta=per_slot_raw_delta,
         per_slot_unscaled_reward=per_slot_unscaled,
         previous_potential=previous_potential,
         next_potential=next_potential,
-        compensation=compensation,
+        reference_loss=reference_loss,
+        reference_action=reference_action,
         raw_space_delta=raw_space_delta,
         reward=reward,
         terminal=terminal.squeeze(-1),
@@ -510,6 +700,7 @@ def diagnose_spatial_reward(
 __all__ = [
     'AccessibleSpaceBatch',
     'AccessibleSpaceCalculator',
+    'NoMergeReferenceBatch',
     'SpatialRewardComputer',
     'SpatialRewardConfig',
     'SpatialRewardDiagnostics',

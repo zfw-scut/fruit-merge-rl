@@ -33,6 +33,11 @@ def parse_args(argv=None):
     parser.add_argument('--repeats', type=int, default=2)
     parser.add_argument('--seed', type=int, default=20260806)
     parser.add_argument('--reward-scale', type=float, default=1.0)
+    parser.add_argument(
+        '--spatial-kind',
+        choices=('spatial_v2', 'spatial_v2_1'),
+        default='spatial_v2_1',
+    )
     parser.add_argument('--warning-loss', type=float, default=0.05)
     parser.add_argument('--maximum-loss', type=float, default=0.08)
     return parser.parse_args(argv)
@@ -98,13 +103,14 @@ def main(argv=None):
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    results = {'score_v1': [], 'spatial_v2': []}
+    spatial_kind = args.spatial_kind
+    results = {'score_v1': [], spatial_kind: []}
     # 每个repeat使用同一随机种子配对，顺序交替以减小温度等系统漂移。
     for repeat_index in range(args.repeats):
         order = (
-            ('score_v1', 'spatial_v2')
+            ('score_v1', spatial_kind)
             if repeat_index % 2 == 0
-            else ('spatial_v2', 'score_v1')
+            else (spatial_kind, 'score_v1')
         )
         for reward_kind in order:
             results[reward_kind].append(_run_candidate(
@@ -117,7 +123,7 @@ def main(argv=None):
     )
     spatial_speed = statistics.median(
         item['end_to_end_env_steps_per_second']
-        for item in results['spatial_v2']
+        for item in results[spatial_kind]
     )
     throughput_ratio = spatial_speed / max(score_speed, 1e-9)
     overhead_fraction = 1.0 - throughput_ratio
@@ -134,7 +140,8 @@ def main(argv=None):
         'warning_loss_fraction': args.warning_loss,
         'maximum_loss_fraction': args.maximum_loss,
         'score_v1_median_env_steps_per_second': score_speed,
-        'spatial_v2_median_env_steps_per_second': spatial_speed,
+        'spatial_kind': spatial_kind,
+        f'{spatial_kind}_median_env_steps_per_second': spatial_speed,
         'spatial_to_score_throughput_ratio': throughput_ratio,
         'reward_overhead_fraction': overhead_fraction,
         'results': results,

@@ -23,7 +23,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--config', type=Path,
-        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2.toml',
+        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2_1.toml',
     )
     parser.add_argument(
         '--autotune-report', type=Path,

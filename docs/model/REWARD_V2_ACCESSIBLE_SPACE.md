@@ -1,25 +1,29 @@
-# Reward V2 可投放空间奖励
+# Reward V2 / V2.1 可投放空间奖励
 
-- 状态：核心几何、训练主链、监控、场景可视化、RTX 5090性能门禁和首轮训练均已完成；
-  当前游戏效果低于分数基线，详见 `../model_evaluations/model-reward-v2-r1.md`
+- 状态：V2首轮训练已完成但游戏效果低于分数基线；V2.1状态相关参考损失已实现并通过
+  本地功能与性能门禁，等待RTX 5090训练
 - 目标：不使用游戏得分作为训练奖励，直接优化投放后的未来可用空间
 - 边界：第一版只使用21个真实动作横坐标和静态垂直走廊，不做反事实物理、滚动路径或学习型可达性预测
 
 ## 1. 奖励定义
 
 当前投放水果为 `q0`，投放后仍可见的同一组未来水果为
-`Q=(q1,q2,q3)`。奖励为：
+`Q=(q1,q2,q3)`。V2.1把当前局面中21个无合成幽灵投放的最小空间损失作为参考：
 
 ```text
-r_t = reward_scale * (
-    U(next_state, Q)
-    - U(previous_state, Q)
-    + C(q0, Q)
+L_actual = U(previous_state, Q) - U(next_state, Q)
+L_reference = min over 21 actions (
+    U(previous_state, Q) - U(ghost_insert(previous_state, q0, action), Q)
 )
+r_t = reward_scale * (L_reference - L_actual)
 ```
 
-`U` 是未来水果的加权可投放面积，`C` 是当前水果进入场地必然产生的
-标准空间占用补偿。奖励内部不乘 DQN 的 `gamma`；`gamma` 仅用于 TD target。
+幽灵投放只把 `q0` 放到解析的首次接触点并作为圆形障碍，不执行真实物理、合成或滚动。
+因此当前指标认为最好的普通无合成投放约为0，其他普通投放为负；真实物理或合成后的结果
+若优于普通参考则为正。奖励内部不乘 DQN 的 `gamma`；`gamma` 仅用于 TD target。
+
+旧 `spatial_v2` 仍保留用于复现实验，公式为
+`U(next)-U(previous)+C_empty_average(q0,Q)`，但不再作为默认训练奖励。
 
 终局的 `U(next_state,Q)` 强制为 0。`settle_timeout` 不是终局，按当前
 决策边界状态正常计算并继续 bootstrap。原始游戏得分、合成次数和最高等级
@@ -56,7 +60,7 @@ a_f = A_f / A_f_empty
 U(s,Q) = 0.5*a_q1(s) + 0.3*a_q2(s) + 0.2*a_q3(s)
 ```
 
-## 3. 队列对齐和补偿表
+## 3. 队列对齐和状态相关参考
 
 一次投放的前后状态始终比较同一组水果：
 
@@ -67,39 +71,42 @@ U(s,Q) = 0.5*a_q1(s) + 0.3*a_q2(s) + 0.2*a_q3(s)
 
 新随机生成的末尾 `q3` 不参与当前奖励。
 
-补偿表 `B[drop_level,future_level]` 只包含自然生成的1～5级水果，共25个组合。
-每个值表示在空场中把 `drop_level` 水果放在地面后，对 `future_level`
-归一化可投放面积造成的标准损失。遍历被投放水果的21个合法横坐标并取平均，
-因此补偿只依赖两个等级，不依赖当前动作。
+V2.1直接复用当前状态的 `q0～q3` 21列分析。对21个 `q0` 首次落点同时插入幽灵圆，
+张量化计算它对 `q1～q3` 各21列的遮挡，再对三个队列位加权。所有候选动作取最小损失：
 
 ```text
-C(q0,Q) = 0.5*B[q0,q1] + 0.3*B[q0,q2] + 0.2*B[q0,q3]
+L_reference = min_a (0.5*loss(q1,a) + 0.3*loss(q2,a) + 0.2*loss(q3,a))
 ```
+
+这里的最小值必须来自同一个动作，不能分别取三个队列位的最小值再相加。空场reset使用
+等价的预计算动作表恢复缓存，不重新运行全场几何。旧版21动作平均补偿表只供
+`spatial_v2` 复现使用。
 
 ## 4. 性能边界
 
 - 几何计算必须使用定长 GPU Tensor，禁止每环境 Python 循环、CPU 状态分析或逐步同步。
 - 同一决策状态的面积结果要给当前奖励和下一步前态共用，不重复分析前后状态。
-- 训练时只记录势能、原始变化、补偿、总奖励和正负比例等标量；不为全部 transition 保存21列明细。
+- 训练时只记录势能、原始变化、参考损失、总奖励和正负比例等标量；不为全部 transition 保存21列明细。
 - 相对纯分数基线的端到端吞吐下降目标不超过5%；超过8%不得进入正式训练。
 - 云端自动标定选出环境数和 batch 后，会用相同种子成对运行 `score_v1` 与
-  `spatial_v2`；`tools/compare_reward_throughput.py` 生成独立报告，超过8%直接阻止训练。
+  指定的空间奖励版本；`tools/compare_reward_throughput.py` 生成独立报告，超过8%直接阻止训练。
 
 ## 5. 可视化契约
 
 评估对局和自定义场景可输出完整诊断：对齐后的三个水果、投放前后的
-21列深度、归一化面积、各队列位的原始变化与补偿、加权势能和最终奖励。
+21列深度、归一化面积、各队列位的原始变化与参考损失、加权势能和最终奖励。
 前端只消费后端结果，不在 JavaScript 中重写奖励公式。
 
 服务入口为 `tools/open_scenario_lab.py --serve`。场景实验室使用持续实时物理，
 评估时只复制按下按钮时的状态快照，不会暂停或替换主画布。浏览器可切换21个动作和 q1～q3，
-查看势能、空间变化、补偿、终局有效面积与21列增减覆盖层。
+查看势能、空间变化、最佳无合成参考损失、参考动作、终局有效面积与21列增减覆盖层。
 
 ## 6. 实现位置
 
-- `src/daxigua/simulator/spatial_reward.py`：定长几何、补偿表、缓存热路径和诊断；
+- `src/daxigua/simulator/spatial_reward.py`：定长几何、幽灵参考、旧补偿表、缓存热路径和诊断；
 - `src/daxigua/rl/trainer.py`：Reward V1/V2 显式选择、缓存重置和标量监控；
-- `configs/gnn_dqn_reward_v2.toml`：Reward V2 正式训练配置；
+- `configs/gnn_dqn_reward_v2.toml`：Reward V2首轮复现配置；
+- `configs/gnn_dqn_reward_v2_1.toml`：Reward V2.1正式训练配置；
 - `src/daxigua/simulator/scenario_lab_service.py`：21动作真实物理评估和JSON诊断；
 - `src/daxigua/simulator/scenario_lab_live.py`：持久化单环境物理循环、帧边界命令队列和实时状态发布；
 - `tools/compare_reward_throughput.py`：5%警告、8%阻断的成对吞吐门禁。

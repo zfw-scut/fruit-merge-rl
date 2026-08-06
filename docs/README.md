@@ -12,7 +12,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model/MODEL_DESIGN_STATUS_OVERVIEW.md`：新模型组件、节点、边、输出、弃用项、设计状态和实现基础总览；
 - `model/GNN_DQN_BASELINE.md`：第一版 GNN-DQN 基线的模型范围、1-step Double DQN、纯分数奖励和排除项；
 - `model/GNN_DQN_TRAINING_SYSTEM.md`：30 FPS 独占训练、30/120 FPS 隔离评估、GPU Replay、性能标定、动态扩容、实时面板和云端归档规格；
-- `model/REWARD_V2_ACCESSIBLE_SPACE.md`：纯可投放空间奖励、21列GPU几何、队列对齐、水果空间补偿与可视化契约；
+- `model/REWARD_V2_ACCESSIBLE_SPACE.md`：纯可投放空间奖励、21列GPU几何、队列对齐、状态相关无合成参考与可视化契约；
 - `model/LOCAL_MODEL_VIEWER.md`：checkpoint 本地加载、120 FPS greedy 游玩、逐帧浏览器页面和 Q 值展示；
 - `model_evaluations/README.md`：当前模型评估知识库入口、证据标签、阅读顺序和每轮更新要求；
 - `model_evaluations/COMPARISON_MATRIX.md`：分数基线与 Reward V2 的30/120 FPS效果、性能和原因假设对比；
@@ -48,6 +48,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/28_完善默认远程推送规则_2026_08_07.md`：规定提交后默认普通推送及其安全边界。
 - `codex/29_统一Reward_V2分支历史_2026_08_07.md`：归档废弃场景实验室，统一正式主线并固定首轮模型标签。
 - `codex/30_建立模型评估知识库_2026_08_07.md`：集中记录各代模型效果、不足、原因假设和后续反证实验。
+- `codex/31_实现状态相关无合成参考奖励_2026_08_07.md`：实现Reward V2.1幽灵投放参考、训练缓存、监控和场景诊断。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的

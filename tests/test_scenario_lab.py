@@ -371,10 +371,17 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             'fruits': [],
         }, mode='probe')
 
-        self.assertEqual('spatial_v2', payload['reward_version'])
+        self.assertEqual(3, payload['format_version'])
+        self.assertEqual('spatial_v2_1', payload['reward_version'])
         self.assertEqual(21, len(payload['actions']))
         self.assertEqual(6, payload['selected_action'])
         self.assertEqual(3, len(payload['actions'][6]['space_slots']))
+        self.assertIn('reference_loss', payload['actions'][6])
+        self.assertIn('reference_action', payload['actions'][6])
+        self.assertNotIn('compensation', payload['actions'][6])
+        self.assertLessEqual(
+            max(action['reward'] for action in payload['actions']), 1e-6
+        )
         self.assertTrue(payload['actions'][6]['result_fruits'])
 
 

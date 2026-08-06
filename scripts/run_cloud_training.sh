@@ -6,7 +6,7 @@ cd "$project_dir"
 export PYTHONPATH="$project_dir/src"
 
 python tools/preflight_training.py \
-  --config configs/gnn_dqn_reward_v2.toml \
+  --config configs/gnn_dqn_reward_v2_1.toml \
   --output runs/preflight/gnn_dqn.json
 
 python tools/benchmark_training_pipeline.py \
@@ -17,6 +17,6 @@ python tools/compare_reward_throughput.py \
   --output runs/autotune/reward_overhead.json
 
 python tools/run_autotuned_training.py \
-  --config configs/gnn_dqn_reward_v2.toml \
+  --config configs/gnn_dqn_reward_v2_1.toml \
   --autotune-report runs/autotune/training_pipeline.json \
   "$@"

@@ -257,7 +257,7 @@ const groups={
   ['spatial_previous_potential','投放前空间势能','Space Before',(v)=>decimal(v,4)],
   ['spatial_next_potential','投放后空间势能','Space After',(v)=>decimal(v,4)],
   ['spatial_raw_delta','原始空间变化','Raw Space Delta',(v)=>decimal(v,5)],
-  ['spatial_compensation','水果占用补偿','Fruit Compensation',(v)=>decimal(v,5)],
+  ['spatial_reference_loss','无合成参考损失','No-merge Reference',(v)=>decimal(v,5)],
   ['spatial_positive_rate','正空间奖励比例','Positive Rate',(v)=>ratioPercent(v)],
   ['mean_q','平均 Q 值','Mean Q',(v)=>decimal(v,4)],['mean_target','平均 TD 目标','TD Target',(v)=>decimal(v,4)],
   ['mean_abs_td_error','平均绝对 TD 误差','Abs TD Error',(v)=>decimal(v,4)],['grad_norm','梯度范数','Grad Norm',(v)=>decimal(v,3)],

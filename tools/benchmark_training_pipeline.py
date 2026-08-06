@@ -39,8 +39,8 @@ def parse_args():
     parser.add_argument('--fp32', action='store_true')
     parser.add_argument(
         '--reward-kind',
-        choices=('score_v1', 'spatial_v2'),
-        default='spatial_v2',
+        choices=('score_v1', 'spatial_v2', 'spatial_v2_1'),
+        default='spatial_v2_1',
     )
     parser.add_argument('--reward-scale', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=20260806)

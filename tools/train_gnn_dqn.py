@@ -22,7 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--config', type=Path,
-        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2.toml',
+        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2_1.toml',
     )
     parser.add_argument('--run-dir')
     parser.add_argument('--device')
@@ -40,6 +40,7 @@ def parse_args():
     parser.add_argument('--disable-curve-snapshots', action='store_true')
     parser.add_argument('--disable-autoscale', action='store_true')
     parser.add_argument('--compile-model', action='store_true')
+    parser.add_argument('--disable-compile', action='store_true')
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--skip-final-evaluation', action='store_true')
     parser.add_argument(
@@ -50,6 +51,10 @@ def parse_args():
 
 
 def resolve_config(args):
+    if args.compile_model and args.disable_compile:
+        raise ValueError(
+            '--compile-model and --disable-compile cannot be used together'
+        )
     config = TrainingConfig.from_toml(args.config)
     replay = replace(
         config.replay,
@@ -93,7 +98,11 @@ def resolve_config(args):
     )
     dqn = replace(
         config.dqn,
-        compile_model=(config.dqn.compile_model or args.compile_model),
+        compile_model=(
+            False
+            if args.disable_compile
+            else config.dqn.compile_model or args.compile_model
+        ),
     )
     resolved = replace(
         config,

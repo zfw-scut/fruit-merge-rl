@@ -21,7 +21,7 @@ class ScenarioLabServer:
             live_session=None,
             host='127.0.0.1',
             port=8769,
-            title='合成大西瓜 · Reward V2场景实验室'):
+            title='合成大西瓜 · Reward V2.1场景实验室'):
         self.evaluator = evaluator
         self.model_evaluator = model_evaluator
         self.model_controller = model_controller
@@ -61,7 +61,7 @@ class ScenarioLabServer:
                     )
                     self._json(200, {
                         'ready': True,
-                        'reward_version': 'spatial_v2',
+                        'reward_version': 'spatial_v2_1',
                         'device': str(owner.evaluator.device),
                         'live_physics': True,
                         'model_available': model_identity is not None,

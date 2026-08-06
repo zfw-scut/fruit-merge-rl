@@ -163,9 +163,14 @@ class BaselineTrainer:
                 reward_config=SpatialRewardConfig(
                     queue_weights=config.reward.queue_weights,
                     reward_scale=config.reward.reward_scale,
+                    reference_mode=(
+                        'best_no_merge'
+                        if config.reward.kind == 'spatial_v2_1'
+                        else 'empty_average'
+                    ),
                 ),
             )
-            if config.reward.kind == 'spatial_v2'
+            if config.reward.kind in ('spatial_v2', 'spatial_v2_1')
             else None
         )
         self.active_envs = config.active_envs
@@ -277,9 +282,9 @@ class BaselineTrainer:
 
     def _reset_finished(self, finished):
         if bool(finished.any().item()):
+            observation = self.simulator.reset(finished)
             if self.reward_computer is not None:
-                self.reward_computer.reset_rows(finished)
-            self.simulator.reset(finished)
+                self.reward_computer.reset_rows(finished, observation)
 
     def _initialize_reward(self):
         if self.reward_computer is not None:
@@ -884,8 +889,8 @@ class BaselineTrainer:
         self.dashboard.event(
             'training_started',
             (
-                'Reward V2 30 FPS GNN-DQN 训练启动'
-                if self.config.reward.kind == 'spatial_v2'
+                '空间奖励30 FPS GNN-DQN训练启动'
+                if self.config.reward.kind in ('spatial_v2', 'spatial_v2_1')
                 else '纯分数基线 30 FPS GNN-DQN 训练启动'
             ),
             reward_kind=self.config.reward.kind,

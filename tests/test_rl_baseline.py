@@ -186,7 +186,7 @@ class ReplayAndLearnerTest(unittest.TestCase):
 class RewardTrainingConfigTest(unittest.TestCase):
     def test_reward_modes_are_explicit_and_validate_weights(self):
         self.assertEqual(RewardConfig(kind='score_v1').kind, 'score_v1')
-        self.assertEqual(RewardConfig().kind, 'spatial_v2')
+        self.assertEqual(RewardConfig().kind, 'spatial_v2_1')
         with self.assertRaisesRegex(ValueError, 'sum to one'):
             RewardConfig(queue_weights=(0.5, 0.5, 0.5))
 
@@ -198,10 +198,15 @@ class RewardTrainingConfigTest(unittest.TestCase):
         reward_v2 = TrainingConfig.from_toml(
             project_root / 'configs' / 'gnn_dqn_reward_v2.toml'
         )
+        reward_v2_1 = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_reward_v2_1.toml'
+        )
 
         self.assertEqual(baseline.reward.kind, 'score_v1')
         self.assertEqual(reward_v2.reward.kind, 'spatial_v2')
+        self.assertEqual(reward_v2_1.reward.kind, 'spatial_v2_1')
         self.assertEqual(reward_v2.reward.queue_weights, (0.5, 0.3, 0.2))
+        self.assertEqual(reward_v2_1.replay.batch_size, 1792)
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):

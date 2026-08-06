@@ -39,13 +39,18 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--config', type=Path,
-        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2.toml',
+        default=PROJECT_ROOT / 'configs' / 'gnn_dqn_reward_v2_1.toml',
     )
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--smoke-envs', type=int, default=32)
     parser.add_argument('--smoke-batch-size', type=int, default=16)
     parser.add_argument('--evaluation-episodes', type=int, default=8)
     parser.add_argument('--evaluation-max-drops', type=int, default=16)
+    parser.add_argument(
+        '--disable-compile',
+        action='store_true',
+        help='本地Windows缺少Triton时仅关闭模型编译，不改变正式配置',
+    )
     parser.add_argument(
         '--output', type=Path,
         default=PROJECT_ROOT / 'runs' / 'preflight' / 'gnn_dqn.json',
@@ -76,9 +81,14 @@ def run_preflight(args):
             reward_config=SpatialRewardConfig(
                 queue_weights=config.reward.queue_weights,
                 reward_scale=config.reward.reward_scale,
+                reference_mode=(
+                    'best_no_merge'
+                    if config.reward.kind == 'spatial_v2_1'
+                    else 'empty_average'
+                ),
             ),
         )
-        if config.reward.kind == 'spatial_v2'
+        if config.reward.kind in ('spatial_v2', 'spatial_v2_1')
         else None
     )
     model = BaselineGnnDqn(config.model).to(device)
@@ -88,6 +98,9 @@ def run_preflight(args):
             config.dqn,
             target_update_interval=1,
             use_bfloat16=(config.dqn.use_bfloat16 and device.type == 'cuda'),
+            compile_model=(
+                config.dqn.compile_model and not args.disable_compile
+            ),
         ),
     )
     model = learner.online_model
