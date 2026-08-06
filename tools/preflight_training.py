@@ -21,6 +21,7 @@ import torch
 
 from daxigua.rl.checkpoint import load_checkpoint, save_checkpoint_atomic
 from daxigua.rl.config import TrainingConfig
+from daxigua.rl.curves import render_training_curve_snapshot
 from daxigua.rl.evaluation import evaluate_policy
 from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
@@ -136,6 +137,28 @@ def run_preflight(args):
     if loaded['progress']['updates'] != 1:
         raise RuntimeError('checkpoint round-trip lost progress')
 
+    curve_snapshot = None
+    if (
+            config.dashboard.enabled
+            and config.dashboard.curve_snapshot_enabled):
+        (smoke_dir / 'metrics.jsonl').write_text(
+            json.dumps({
+                'transitions': args.smoke_envs,
+                'training_rolling_mean_score': 100.0,
+                'training_window_mean_score': 100.0,
+                'training_window_max_score': 120.0,
+                'loss': float(learner_metrics['loss'].item()),
+                'mean_abs_td_error': 0.1,
+                'env_steps_per_second': 1.0,
+                'learner_samples_per_second': 1.0,
+            }) + '\n',
+            encoding='utf-8',
+        )
+        curve_snapshot = render_training_curve_snapshot(smoke_dir)
+        curve_path = smoke_dir / 'plots' / 'training_curves.png'
+        if curve_path.read_bytes()[:8] != b'\x89PNG\r\n\x1a\n':
+            raise RuntimeError('curve snapshot PNG validation failed')
+
     evaluations = {}
     for physics_fps in (30, 120):
         summary, _details = evaluate_policy(
@@ -172,6 +195,7 @@ def run_preflight(args):
         'peak_cuda_memory_mb': peak_memory,
         'evaluations': evaluations,
         'checkpoint_round_trip': True,
+        'curve_snapshot': curve_snapshot,
         'training_physics_fps': 30,
         'evaluation_physics_fps': [30, 120],
         'accurate_replay_writes': 0,

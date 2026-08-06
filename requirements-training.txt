@@ -3,3 +3,4 @@
 # 独立训练面板与低开销服务器资源采样
 psutil>=5.9
 nvidia-ml-py>=12.0
+matplotlib>=3.8

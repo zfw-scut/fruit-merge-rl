@@ -32,6 +32,10 @@ def parse_args():
     parser.add_argument('--run-dir')
     parser.add_argument('--max-wall-hours', type=float)
     parser.add_argument('--total-transitions', type=int)
+    parser.add_argument('--dashboard-port', type=int)
+    parser.add_argument('--disable-dashboard', action='store_true')
+    parser.add_argument('--curve-snapshot-interval', type=float)
+    parser.add_argument('--disable-curve-snapshots', action='store_true')
     return parser.parse_args()
 
 
@@ -72,6 +76,24 @@ def main():
             base.dqn,
             compile_model=bool(report['selected_compile_model']),
             use_bfloat16=bool(report['selected_use_bfloat16']),
+        ),
+        dashboard=replace(
+            base.dashboard,
+            enabled=(base.dashboard.enabled and not args.disable_dashboard),
+            port=(
+                args.dashboard_port
+                if args.dashboard_port is not None
+                else base.dashboard.port
+            ),
+            curve_snapshot_enabled=(
+                base.dashboard.curve_snapshot_enabled
+                and not args.disable_curve_snapshots
+            ),
+            curve_snapshot_interval_seconds=(
+                args.curve_snapshot_interval
+                if args.curve_snapshot_interval is not None
+                else base.dashboard.curve_snapshot_interval_seconds
+            ),
         ),
     )
     trainer = BaselineTrainer(config, project_root=PROJECT_ROOT)

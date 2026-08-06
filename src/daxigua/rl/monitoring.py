@@ -13,6 +13,12 @@ import threading
 import time
 import math
 
+from .curves import (
+    CURVE_FILENAME,
+    existing_curve_metadata,
+    render_training_curve_snapshot,
+)
+
 
 _DASHBOARD_HTML = r'''<!doctype html>
 <html lang="zh-CN">
@@ -149,7 +155,14 @@ canvas{background:#fff}.action-summary{margin:0 2px 9px;color:#5a5a5a}
 .event-kind{color:#005fb8}.statusbar{gap:7px;padding:8px 14px 12px;background:rgba(247,248,250,.7)}
 .status-cell{min-height:27px;padding:6px 10px;border:1px solid rgba(0,0,0,.055);border-radius:6px;
   background:rgba(255,255,255,.62);box-shadow:none;color:#555}
+.snapshot-layout{display:grid;grid-template-columns:minmax(0,1fr) 230px;gap:14px;align-items:start}
+.snapshot-frame{min-height:280px;display:grid;place-items:center;overflow:hidden;border:1px solid rgba(0,0,0,.065);
+  border-radius:9px;background:rgba(255,255,255,.94)}
+.snapshot-frame img{display:block;width:100%;height:auto;object-fit:contain}
+.snapshot-info{padding:13px;border:1px solid rgba(0,0,0,.055);border-radius:9px;background:rgba(247,249,251,.86);color:#555;line-height:1.7}
+.snapshot-info strong{display:block;margin-bottom:5px;color:#202020;font-size:14px}.snapshot-info .snapshot-error{color:var(--bad)}
 @media(max-width:700px){body{padding:0}.window{border-radius:0}.titlebar{height:54px;padding:0 14px}.menubar{padding-left:10px;overflow-x:auto}.menubar span{white-space:nowrap}.toolbar{padding:8px 14px}main{padding:9px}}
+@media(max-width:880px){.snapshot-layout{grid-template-columns:1fr}.snapshot-info{order:-1}}
 </style>
 </head>
 <body>
@@ -185,6 +198,13 @@ canvas{background:#fff}.action-summary{margin:0 2px 9px;color:#5a5a5a}
       <fieldset class="small-chart"><legend>优化曲线 / Optimization</legend><div class="chart-head"><strong>损失与 TD 误差</strong><span class="chart-legend"><span class="legend-item"><i class="legend-line" style="--line-color:#0067c0"></i>Huber 损失</span><span class="legend-item"><i class="legend-line" style="--line-color:#d13438"></i>TD 误差</span></span></div><div class="canvas-frame"><canvas id="loss-chart" aria-label="损失变化曲线"></canvas></div></fieldset>
       <fieldset class="small-chart"><legend>性能曲线 / Performance</legend><div class="chart-head"><strong>投放与学习吞吐</strong><span class="chart-legend"><span class="legend-item"><i class="legend-line" style="--line-color:#0067c0"></i>投放</span><span class="legend-item"><i class="legend-line" style="--line-color:#107c10"></i>学习样本</span></span></div><div class="canvas-frame"><canvas id="speed-chart" aria-label="训练吞吐变化曲线"></canvas></div></fieldset>
     </section>
+
+    <fieldset class="snapshot-panel"><legend>定期保存曲线 / Saved Curve Snapshot</legend>
+      <div class="snapshot-layout">
+        <div class="snapshot-frame"><img id="curve-snapshot" alt="训练曲线定期保存图片" hidden></div>
+        <div id="curve-snapshot-info" class="snapshot-info"><strong>等待第一张曲线快照</strong>训练指标开始落盘后，后台会自动生成并刷新图片。</div>
+      </div>
+    </fieldset>
 
     <fieldset class="action-panel"><legend>投放动作分布 / Action Distribution</legend><div id="action-summary" class="action-summary">等待动作统计…</div><div id="actions" class="actions"></div></fieldset>
     <fieldset><legend>最近事件与告警 / Events</legend><div id="events" class="events"><div class="empty">等待训练事件…</div></div></fieldset>
@@ -245,7 +265,8 @@ function renderGroup(id,definitions,data){$(id).innerHTML=definitions.map(([key,
 function renderActions(values){const list=Array.isArray(values)?values.map(v=>finite(v)??0):[];if(!list.length){$('actions').innerHTML='<div class="empty">等待动作统计…</div>';return}const max=Math.max(...list,1e-9),sum=list.reduce((a,b)=>a+b,0);let best=0;list.forEach((v,i)=>{if(v>list[best])best=i});const bestRatio=sum>1.01?list[best]/sum:list[best];$('action-summary').textContent=`当前最常选择：动作 A${best}（${percent(bestRatio*100,2)}）；分布来自最近一个统计窗口`;$('actions').innerHTML=list.map((v,i)=>{const p=sum>1.01?v/sum:v;return `<div class="action" title="动作 A${i}：${percent(p*100,2)}"><span class="action-value">${decimal(p*100,1)}%</span><span class="action-bar-shell"><i class="action-bar" style="height:${Math.max(1,v/max*100)}%"></i></span><span class="action-label">A${i}</span></div>`}).join('')}
 function drawChart(id,history,series,formatter){const canvas=$(id),rect=canvas.getBoundingClientRect(),ratio=Math.min(devicePixelRatio||1,2);if(!rect.width||!rect.height)return;canvas.width=Math.round(rect.width*ratio);canvas.height=Math.round(rect.height*ratio);const c=canvas.getContext('2d');c.scale(ratio,ratio);const w=rect.width,h=rect.height;c.fillStyle='#fff';c.fillRect(0,0,w,h);const available=series.map(s=>({...s,points:history.map((row,index)=>({index,value:finite(row[s.key])})).filter(p=>p.value!==null)})).filter(s=>s.points.length);if(!available.length){c.fillStyle='#666';c.font='12px Tahoma';c.textAlign='center';c.fillText('等待足够的训练数据…',w/2,h/2);return}const all=available.flatMap(s=>s.points.map(p=>p.value));let min=Math.min(...all),max=Math.max(...all);if(min===max){min-=Math.max(1,Math.abs(min)*.05);max+=Math.max(1,Math.abs(max)*.05)}else{const pad=(max-min)*.1;min-=pad;max+=pad}const box={l:55,r:12,t:27,b:28},pw=w-box.l-box.r,ph=h-box.t-box.b;c.font='10px Tahoma';c.lineWidth=1;for(let i=0;i<=4;i++){const y=box.t+ph*i/4,value=max-(max-min)*i/4;c.strokeStyle='#d0d0d0';c.beginPath();c.moveTo(box.l,y);c.lineTo(w-box.r,y);c.stroke();c.fillStyle='#444';c.textAlign='right';c.textBaseline='middle';c.fillText(formatter(value),box.l-6,y)}const x=index=>box.l+(history.length<=1?0:index/(history.length-1))*pw,y=value=>box.t+ph-(value-min)/(max-min)*ph;available.forEach(s=>{c.strokeStyle=s.color;c.lineWidth=2;c.beginPath();s.points.forEach((p,i)=>{i?c.lineTo(x(p.index),y(p.value)):c.moveTo(x(p.index),y(p.value))});c.stroke();const last=s.points[s.points.length-1];c.fillStyle=s.color;c.fillRect(x(last.index)-2,y(last.value)-2,5,5)});c.fillStyle='#444';c.textBaseline='alphabetic';c.textAlign='left';const firstTransition=history.find(r=>finite(r.transitions)!==null)?.transitions;c.fillText(short(firstTransition),box.l,h-7);c.textAlign='right';const lastTransition=[...history].reverse().find(r=>finite(r.transitions)!==null)?.transitions;c.fillText(short(lastTransition),w-box.r,h-7)}
 function renderEvents(events){const rows=(events||[]).slice(-12).reverse();$('events').innerHTML=rows.length?rows.map(event=>`<div class="event"><span class="event-kind">${escapeHtml(eventNames[event.kind]||event.kind||'训练事件')}</span><span>${escapeHtml(event.message||'')}</span><time class="event-time">${new Date((event.monitor_timestamp||0)*1000).toLocaleTimeString('zh-CN',{hour12:false})}</time></div>`).join(''):'<div class="empty">等待训练事件…</div>'}
-async function tick(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const state=await response.json(),data={...(state.training||{}),...(state.resources||{})},history=(state.history||[]).slice(-900);renderGroup('progress',groups.progress,data);renderGroup('throughput',groups.throughput,data);renderGroup('resources',groups.resources,data);renderGroup('learning',groups.learning,data);renderActions(data.action_distribution);renderEvents(state.events);const fraction=Math.max(0,Math.min(1,finite(data.progress_fraction)??((finite(data.transitions)??0)/Math.max(1,finite(data.total_transitions)??1))));$('progress-fill').style.width=`${fraction*100}%`;$('progress-text').textContent=`${decimal(fraction*100,2)}% · ${int(data.transitions)} / ${int(data.total_transitions)}`;const age=Date.now()/1000-(finite(state.timestamp)??0),lamp=$('status-lamp');lamp.className='lamp '+(age<5?'live':age<30?'stale':'error');$('connection').textContent=age<5?'实时连接正常':age<30?'数据更新延迟':'训练数据已失联';$('phase-text').textContent=`阶段：${phaseNames[data.phase]||data.phase||'等待数据'}`;$('updated-at').textContent=`最后更新：${new Date((state.timestamp||0)*1000).toLocaleString('zh-CN',{hour12:false})}`;$('status-message').textContent=`投放 ${rate(data.env_steps_per_second)} · 更新 ${rate(data.updates_per_second)} · 面板队列丢弃 ${int(data.dropped_messages||0)} 条`;$('run-time').textContent=`运行时间：${duration(data.uptime_seconds)}`;drawChart('score-chart',history,[{key:'training_window_mean_score',color:'#0067c0'},{key:'training_window_max_score',color:'#d13438'},{key:'training_rolling_mean_score',color:'#107c10'},{key:'last_fast_eval_score',color:'#0099bc'},{key:'last_accurate_eval_score',color:'#8764b8'}],v=>short(v));drawChart('loss-chart',history,[{key:'loss',color:'#0067c0'},{key:'mean_abs_td_error',color:'#d13438'}],v=>decimal(v,3));drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'}],v=>short(v))}catch(error){$('status-lamp').className='lamp error';$('connection').textContent='无法读取训练状态';$('status-message').textContent=String(error)}finally{setTimeout(tick,1000)}}tick();
+function renderCurveSnapshot(plot){const image=$('curve-snapshot'),info=$('curve-snapshot-info');if(!plot){image.hidden=true;info.innerHTML='<strong>等待第一张曲线快照</strong>训练指标开始落盘后，后台会自动生成并刷新图片。';return}if(plot.error){info.innerHTML=`<strong>曲线快照暂不可用</strong><span class="snapshot-error">${escapeHtml(plot.error)}</span>`;return}const version=finite(plot.modified_at)??finite(plot.generated_at)??0,url=`${plot.url||'/plots/training_curves.png'}?v=${encodeURIComponent(version)}`;if(image.dataset.version!==String(version)){image.dataset.version=String(version);image.onload=()=>{image.hidden=false};image.src=url}const generated=finite(plot.generated_at);info.innerHTML=`<strong>已自动保存并同步到面板</strong>更新时间：${generated===null?'—':new Date(generated*1000).toLocaleString('zh-CN',{hour12:false})}<br>覆盖投放：${int(plot.source_last_transition)}<br>训练指标点：${int(plot.source_metric_rows)}<br>评估记录：${int(plot.source_evaluation_rows)}<br>图片大小：${int(plot.size_bytes)} 字节`}
+async function tick(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const state=await response.json(),data={...(state.training||{}),...(state.resources||{})},history=(state.history||[]).slice(-900);renderGroup('progress',groups.progress,data);renderGroup('throughput',groups.throughput,data);renderGroup('resources',groups.resources,data);renderGroup('learning',groups.learning,data);renderActions(data.action_distribution);renderEvents(state.events);renderCurveSnapshot((state.plots||{}).training_curves);const fraction=Math.max(0,Math.min(1,finite(data.progress_fraction)??((finite(data.transitions)??0)/Math.max(1,finite(data.total_transitions)??1))));$('progress-fill').style.width=`${fraction*100}%`;$('progress-text').textContent=`${decimal(fraction*100,2)}% · ${int(data.transitions)} / ${int(data.total_transitions)}`;const age=Date.now()/1000-(finite(state.timestamp)??0),lamp=$('status-lamp');lamp.className='lamp '+(age<5?'live':age<30?'stale':'error');$('connection').textContent=age<5?'实时连接正常':age<30?'数据更新延迟':'训练数据已失联';$('phase-text').textContent=`阶段：${phaseNames[data.phase]||data.phase||'等待数据'}`;$('updated-at').textContent=`最后更新：${new Date((state.timestamp||0)*1000).toLocaleString('zh-CN',{hour12:false})}`;$('status-message').textContent=`投放 ${rate(data.env_steps_per_second)} · 更新 ${rate(data.updates_per_second)} · 面板队列丢弃 ${int(data.dropped_messages||0)} 条`;$('run-time').textContent=`运行时间：${duration(data.uptime_seconds)}`;drawChart('score-chart',history,[{key:'training_window_mean_score',color:'#0067c0'},{key:'training_window_max_score',color:'#d13438'},{key:'training_rolling_mean_score',color:'#107c10'},{key:'last_fast_eval_score',color:'#0099bc'},{key:'last_accurate_eval_score',color:'#8764b8'}],v=>short(v));drawChart('loss-chart',history,[{key:'loss',color:'#0067c0'},{key:'mean_abs_td_error',color:'#d13438'}],v=>decimal(v,3));drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'}],v=>short(v))}catch(error){$('status-lamp').className='lamp error';$('connection').textContent='无法读取训练状态';$('status-message').textContent=String(error)}finally{setTimeout(tick,1000)}}tick();
 </script>
 </body>
 </html>'''
@@ -337,6 +358,7 @@ class _DashboardState:
         self.lock = threading.Lock()
         self.training = {}
         self.resources = {}
+        self.plots = {}
         self.events = deque(maxlen=100)
         self.history = deque(maxlen=history_size)
         self.timestamp = time.time()
@@ -383,12 +405,20 @@ class _DashboardState:
         with self.lock:
             self.events.append(dict(payload))
 
+    def update_plot(self, name, payload):
+        with self.lock:
+            self.plots[str(name)] = dict(payload)
+
     def snapshot(self):
         with self.lock:
             return {
                 'timestamp': self.timestamp,
                 'training': dict(self.training),
                 'resources': dict(self.resources),
+                'plots': {
+                    name: dict(payload)
+                    for name, payload in self.plots.items()
+                },
                 'events': list(self.events),
                 'history': list(self.history),
             }
@@ -400,13 +430,38 @@ def _dashboard_process_main(
         port,
         resource_interval,
         history_size,
+        curve_snapshot_enabled,
+        curve_snapshot_interval,
+        plot_done_event,
         run_dir,
         target_pid):
     state = _DashboardState(history_size)
     stop_event = threading.Event()
     sampler = ResourceSampler(target_pid)
-    output_path = Path(run_dir) / 'monitoring.jsonl'
+    run_dir = Path(run_dir)
+    output_path = run_dir / 'monitoring.jsonl'
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    render_lock = threading.Lock()
+    previous_plot = existing_curve_metadata(run_dir)
+    if previous_plot is not None:
+        state.update_plot('training_curves', previous_plot)
+
+    def render_curves_once():
+        if not curve_snapshot_enabled:
+            return None
+        with render_lock:
+            try:
+                metadata = render_training_curve_snapshot(run_dir)
+            except Exception as error:
+                fallback = existing_curve_metadata(run_dir) or {}
+                state.update_plot('training_curves', {
+                    **fallback,
+                    'error': f'{type(error).__name__}: {error}',
+                    'last_attempt_at': time.time(),
+                })
+                return None
+            state.update_plot('training_curves', metadata)
+            return metadata
 
     def consume():
         with output_path.open('a', encoding='utf-8', buffering=1) as log:
@@ -419,6 +474,10 @@ def _dashboard_process_main(
                     stop_event.set()
                     break
                 kind = payload.pop('_kind', 'training')
+                if kind == 'render_curves':
+                    render_curves_once()
+                    plot_done_event.set()
+                    continue
                 payload['monitor_timestamp'] = time.time()
                 if kind == 'event':
                     state.add_event(payload)
@@ -429,7 +488,7 @@ def _dashboard_process_main(
                 ) + '\n')
 
     def collect_resources():
-        resource_path = Path(run_dir) / 'resources.jsonl'
+        resource_path = run_dir / 'resources.jsonl'
         with resource_path.open('a', encoding='utf-8', buffering=1) as log:
             while not stop_event.wait(resource_interval):
                 payload = sampler.sample()
@@ -439,18 +498,52 @@ def _dashboard_process_main(
                     ensure_ascii=False,
                 ) + '\n')
 
+    def update_curve_snapshot():
+        delay = min(5.0, curve_snapshot_interval)
+        while not stop_event.is_set():
+            if stop_event.wait(delay):
+                return
+            metadata = render_curves_once()
+            delay = (
+                curve_snapshot_interval
+                if metadata is not None
+                else min(15.0, curve_snapshot_interval)
+            )
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            if self.path == '/api/status':
+            request_path = self.path.partition('?')[0]
+            if request_path == '/api/status':
                 body = json.dumps(
                     state.snapshot(), ensure_ascii=False
                 ).encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
-            elif self.path in ('/', '/index.html'):
+            elif request_path in ('/', '/index.html'):
                 body = _DASHBOARD_HTML.encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
+            elif request_path == f'/plots/{CURVE_FILENAME}':
+                plot_root = run_dir / 'plots'
+                plot_path = plot_root / CURVE_FILENAME
+                try:
+                    valid = (
+                        not plot_root.is_symlink()
+                        and plot_root.is_dir()
+                        and not plot_path.is_symlink()
+                        and plot_path.is_file()
+                        and plot_path.resolve(strict=True).parent
+                        == plot_root.resolve(strict=True)
+                    )
+                    body = plot_path.read_bytes() if valid else b'not found'
+                except OSError:
+                    body = b'not found'
+                    valid = False
+                self.send_response(200 if valid else 404)
+                self.send_header(
+                    'Content-Type', 'image/png' if valid else 'text/plain'
+                )
+                self.send_header('Cache-Control', 'no-store, max-age=0')
             else:
                 body = b'not found'
                 self.send_response(404)
@@ -464,8 +557,15 @@ def _dashboard_process_main(
 
     consumer = threading.Thread(target=consume, daemon=True)
     resource_thread = threading.Thread(target=collect_resources, daemon=True)
+    curve_thread = threading.Thread(
+        target=update_curve_snapshot,
+        name='daxigua-curve-snapshot',
+        daemon=True,
+    )
     consumer.start()
     resource_thread.start()
+    if curve_snapshot_enabled:
+        curve_thread.start()
     server = ThreadingHTTPServer((host, port), Handler)
     server.timeout = 0.5
     try:
@@ -474,6 +574,10 @@ def _dashboard_process_main(
     finally:
         stop_event.set()
         server.server_close()
+        consumer.join(2.0)
+        resource_thread.join(2.0)
+        if curve_snapshot_enabled:
+            curve_thread.join(10.0)
         sampler.close()
 
 
@@ -482,13 +586,19 @@ class DashboardPublisher:
 
     def __init__(self, config, run_dir):
         self.enabled = bool(config.enabled)
+        self.curve_snapshot_enabled = bool(
+            config.curve_snapshot_enabled
+        )
         self.process = None
         self.queue = None
+        self.plot_done_event = None
+        self._last_curve_snapshot_request = 0.0
         self.dropped_messages = 0
         if not self.enabled:
             return
         context = multiprocessing.get_context('spawn')
         self.queue = context.Queue(maxsize=128)
+        self.plot_done_event = context.Event()
         self.process = context.Process(
             target=_dashboard_process_main,
             args=(
@@ -497,6 +607,9 @@ class DashboardPublisher:
                 config.port,
                 config.resource_interval_seconds,
                 config.history_size,
+                config.curve_snapshot_enabled,
+                config.curve_snapshot_interval_seconds,
+                self.plot_done_event,
                 str(run_dir),
                 os.getpid(),
             ),
@@ -521,9 +634,37 @@ class DashboardPublisher:
             {'kind': event_kind, 'message': message, **values}, kind='event'
         )
 
+    def snapshot_curves(self, *, wait=False, timeout=30.0):
+        """请求旁路进程立即更新曲线；正式收尾时可等待原子落盘。"""
+
+        if (
+                not self.enabled
+                or not self.curve_snapshot_enabled
+                or self.queue is None
+                or self.plot_done_event is None):
+            return False
+        self.plot_done_event.clear()
+        message = {'_kind': 'render_curves'}
+        try:
+            if wait:
+                self.queue.put(message, timeout=min(1.0, timeout))
+            else:
+                self.queue.put_nowait(message)
+        except (queue.Full, OSError, ValueError):
+            self.dropped_messages += 1
+            return False
+        self._last_curve_snapshot_request = time.monotonic()
+        if not wait:
+            return True
+        return self.plot_done_event.wait(timeout)
+
     def close(self, timeout=5.0):
         if not self.enabled or self.queue is None:
             return
+        if (
+                self.curve_snapshot_enabled
+                and time.monotonic() - self._last_curve_snapshot_request > 5.0):
+            self.snapshot_curves(wait=True, timeout=30.0)
         try:
             self.queue.put_nowait(None)
         except (queue.Full, OSError, ValueError):

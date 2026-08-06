@@ -141,6 +141,20 @@ class DashboardConfig:
     publish_interval_seconds: float = 1.0
     resource_interval_seconds: float = 2.0
     history_size: int = 3600
+    curve_snapshot_enabled: bool = True
+    curve_snapshot_interval_seconds: float = 120.0
+
+    def __post_init__(self):
+        if self.publish_interval_seconds <= 0.0:
+            raise ValueError('publish_interval_seconds must be positive')
+        if self.resource_interval_seconds <= 0.0:
+            raise ValueError('resource_interval_seconds must be positive')
+        if self.history_size <= 0:
+            raise ValueError('history_size must be positive')
+        if self.curve_snapshot_interval_seconds <= 0.0:
+            raise ValueError(
+                'curve_snapshot_interval_seconds must be positive'
+            )
 
 
 @dataclass(frozen=True, slots=True)

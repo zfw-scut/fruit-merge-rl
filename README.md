@@ -46,7 +46,9 @@ python tools/run_autotuned_training.py --max-wall-hours 12
 
 也可以直接运行 `scripts/run_cloud_training.sh --max-wall-hours 12`。面板默认监听
 `127.0.0.1:8765`，应通过 SSH 端口转发访问。训练只调用 30 FPS 物理；120 FPS 只在里程碑
-和最终评估中使用，相关状态不会写入 Replay 或 loss。
+和最终评估中使用，相关状态不会写入 Replay 或 loss。面板旁路默认每 120 秒原子更新
+`<run_dir>/plots/training_curves.png`，评估完成和训练收尾时也会立即刷新；页面会自动显示
+最新图片，最终 PNG 与 `training_curves.json` 一并作为训练产物保留。
 
 快速验证完整主链：
 

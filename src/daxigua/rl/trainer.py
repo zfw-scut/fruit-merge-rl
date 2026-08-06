@@ -662,6 +662,7 @@ class BaselineTrainer:
             mean_score=summary.mean_score,
             episodes=summary.episodes,
         )
+        self.dashboard.snapshot_curves(wait=True, timeout=30.0)
         return payload
 
     @staticmethod
@@ -1007,11 +1008,15 @@ class BaselineTrainer:
             loaded = load_checkpoint(final_path, map_location='cpu')
             if int(loaded['progress']['transitions']) != self.transitions:
                 raise RuntimeError('final checkpoint round-trip validation failed')
+            self.dashboard.snapshot_curves(wait=True, timeout=30.0)
             manifest = write_artifact_manifest(
                 self.run_dir,
-                tuple(self.run_dir.rglob('*.json'))
-                + tuple(self.run_dir.rglob('*.jsonl'))
-                + tuple(self.run_dir.rglob('*.pt')),
+                tuple(
+                    path
+                    for pattern in ('*.json', '*.jsonl', '*.pt', '*.png')
+                    for path in self.run_dir.rglob(pattern)
+                    if '.mplconfig' not in path.parts
+                ),
                 metadata=self._progress(),
             )
             self.dashboard.event(

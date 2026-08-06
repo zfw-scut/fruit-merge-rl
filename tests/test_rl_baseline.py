@@ -2,6 +2,8 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import importlib.util
+import json
 import unittest
 
 import torch
@@ -16,6 +18,10 @@ from daxigua.rl.config import (
     ModelConfig,
     ReplayConfig,
     TrainingConfig,
+)
+from daxigua.rl.curves import (
+    existing_curve_metadata,
+    render_training_curve_snapshot,
 )
 from daxigua.rl.evaluation import evaluate_policy
 from daxigua.rl.learner import DqnLearner
@@ -306,7 +312,75 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('score-chart', _DASHBOARD_HTML)
         self.assertIn('Windows 11 Fluent', _DASHBOARD_HTML)
         self.assertIn('概览', _DASHBOARD_HTML)
+        self.assertIn('定期保存曲线', _DASHBOARD_HTML)
+        self.assertIn('curve-snapshot', _DASHBOARD_HTML)
         self.assertNotIn('文件(F)', _DASHBOARD_HTML)
+
+    def test_dashboard_state_exposes_curve_snapshot_metadata(self):
+        state = _DashboardState(history_size=4)
+        state.update_plot('training_curves', {
+            'url': '/plots/training_curves.png',
+            'source_last_transition': 1234,
+        })
+        plot = state.snapshot()['plots']['training_curves']
+        self.assertEqual(plot['source_last_transition'], 1234)
+
+    def test_curve_snapshot_interval_must_be_positive(self):
+        with self.assertRaisesRegex(
+                ValueError, 'curve_snapshot_interval_seconds'):
+            DashboardConfig(curve_snapshot_interval_seconds=0.0)
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec('matplotlib') is not None,
+    'matplotlib is required for curve snapshot rendering',
+)
+class CurveSnapshotTest(unittest.TestCase):
+    def test_jsonl_metrics_generate_atomic_png_and_metadata(self):
+        with TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            rows = [
+                {
+                    'transitions': transition,
+                    'training_rolling_mean_score': 1000 + index * 100,
+                    'training_window_mean_score': 1050 + index * 110,
+                    'training_window_max_score': 2000 + index * 300,
+                    'loss': 0.04 - index * 0.005,
+                    'mean_abs_td_error': 0.16 - index * 0.01,
+                    'env_steps_per_second': 4000 + index * 500,
+                    'learner_samples_per_second': 3900 + index * 500,
+                }
+                for index, transition in enumerate(
+                    (1_000_000, 2_000_000, 3_000_000)
+                )
+            ]
+            metrics_path = run_dir / 'metrics.jsonl'
+            metrics_path.write_text(
+                ''.join(json.dumps(row) + '\n' for row in rows)
+                + '{incomplete',
+                encoding='utf-8',
+            )
+            evaluation_dir = run_dir / 'evaluations'
+            evaluation_dir.mkdir()
+            (evaluation_dir / 'metrics.jsonl').write_text(
+                json.dumps({
+                    'transition': 3_000_000,
+                    'physics_fps': 120,
+                    'mean_score': 1325.0,
+                }) + '\n',
+                encoding='utf-8',
+            )
+
+            metadata = render_training_curve_snapshot(run_dir)
+            output = run_dir / 'plots' / 'training_curves.png'
+            stored = existing_curve_metadata(run_dir)
+
+            self.assertEqual(output.read_bytes()[:8], b'\x89PNG\r\n\x1a\n')
+            self.assertEqual(metadata['source_metric_rows'], 3)
+            self.assertEqual(metadata['source_evaluation_rows'], 1)
+            self.assertEqual(metadata['source_last_transition'], 3_000_000)
+            self.assertEqual(stored['url'], '/plots/training_curves.png')
+            self.assertFalse(list((run_dir / 'plots').glob('*.tmp')))
 
 
 if __name__ == '__main__':

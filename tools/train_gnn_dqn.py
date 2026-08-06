@@ -35,6 +35,8 @@ def parse_args():
     parser.add_argument('--warmup-transitions', type=int)
     parser.add_argument('--dashboard-port', type=int)
     parser.add_argument('--disable-dashboard', action='store_true')
+    parser.add_argument('--curve-snapshot-interval', type=float)
+    parser.add_argument('--disable-curve-snapshots', action='store_true')
     parser.add_argument('--disable-autoscale', action='store_true')
     parser.add_argument('--compile-model', action='store_true')
     parser.add_argument('--resume', type=Path)
@@ -73,6 +75,15 @@ def resolve_config(args):
             args.dashboard_port
             if args.dashboard_port is not None
             else config.dashboard.port
+        ),
+        curve_snapshot_enabled=(
+            config.dashboard.curve_snapshot_enabled
+            and not args.disable_curve_snapshots
+        ),
+        curve_snapshot_interval_seconds=(
+            args.curve_snapshot_interval
+            if args.curve_snapshot_interval is not None
+            else config.dashboard.curve_snapshot_interval_seconds
         ),
     )
     autoscale = replace(

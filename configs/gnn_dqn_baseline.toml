@@ -72,6 +72,8 @@ port = 8765
 publish_interval_seconds = 1.0
 resource_interval_seconds = 2.0
 history_size = 3600
+curve_snapshot_enabled = true
+curve_snapshot_interval_seconds = 120.0
 
 [autoscale]
 enabled = true
