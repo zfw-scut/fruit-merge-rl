@@ -27,19 +27,19 @@ from daxigua.core import (
 
 
 class DomainRulesTest(unittest.TestCase):
-    def test_fruit_names_follow_the_standard_level_order(self):
+    def test_fruit_names_follow_the_texture_level_order(self):
         expected = (
-            '樱桃',
-            '草莓',
             '葡萄',
-            '凸顶柑',
-            '柿子',
-            '苹果',
-            '梨',
+            '樱桃',
+            '橘子',
+            '柠檬',
+            '猕猴桃',
+            '西红柿',
             '桃子',
             '菠萝',
-            '甜瓜',
+            '椰子',
             '西瓜',
+            '大西瓜',
         )
         actual = tuple(fruit_name(level) for level in range(1, 12))
         self.assertEqual(actual, expected)

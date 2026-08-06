@@ -19,19 +19,19 @@ MAX_FRUIT_LEVEL = 11
 SPAWN_FRUIT_MIN_LEVEL = 1
 SPAWN_FRUIT_MAX_LEVEL = 5
 
-# 原版《合成大西瓜》的水果等级顺序。
+# 与 assets/fruits/01.png～11.png 一一对应的水果名称。
 FRUIT_NAMES = {
-    1: '樱桃',
-    2: '草莓',
-    3: '葡萄',
-    4: '凸顶柑',
-    5: '柿子',
-    6: '苹果',
-    7: '梨',
-    8: '桃子',
-    9: '菠萝',
-    10: '甜瓜',
-    11: '西瓜',
+    1: '葡萄',
+    2: '樱桃',
+    3: '橘子',
+    4: '柠檬',
+    5: '猕猴桃',
+    6: '西红柿',
+    7: '桃子',
+    8: '菠萝',
+    9: '椰子',
+    10: '西瓜',
+    11: '大西瓜',
 }
 
 # 每一级水果的显示半径，单位是像素。
@@ -58,7 +58,7 @@ MERGE_SCORES = {
 
 
 def fruit_name(level):
-    """返回指定水果等级的标准中文名称。"""
+    """返回指定水果等级与贴图一致的中文名称。"""
 
     return FRUIT_NAMES[level]
 
@@ -93,7 +93,7 @@ def merged_fruit_physics_radius(level):
 
 
 def merge_target_level(level):
-    """返回同级水果合成后生成的等级；西瓜合成后不生成水果。"""
+    """返回同级水果合成后生成的等级；大西瓜合成后不生成水果。"""
 
     if level >= MAX_FRUIT_LEVEL:
         return None

@@ -55,8 +55,8 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         specs = fruit_specs()
 
         self.assertEqual(11, len(specs))
-        self.assertEqual('樱桃', specs[0]['name'])
-        self.assertEqual('西瓜', specs[-1]['name'])
+        self.assertEqual('葡萄', specs[0]['name'])
+        self.assertEqual('大西瓜', specs[-1]['name'])
         self.assertEqual(20, specs[0]['radius'])
         self.assertEqual(156, specs[-1]['radius'])
         self.assertGreater(specs[0]['dropped_physics_radius'], 0)
