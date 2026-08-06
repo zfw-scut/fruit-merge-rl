@@ -28,6 +28,8 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('requestNaturalSettle', html)
         self.assertIn('playSettleTrace', html)
         self.assertIn('heldPlacement', html)
+        self.assertIn('beginPalettePlacement', html)
+        self.assertIn('fruit-drag-preview', html)
         self.assertIn('松手后自然下落', html)
         self.assertIn('effective_normalized_area', html)
         self.assertNotIn('文件(F)', html)
