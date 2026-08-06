@@ -14,6 +14,7 @@ from daxigua.simulator.scenario_lab_service import (
 from daxigua.simulator.scenario_lab_web import render_scenario_lab_document
 from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
 from daxigua.simulator.scenario_lab_server import ScenarioLabServer
+from daxigua.rl.scenario_model_controller import ScenarioModelController
 
 
 class ScenarioLabFrontendTests(unittest.TestCase):
@@ -32,6 +33,11 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('/api/evaluate', html)
         self.assertIn('/api/live/command', html)
         self.assertIn('/api/live/events', html)
+        self.assertIn('/api/model/evaluate', html)
+        self.assertIn('/api/model/control', html)
+        self.assertIn('评估当前场景的模型倾向', html)
+        self.assertIn('启动模型持续决策', html)
+        self.assertIn('model-action-results', html)
         self.assertIn('new EventSource', html)
         self.assertIn('dropPreviews', html)
         self.assertIn('interpolateLiveFruits', html)
@@ -84,6 +90,92 @@ class ScenarioLabFrontendTests(unittest.TestCase):
 
 
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_model_http_api_exposes_read_only_policy_evaluation(self):
+        class FakeModelEvaluator:
+            identity = {
+                'checkpoint': 'best.pt',
+                'checkpoint_sha256': '123456789abc',
+                'device': 'cpu',
+                'training_transitions': 16_000_000,
+            }
+
+            @staticmethod
+            def evaluate(scene):
+                return {
+                    'action': 7,
+                    'drop_x': 210.0,
+                    'selected_q': 1.25,
+                    'inference_ms': 2.0,
+                    'q_values': [float(index) for index in range(21)],
+                    'fruit_count': len(scene['fruits']),
+                }
+
+        class FakeModelController:
+            def __init__(self):
+                self.running = False
+
+            def start_service(self):
+                return self
+
+            def close(self):
+                return None
+
+            def status(self):
+                return {
+                    'available': True,
+                    'running': self.running,
+                    'decision_count': 0,
+                }
+
+            def start(self):
+                self.running = True
+                return self.status()
+
+            def stop(self, **_kwargs):
+                self.running = False
+                return self.status()
+
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'),
+            model_evaluator=FakeModelEvaluator(),
+            model_controller=FakeModelController(),
+            host='127.0.0.1',
+            port=0,
+        ).start()
+        scene = {
+            'fps': 120,
+            'queue': [1, 2, 3, 4],
+            'fruits': [],
+        }
+        try:
+            with urlopen(server.url + 'api/health', timeout=2.0) as response:
+                health = json.loads(response.read())
+            request = Request(
+                server.url + 'api/model/evaluate',
+                data=json.dumps({'scene': scene}).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=2.0) as response:
+                result = json.loads(response.read())
+            control_request = Request(
+                server.url + 'api/model/control',
+                data=json.dumps({'command': 'start'}).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(control_request, timeout=2.0) as response:
+                control = json.loads(response.read())
+        finally:
+            server.close()
+
+        self.assertTrue(health['model_available'])
+        self.assertTrue(health['model_continuous_available'])
+        self.assertEqual('best.pt', health['model']['checkpoint'])
+        self.assertEqual(7, result['action'])
+        self.assertEqual(21, len(result['q_values']))
+        self.assertTrue(control['running'])
+
     def test_live_http_api_exposes_state_and_accepts_drop_command(self):
         server = ScenarioLabServer(
             SimpleNamespace(device='cpu'), host='127.0.0.1', port=0
@@ -130,6 +222,63 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(2, len(snapshot['fruits']))
         self.assertGreater(later['physics_frame'], snapshot['physics_frame'])
         self.assertFalse(snapshot['paused'])
+
+    def test_live_session_model_action_advances_natural_queue(self):
+        session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
+        session.start()
+        try:
+            session.execute({'type': 'clear', 'queue': [1, 2, 3, 4]})
+            dropped = session.execute({'type': 'drop_action', 'action': 10})
+            snapshot = session.snapshot()
+        finally:
+            session.close()
+
+        self.assertTrue(dropped['accepted'])
+        self.assertEqual(1, dropped['dropped_level'])
+        self.assertEqual([1, 2, 3, 4], dropped['queue_before'])
+        self.assertEqual(2, dropped['queue_after'][0])
+        self.assertEqual(dropped['queue_after'], snapshot['queue'])
+        self.assertEqual(1, snapshot['step_count'])
+
+    def test_model_controller_decides_after_continuous_stable_window(self):
+        class FakeEvaluator:
+            @staticmethod
+            def evaluate(scene, **_context):
+                values = [float(index) / 20.0 for index in range(21)]
+                return {
+                    'action': 10,
+                    'drop_x': 280.0,
+                    'selected_q': values[10],
+                    'q_values': values,
+                    'inference_ms': 0.1,
+                    'model': {'checkpoint': 'fake.pt'},
+                    'queue': list(scene['queue']),
+                }
+
+        session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
+        controller = ScenarioModelController(session, FakeEvaluator())
+        session.start()
+        controller.start_service()
+        try:
+            session.execute({'type': 'clear', 'queue': [1, 2, 3, 4]})
+            controller.start()
+            deadline = time.monotonic() + 2.0
+            status = controller.status()
+            while (
+                    status['decision_count'] < 1
+                    and time.monotonic() < deadline):
+                time.sleep(0.02)
+                status = controller.status()
+            snapshot = session.snapshot()
+            controller.stop()
+        finally:
+            controller.close()
+            session.close()
+
+        self.assertEqual(1, status['decision_count'])
+        self.assertEqual(1, snapshot['step_count'])
+        self.assertEqual(10, status['last_evaluation']['action'])
+        self.assertEqual(2, snapshot['queue'][0])
 
     def test_live_session_removes_fruit_at_command_boundary(self):
         session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)

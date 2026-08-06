@@ -50,6 +50,15 @@ def parse_args(argv=None):
         default=1.0,
         help='Reward V2 最终缩放，默认 1.0。',
     )
+    parser.add_argument(
+        '--checkpoint',
+        help='可选：接入场景实验室的 GNN-DQN checkpoint。',
+    )
+    parser.add_argument(
+        '--model-device',
+        default='auto',
+        help='模型推理设备，默认 auto。',
+    )
     return parser.parse_args(argv)
 
 
@@ -57,14 +66,37 @@ def main(argv=None):
     args = parse_args(argv)
     if args.serve:
         from daxigua.simulator.scenario_lab_server import ScenarioLabServer
+        from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
         from daxigua.simulator.scenario_lab_service import ScenarioLabEvaluator
 
         evaluator = ScenarioLabEvaluator(
             device=args.device,
             reward_scale=args.reward_scale,
         )
+        model_evaluator = None
+        model_controller = None
+        live_session = ScenarioLabLiveSession()
+        if args.checkpoint:
+            from daxigua.rl.scenario_model_controller import (
+                ScenarioModelController,
+            )
+            from daxigua.rl.scenario_model_evaluator import (
+                ScenarioModelEvaluator,
+            )
+            from daxigua.rl.viewer import load_viewer_model
+
+            loaded = load_viewer_model(
+                args.checkpoint, device=args.model_device
+            )
+            model_evaluator = ScenarioModelEvaluator(loaded)
+            model_controller = ScenarioModelController(
+                live_session, model_evaluator
+            )
         server = ScenarioLabServer(
             evaluator,
+            model_evaluator=model_evaluator,
+            model_controller=model_controller,
+            live_session=live_session,
             host=args.host,
             port=args.port,
         )
@@ -73,6 +105,13 @@ def main(argv=None):
             f'（{evaluator.device}，Reward V2 × {args.reward_scale:g}）',
             flush=True,
         )
+        if model_evaluator is not None:
+            identity = model_evaluator.identity
+            print(
+                f"模型评估：{identity['checkpoint']} "
+                f"（{identity['checkpoint_sha256']}，{identity['device']}）",
+                flush=True,
+            )
         if args.open:
             webbrowser.open(server.url)
         try:
@@ -80,7 +119,7 @@ def main(argv=None):
         except KeyboardInterrupt:
             print('正在关闭场景实验室服务……', flush=True)
         finally:
-            server.httpd.server_close()
+            server.close()
         return
 
     output_path = write_scenario_lab_html(Path(args.output).resolve())

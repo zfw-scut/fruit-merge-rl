@@ -157,6 +157,18 @@ class ScenarioLabLiveSession:
                 x,
             )
             return {'accepted': True, 'fruit_id': fruit_id}
+        if kind == 'drop_action':
+            action = int(command['action'])
+            result = self.game.drop(action)
+            return {
+                'accepted': True,
+                'action': action,
+                'fruit_id': result.fruit_id,
+                'dropped_level': result.dropped_level,
+                'drop_x': round(result.drop_x, 3),
+                'queue_before': list(result.queue_before),
+                'queue_after': list(result.queue_after),
+            }
         if kind == 'remove':
             fruit_id = int(command['fruit_id'])
             return {
@@ -177,6 +189,8 @@ class ScenarioLabLiveSession:
             self._replace_from_scene(command['scene'])
             self.paused = bool(command.get('paused', False))
             return {'accepted': True, 'paused': self.paused}
+        if kind == 'refresh':
+            return {'accepted': True}
         raise ValueError('unsupported live command type')
 
     def _replace_from_scene(self, scene):
@@ -226,6 +240,7 @@ class ScenarioLabLiveSession:
 
     def _build_payload(self):
         state = self.game.get_state()
+        danger_limit = max(1, self.config.danger_frame_limit)
         return {
             'format_version': 1,
             'sequence': self._sequence,
@@ -234,6 +249,13 @@ class ScenarioLabLiveSession:
             'paused': self.paused,
             'stable': self.game.is_stable(),
             'done': state.done,
+            'danger_progress': round(
+                min(1.0, self.game.fail_frames / danger_limit), 6
+            ),
+            'over_danger_line': any(
+                fruit.y - fruit.physics_radius < self.config.spawn_y
+                for fruit in state.board_fruits
+            ),
             'score': state.score,
             'step_count': state.step_count,
             'physics_frame': state.physics_frame,

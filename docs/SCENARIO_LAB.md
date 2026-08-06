@@ -1,6 +1,6 @@
 # 自定义场景实验室
 
-- 状态：持续实时物理、暂停场景编辑与 Reward V2 奖励可视化已接通；模型 checkpoint 推理尚未接入
+- 状态：持续实时物理、暂停场景编辑、Reward V2 奖励可视化、模型单次推理与持续决策已接通
 - 用途：像游戏一样连续投放水果，也可暂停构造极端局面，并在任一状态快照上并行比较21个动作
 - 入口：`tools/open_scenario_lab.py`
 
@@ -22,6 +22,10 @@
 - 评估结果使用独立静态快照，可在“投放前/投放后”之间切换，不会被后台实时物理状态覆盖；
 - 逐个查看 q1～q3 的投放前后21列深度，绿色表示新增空间、红色表示损失空间；
 - 服务端使用训练同源的物理和 Reward V2 公式，浏览器不计算演示奖励。
+- 可加载 Reward V2 训练 checkpoint，对任意手工场景只读输出21个动作的 Q 值、首选投放点与推理耗时；
+- 同一场景执行奖励评估后，会直接显示模型首选动作的真实空间奖励和 Reward V2 最优动作，模型推理不会自动投放或修改场景。
+- 可从任意手工场景启动模型持续决策：连续稳定后 greedy 推理、真实投放、再次等待稳定并循环；
+- 持续模式会自然推进 q0～q3，允许暂停/恢复；停止后保留当前局面，不自动重置。
 
 ## 交互和视觉原则
 
@@ -51,6 +55,18 @@ Windows 11 Fluent 方向；危险、重叠和后端未连接使用不同层级�
 30 FPS 使用训练物理档，120 FPS 使用高精度评估档。详细空间诊断只在该请求中产生，
 不进入训练 Replay 或训练热路径。
 
+前端点击“评估模型倾向”时，将同一状态快照提交给 `/api/model/evaluate`。后端根据
+checkpoint 内冻结的 `ModelConfig` 重建 GNN-DQN，并返回 A0～A20 的 Q 值。手工场景
+没有持续越线帧数，因此模型输入中的 `danger_progress` 固定为0，但仍会根据水果位置提供
+`over_danger_line`。该接口只做一次 greedy 推理，不推进物理，也不改变实时世界。
+
+“启动模型持续决策”通过 `/api/model/control` 开关独立控制线程。控制器使用实时状态中的
+真实 `danger_progress`，并要求局面按60 Hz发布状态连续稳定8次（等价约0.125秒）后才
+允许决策；水果拓扑变化、运动、暂停都会清空稳定累计。模型动作通过 `drop_action` 进入
+同一个 Pymunk 世界并自然推进队列。持续模式不会重置手工场景；手工载入、删除、清空或
+投放会先停止模型控制，避免模型与用户同时写入物理世界。默认单次启动最多1000次投放，
+终局或错误也会自动停止。
+
 后端会根据水果等级补齐质量、惯量等派生属性；JSON 中的物理半径允许显式覆盖，以便
 复现刚投放和合成后的细微半径差异。队列只允许自然生成的1～5级水果，场上水果允许
 1～11级，最多64颗。页面继续暴露 `window.daxiguaScenarioLab`，方便后续接入模型动作。
@@ -59,9 +75,12 @@ Windows 11 Fluent 方向；危险、重叠和后端未连接使用不同层级�
 
 ```powershell
 $env:PYTHONPATH = 'src'
-& $python tools\open_scenario_lab.py --serve --device cuda --open
+& $python tools\open_scenario_lab.py --serve --device cuda `
+    --checkpoint runs\cloud_rtx5090_reward_v2_8235ef9_seed20260805_16m_90m\checkpoints\best.pt `
+    --model-device cuda --open
 ```
 
-无 CUDA 的开发机可使用 `--device cpu`。`--port 0` 会自动选择空闲端口。不传
+无 CUDA 的开发机可使用 `--device cpu --model-device cpu`。不指定 `--checkpoint` 时，
+实时物理和空间奖励仍可使用，但模型倾向按钮会禁用。`--port 0` 会自动选择空闲端口。不传
 `--serve` 时只在 `recordings/scenario-lab/index.html` 生成自包含页面，便于编辑、导出
 或归档视觉版本；离线页面不会产生评估结果。
