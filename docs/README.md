@@ -12,6 +12,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model/MODEL_DESIGN_STATUS_OVERVIEW.md`：新模型组件、节点、边、输出、弃用项、设计状态和实现基础总览；
 - `model/GNN_DQN_BASELINE.md`：第一版 GNN-DQN 基线的模型范围、1-step Double DQN、纯分数奖励和排除项；
 - `model/GNN_DQN_TRAINING_SYSTEM.md`：30 FPS 独占训练、30/120 FPS 隔离评估、GPU Replay、性能标定、动态扩容、实时面板和云端归档规格；
+- `model/REWARD_V2_ACCESSIBLE_SPACE.md`：纯可投放空间奖励、21列GPU几何、队列对齐、水果空间补偿与可视化契约；
 - `model/LOCAL_MODEL_VIEWER.md`：checkpoint 本地加载、120 FPS greedy 游玩、逐帧浏览器页面和 Q 值展示；
 - `SCENARIO_LAB.md`：鼠标交互式自定义场景实验室前端、场景 JSON、视觉边界和待接入的真实评估接口；
 - `codex/RULES.md`：较大修改的记录规则；
