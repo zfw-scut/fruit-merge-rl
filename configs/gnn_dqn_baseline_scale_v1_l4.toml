@@ -53,7 +53,7 @@ queue_weights = [0.50, 0.30, 0.20]
 
 [replay]
 capacity = 1048576
-batch_size = 1792
+batch_size = 768
 warmup_transitions = 262144
 warmup_stage_ratios = [0.30, 0.30, 0.25, 0.15]
 

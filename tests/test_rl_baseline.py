@@ -223,7 +223,7 @@ class RewardTrainingConfigTest(unittest.TestCase):
         self.assertEqual(baseline_scale_v1_l4.model.message_layers, 4)
         self.assertEqual(baseline_scale_v1_l4.model.hidden_dim, 128)
         self.assertEqual(baseline_scale_v1_l4.total_transitions, 16_000_000)
-        self.assertEqual(baseline_scale_v1_l4.replay.batch_size, 1792)
+        self.assertEqual(baseline_scale_v1_l4.replay.batch_size, 768)
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):
