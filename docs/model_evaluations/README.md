@@ -16,7 +16,8 @@
 
 | 模型代号 | 训练奖励 | 代码身份 | 报告 | 当前结论 |
 | --- | --- | --- | --- | --- |
-| `baseline-r1` | 游戏合成分数 | `0836ffd` | [`model-baseline-r1.md`](model-baseline-r1.md) | 当前效果基准，保留 |
+| `baseline-r1` | 游戏合成分数 | `0836ffd` | [`model-baseline-r1.md`](model-baseline-r1.md) | 3层历史基线，保留为容量对照 |
+| `baseline-scale-v1-l4-r1` | 游戏合成分数 | `f6edba2` | [`model-baseline-scale-v1-l4-r1.md`](model-baseline-scale-v1-l4-r1.md) | 30/120 FPS局均分提高14.10%/13.68%，当前效果基准 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
 | `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线；墙边投放增加属于常见策略，不能单独判为缺陷 |
 
@@ -58,4 +59,6 @@
 - 尚未保存带q0谱系的真实合成标签；现有Replay只能通过水果数变化近似判断是否合成；
 - Reward V2.1已完成正式训练和按阶段/动作/水果等级的离线统计，但固定场景动作排序集仍未建立；
 - V2.1只完成一个训练seed，约1%的相对V2增益尚未验证跨seed可复现性；
-- 训练完成事件在产物清单生成后追加，导致`monitoring.jsonl`比内部清单多272字节，需修复清单顺序。
+- 4层扩容模型与3层历史基线的batch、环境数和实际训练量不同，尚无严格同配置层数消融；
+- 训练完成事件仍在产物清单生成后追加，使`monitoring.jsonl`比内部清单多出最后一条事件，
+  需修复清单顺序；外层迁移归档哈希已独立核对，不影响迁移完整性。

@@ -15,7 +15,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model/REWARD_V2_ACCESSIBLE_SPACE.md`：纯可投放空间奖励、21列GPU几何、队列对齐、状态相关无合成参考与可视化契约；
 - `model/LOCAL_MODEL_VIEWER.md`：checkpoint 本地加载、120 FPS greedy 游玩、逐帧浏览器页面和 Q 值展示；
 - `model_evaluations/README.md`：当前模型评估知识库入口、证据标签、阅读顺序和每轮更新要求；
-- `model_evaluations/COMPARISON_MATRIX.md`：分数基线、Reward V2与V2.1的30/120 FPS效果、奖励分布、动作偏置和原因假设对比；
+- `model_evaluations/COMPARISON_MATRIX.md`：3层/4层分数基线、Reward V2与V2.1的30/120 FPS效果、奖励分布、动作偏置和原因假设对比；
 - `SCENARIO_LAB.md`：鼠标交互式自定义场景、真实21动作物理评估、Reward V2覆盖层和JSON契约；
 - `codex/RULES.md`：较大修改的记录规则；
 - `codex/01_建立accelerated_v1最小基线_2026_08_01.md`：本分支首个结构记录；
@@ -51,10 +51,12 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/31_实现状态相关无合成参考奖励_2026_08_07.md`：实现Reward V2.1幽灵投放参考、训练缓存、监控和场景诊断。
 - `codex/32_归档Reward_V2_1首轮训练_2026_08_07.md`：迁移首轮正式训练产物并记录双帧率效果、奖励分布、动作偏置和性能结论。
 - `codex/33_建立五层分数基线扩容实验_2026_08_07.md`：恢复score_v1并建立只增加物理GNN传播深度的5层扩容配置与真实性能门禁。
+- `codex/34_归档四层分数基线扩容训练_2026_08_07.md`：记录5层门禁回退、4层正式训练、双帧率提升、性能代价与完整迁移证据。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的
 实现依据。
 
-当前已实现第一版 GNN-DQN 基线和训练系统。后续战略、计划、动作辅助和搜索模块继续按
-专项文档逐项验证，以本基线作为速度与效果比较对象。
+当前已实现第一版GNN-DQN基线、正式训练系统和4层传播扩容模型。后续战略、计划、动作
+辅助和搜索模块继续按专项文档逐项验证，以`baseline-scale-v1-l4-r1`作为当前速度与效果
+比较对象。
