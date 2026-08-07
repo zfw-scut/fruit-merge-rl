@@ -216,6 +216,15 @@ class RewardTrainingConfigTest(unittest.TestCase):
         self.assertEqual(baseline_scale_v1.total_transitions, 16_000_000)
         self.assertEqual(baseline_scale_v1.max_wall_seconds, 7200.0)
 
+        baseline_scale_v1_l4 = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_baseline_scale_v1_l4.toml'
+        )
+        self.assertEqual(baseline_scale_v1_l4.reward.kind, 'score_v1')
+        self.assertEqual(baseline_scale_v1_l4.model.message_layers, 4)
+        self.assertEqual(baseline_scale_v1_l4.model.hidden_dim, 128)
+        self.assertEqual(baseline_scale_v1_l4.total_transitions, 16_000_000)
+        self.assertEqual(baseline_scale_v1_l4.replay.batch_size, 1792)
+
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):
     def test_censored_stage_quantiles_use_the_pilot_window_quartiles(self):
