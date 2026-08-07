@@ -184,7 +184,7 @@ CPU 只承担低优先级旁路任务：监控面板、NVML、日志、checkpoin
 冻结预计 transition 总量。正式训练使用较高上限，以租用截止时间减去至少 30 分钟的
 最终评估和打包窗口作为主要停止边界。
 
-至少保存 1M、5M、10M、25M、50M、100M transition 里程碑，便于后续模型按相同样本
+至少保存 1M、5M、10M、16M、20M、24M、25M、50M、100M transition 里程碑，便于后续模型按相同样本
 量比较。`latest` 每约 30 分钟原子更新，`best` 由 120 FPS greedy 平均原始分数决定，
 正常结束写入 `final`。
 
@@ -192,6 +192,12 @@ CPU 只承担低优先级旁路任务：监控面板、NVML、日志、checkpoin
 评估指标、资源日志、短 profiler、分层 transition 样本、完整决策边界轨迹和 SHA-256
 清单，以及 `plots/training_curves.png` 与其元数据。默认不传完整 Replay。只有本地核对
 传输哈希后才释放服务器。
+
+最终评估额外保存每局的紧凑可回放索引，并在 CUDA 上统计各等级合成、L11 生成/消除、
+历史最高等级和终局等级分布。代表局按事件与分数区间分层选择后再做第二遍强制动作回放；
+这样训练期和第一遍评估不承担全量逐帧记录成本。标准事件图保存为
+`plots/evaluation_event_analysis.png`，面板在最终评估完成后自动显示。训练进程退出后可用
+`tools/serve_training_dashboard.py` 继续提供只读面板。
 
 ## 10. 停止门禁
 

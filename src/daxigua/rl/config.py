@@ -59,6 +59,7 @@ class DqnConfig:
     epsilon_start: float = 1.0
     epsilon_end: float = 0.05
     epsilon_decay_fraction: float = 0.40
+    epsilon_schedule: tuple[tuple[int, float], ...] = ()
     utd_ratio: float = 1.0
     use_bfloat16: bool = True
     fused_adam: bool = True
@@ -66,6 +67,11 @@ class DqnConfig:
     compile_mode: str = 'reduce-overhead'
 
     def __post_init__(self):
+        schedule = tuple(
+            (int(point[0]), float(point[1]))
+            for point in self.epsilon_schedule
+        )
+        object.__setattr__(self, 'epsilon_schedule', schedule)
         if not 0.0 <= self.gamma <= 1.0:
             raise ValueError('gamma must be in [0, 1]')
         if self.learning_rate <= 0.0:
@@ -78,6 +84,20 @@ class DqnConfig:
             raise ValueError('epsilon values are invalid')
         if not 0.0 < self.epsilon_decay_fraction <= 1.0:
             raise ValueError('epsilon_decay_fraction must be in (0, 1]')
+        if schedule:
+            if schedule[0][0] != 0:
+                raise ValueError('epsilon_schedule must start at transition 0')
+            transitions = tuple(point[0] for point in schedule)
+            if any(value < 0 for value in transitions):
+                raise ValueError('epsilon schedule transitions cannot be negative')
+            if any(left >= right for left, right in zip(
+                    transitions, transitions[1:])):
+                raise ValueError(
+                    'epsilon schedule transitions must be strictly increasing'
+                )
+            if any(not 0.0 <= epsilon <= 1.0
+                   for _, epsilon in schedule):
+                raise ValueError('epsilon schedule values must be in [0, 1]')
         if self.utd_ratio <= 0.0:
             raise ValueError('utd_ratio must be positive')
         if self.compile_mode not in ('default', 'reduce-overhead', 'max-autotune'):
@@ -156,6 +176,9 @@ class AnalysisExportConfig:
     transition_sample_size: int = 131_072
     transition_chunk_size: int = 8192
     trajectory_episodes: int = 512
+    critical_event_episodes: int = 128
+    score_bin_width: int = 500
+    critical_event_min_level: int = 9
 
     def __post_init__(self):
         if self.transition_sample_size < 0:
@@ -164,6 +187,12 @@ class AnalysisExportConfig:
             raise ValueError('transition_chunk_size must be positive')
         if self.trajectory_episodes < 0:
             raise ValueError('trajectory_episodes cannot be negative')
+        if self.critical_event_episodes < 0:
+            raise ValueError('critical_event_episodes cannot be negative')
+        if self.score_bin_width <= 0:
+            raise ValueError('score_bin_width must be positive')
+        if not 2 <= self.critical_event_min_level <= 11:
+            raise ValueError('critical_event_min_level must be in [2, 11]')
 
 
 @dataclass(frozen=True, slots=True)

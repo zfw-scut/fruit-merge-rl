@@ -24,7 +24,10 @@ from daxigua.rl.curves import (
     existing_curve_metadata,
     render_training_curve_snapshot,
 )
-from daxigua.rl.evaluation import evaluate_policy
+from daxigua.rl.evaluation import (
+    evaluate_policy,
+    select_critical_episodes,
+)
 from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.monitoring import _DASHBOARD_HTML, _DashboardState
@@ -33,6 +36,7 @@ from daxigua.rl.replay import GpuReplayBuffer
 from daxigua.rl.trainer import (
     _bounded_stage_thresholds,
     _lower_unreachable_prewarm_targets,
+    epsilon_at_transition,
 )
 from daxigua.rl.viewer import (
     load_viewer_model,
@@ -103,6 +107,7 @@ class ObservationAndModelTest(unittest.TestCase):
         model = BaselineGnnDqn(_small_model_config())
         with TemporaryDirectory() as directory:
             output = Path(directory) / 'trajectories.pt'
+            episode_index = Path(directory) / 'episode_index.pt'
             summary, details = evaluate_policy(
                 model,
                 physics_fps=30,
@@ -113,13 +118,58 @@ class ObservationAndModelTest(unittest.TestCase):
                 max_episode_drops=1,
                 trajectory_output_path=output,
                 trajectory_episodes=2,
+                episode_index_output_path=episode_index,
             )
             payload = torch.load(output, weights_only=False)
+            index = torch.load(episode_index, weights_only=False)
         self.assertEqual(summary.episodes, 2)
         self.assertEqual(details['recorded_trajectory_episodes'], 2)
         self.assertEqual(payload['episodes'], 2)
         self.assertEqual(len(payload['frames']), 1)
         self.assertTrue(bool(payload['frames'][0]['terminal'].all()))
+        self.assertEqual(index['format_version'], 2)
+        self.assertEqual(index['actions'].shape, (2, 1))
+        self.assertEqual(index['source_level_merge_counts'].shape, (2, 12))
+
+
+class EpsilonAndEventSelectionTest(unittest.TestCase):
+    def test_piecewise_epsilon_interpolates_and_holds_last_value(self):
+        config = DqnConfig(epsilon_schedule=(
+            (0, 1.0),
+            (100, 0.2),
+            (200, 0.05),
+        ))
+        self.assertAlmostEqual(epsilon_at_transition(config, 50, 200), 0.6)
+        self.assertAlmostEqual(epsilon_at_transition(config, 150, 200), 0.125)
+        self.assertAlmostEqual(epsilon_at_transition(config, 999, 200), 0.05)
+
+    def test_piecewise_epsilon_rejects_unsorted_points(self):
+        with self.assertRaises(ValueError):
+            DqnConfig(epsilon_schedule=((0, 1.0), (100, 0.2), (50, 0.1)))
+
+    def test_critical_selection_keeps_event_and_density_strata(self):
+        episodes = 12
+        index = {
+            'scores': torch.tensor(
+                (1000, 1500, 2200, 3500, 7000, 7500,
+                 8000, 8500, 9500, 10000, 11000, 4500)
+            ),
+            'created_level_counts': torch.zeros(episodes, 12),
+            'source_level_merge_counts': torch.zeros(episodes, 12),
+            'final_level_counts': torch.zeros(episodes, 12),
+        }
+        index['created_level_counts'][8, 11] = 1
+        index['created_level_counts'][9, 11] = 1
+        index['source_level_merge_counts'][9, 11] = 1
+        index['final_level_counts'][7, 9] = 2
+        selected, reasons = select_critical_episodes(
+            index, 10, score_bin_width=1000, seed=7
+        )
+        self.assertEqual(selected.numel(), 10)
+        self.assertIn(9, selected.tolist())
+        self.assertIn(8, selected.tolist())
+        self.assertIn(7, selected.tolist())
+        self.assertEqual(len(reasons), 10)
 
 
 class ReplayAndLearnerTest(unittest.TestCase):
@@ -224,6 +274,20 @@ class RewardTrainingConfigTest(unittest.TestCase):
         self.assertEqual(baseline_scale_v1_l4.model.hidden_dim, 128)
         self.assertEqual(baseline_scale_v1_l4.total_transitions, 16_000_000)
         self.assertEqual(baseline_scale_v1_l4.replay.batch_size, 768)
+
+        fast_l5 = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_baseline_l5_fast_24m.toml'
+        )
+        slow_l5 = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_baseline_l5_slow_24m.toml'
+        )
+        self.assertEqual(fast_l5.model.message_layers, 5)
+        self.assertEqual(slow_l5.total_transitions, 24_000_000)
+        self.assertEqual(fast_l5.dqn.epsilon_schedule[1], (6_400_000, 0.05))
+        self.assertEqual(slow_l5.dqn.epsilon_schedule[1], (6_400_000, 0.20))
+        self.assertEqual(
+            fast_l5.evaluation.seed_base, slow_l5.evaluation.seed_base
+        )
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):

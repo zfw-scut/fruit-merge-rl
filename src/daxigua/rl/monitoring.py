@@ -18,6 +18,7 @@ from .curves import (
     existing_curve_metadata,
     render_training_curve_snapshot,
 )
+from .event_analysis import EVENT_ANALYSIS_FILENAME
 
 
 _DASHBOARD_HTML = r'''<!doctype html>
@@ -206,6 +207,13 @@ canvas{background:#fff}.action-summary{margin:0 2px 9px;color:#5a5a5a}
       </div>
     </fieldset>
 
+    <fieldset class="snapshot-panel"><legend>最终评估分布 / Evaluation Distribution</legend>
+      <div class="snapshot-layout">
+        <div class="snapshot-frame"><img id="event-snapshot" alt="评估分数密度与关键事件图片" hidden></div>
+        <div id="event-snapshot-info" class="snapshot-info"><strong>等待最终评估</strong>两种物理帧率评估完成后自动生成分数密度和高等级关键事件图。</div>
+      </div>
+    </fieldset>
+
     <fieldset class="action-panel"><legend>投放动作分布 / Action Distribution</legend><div id="action-summary" class="action-summary">等待动作统计…</div><div id="actions" class="actions"></div></fieldset>
     <fieldset><legend>最近事件与告警 / Events</legend><div id="events" class="events"><div class="empty">等待训练事件…</div></div></fieldset>
   </main>
@@ -273,7 +281,8 @@ function renderActions(values){const list=Array.isArray(values)?values.map(v=>fi
 function drawChart(id,history,series,formatter){const canvas=$(id),rect=canvas.getBoundingClientRect(),ratio=Math.min(devicePixelRatio||1,2);if(!rect.width||!rect.height)return;canvas.width=Math.round(rect.width*ratio);canvas.height=Math.round(rect.height*ratio);const c=canvas.getContext('2d');c.scale(ratio,ratio);const w=rect.width,h=rect.height;c.fillStyle='#fff';c.fillRect(0,0,w,h);const available=series.map(s=>({...s,points:history.map((row,index)=>({index,value:finite(row[s.key])})).filter(p=>p.value!==null)})).filter(s=>s.points.length);if(!available.length){c.fillStyle='#666';c.font='12px Tahoma';c.textAlign='center';c.fillText('等待足够的训练数据…',w/2,h/2);return}const all=available.flatMap(s=>s.points.map(p=>p.value));let min=Math.min(...all),max=Math.max(...all);if(min===max){min-=Math.max(1,Math.abs(min)*.05);max+=Math.max(1,Math.abs(max)*.05)}else{const pad=(max-min)*.1;min-=pad;max+=pad}const box={l:55,r:12,t:27,b:28},pw=w-box.l-box.r,ph=h-box.t-box.b;c.font='10px Tahoma';c.lineWidth=1;for(let i=0;i<=4;i++){const y=box.t+ph*i/4,value=max-(max-min)*i/4;c.strokeStyle='#d0d0d0';c.beginPath();c.moveTo(box.l,y);c.lineTo(w-box.r,y);c.stroke();c.fillStyle='#444';c.textAlign='right';c.textBaseline='middle';c.fillText(formatter(value),box.l-6,y)}const x=index=>box.l+(history.length<=1?0:index/(history.length-1))*pw,y=value=>box.t+ph-(value-min)/(max-min)*ph;available.forEach(s=>{c.strokeStyle=s.color;c.lineWidth=2;c.beginPath();s.points.forEach((p,i)=>{i?c.lineTo(x(p.index),y(p.value)):c.moveTo(x(p.index),y(p.value))});c.stroke();const last=s.points[s.points.length-1];c.fillStyle=s.color;c.fillRect(x(last.index)-2,y(last.value)-2,5,5)});c.fillStyle='#444';c.textBaseline='alphabetic';c.textAlign='left';const firstTransition=history.find(r=>finite(r.transitions)!==null)?.transitions;c.fillText(short(firstTransition),box.l,h-7);c.textAlign='right';const lastTransition=[...history].reverse().find(r=>finite(r.transitions)!==null)?.transitions;c.fillText(short(lastTransition),w-box.r,h-7)}
 function renderEvents(events){const rows=(events||[]).slice(-12).reverse();$('events').innerHTML=rows.length?rows.map(event=>`<div class="event"><span class="event-kind">${escapeHtml(eventNames[event.kind]||event.kind||'训练事件')}</span><span>${escapeHtml(event.message||'')}</span><time class="event-time">${new Date((event.monitor_timestamp||0)*1000).toLocaleTimeString('zh-CN',{hour12:false})}</time></div>`).join(''):'<div class="empty">等待训练事件…</div>'}
 function renderCurveSnapshot(plot){const image=$('curve-snapshot'),info=$('curve-snapshot-info');if(!plot){image.hidden=true;info.innerHTML='<strong>等待第一张曲线快照</strong>训练指标开始落盘后，后台会自动生成并刷新图片。';return}if(plot.error){info.innerHTML=`<strong>曲线快照暂不可用</strong><span class="snapshot-error">${escapeHtml(plot.error)}</span>`;return}const version=finite(plot.modified_at)??finite(plot.generated_at)??0,url=`${plot.url||'/plots/training_curves.png'}?v=${encodeURIComponent(version)}`;if(image.dataset.version!==String(version)){image.dataset.version=String(version);image.onload=()=>{image.hidden=false};image.src=url}const generated=finite(plot.generated_at);info.innerHTML=`<strong>已自动保存并同步到面板</strong>更新时间：${generated===null?'—':new Date(generated*1000).toLocaleString('zh-CN',{hour12:false})}<br>覆盖投放：${int(plot.source_last_transition)}<br>训练指标点：${int(plot.source_metric_rows)}<br>评估记录：${int(plot.source_evaluation_rows)}<br>图片大小：${int(plot.size_bytes)} 字节`}
-async function tick(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const state=await response.json(),data={...(state.training||{}),...(state.resources||{})},history=(state.history||[]).slice(-900);renderGroup('progress',groups.progress,data);renderGroup('throughput',groups.throughput,data);renderGroup('resources',groups.resources,data);renderGroup('learning',groups.learning,data);renderActions(data.action_distribution);renderEvents(state.events);renderCurveSnapshot((state.plots||{}).training_curves);const fraction=Math.max(0,Math.min(1,finite(data.progress_fraction)??((finite(data.transitions)??0)/Math.max(1,finite(data.total_transitions)??1))));$('progress-fill').style.width=`${fraction*100}%`;$('progress-text').textContent=`${decimal(fraction*100,2)}% · ${int(data.transitions)} / ${int(data.total_transitions)}`;const age=Date.now()/1000-(finite(state.timestamp)??0),lamp=$('status-lamp');lamp.className='lamp '+(age<5?'live':age<30?'stale':'error');$('connection').textContent=age<5?'实时连接正常':age<30?'数据更新延迟':'训练数据已失联';$('phase-text').textContent=`阶段：${phaseNames[data.phase]||data.phase||'等待数据'}`;$('updated-at').textContent=`最后更新：${new Date((state.timestamp||0)*1000).toLocaleString('zh-CN',{hour12:false})}`;$('status-message').textContent=`投放 ${rate(data.env_steps_per_second)} · 更新 ${rate(data.updates_per_second)} · 面板队列丢弃 ${int(data.dropped_messages||0)} 条`;$('run-time').textContent=`运行时间：${duration(data.uptime_seconds)}`;drawChart('score-chart',history,[{key:'training_window_mean_score',color:'#0067c0'},{key:'training_window_max_score',color:'#d13438'},{key:'training_rolling_mean_score',color:'#107c10'},{key:'last_fast_eval_score',color:'#0099bc'},{key:'last_accurate_eval_score',color:'#8764b8'}],v=>short(v));drawChart('loss-chart',history,[{key:'loss',color:'#0067c0'},{key:'mean_abs_td_error',color:'#d13438'}],v=>decimal(v,3));drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'}],v=>short(v))}catch(error){$('status-lamp').className='lamp error';$('connection').textContent='无法读取训练状态';$('status-message').textContent=String(error)}finally{setTimeout(tick,1000)}}tick();
+function renderEventSnapshot(plot){const image=$('event-snapshot'),info=$('event-snapshot-info');if(!plot){image.hidden=true;return}const version=finite(plot.generated_at)??0,url=`${plot.url||'/plots/evaluation_event_analysis.png'}?v=${encodeURIComponent(version)}`;if(image.dataset.version!==String(version)){image.dataset.version=String(version);image.onload=()=>{image.hidden=false};image.src=url}info.innerHTML=`<strong>关键事件统计已归档</strong>30 FPS：${int(plot.episodes_30fps)} 局<br>120 FPS：${int(plot.episodes_120fps)} 局<br>生成 L11：${int(plot.created_l11_episodes_30fps)} 局<br>消除 L11：${int(plot.removed_l11_episodes_30fps)} 局`}
+async function tick(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const state=await response.json(),data={...(state.training||{}),...(state.resources||{})},history=(state.history||[]).slice(-900);renderGroup('progress',groups.progress,data);renderGroup('throughput',groups.throughput,data);renderGroup('resources',groups.resources,data);renderGroup('learning',groups.learning,data);renderActions(data.action_distribution);renderEvents(state.events);renderCurveSnapshot((state.plots||{}).training_curves);renderEventSnapshot((state.plots||{}).evaluation_event_analysis);const fraction=Math.max(0,Math.min(1,finite(data.progress_fraction)??((finite(data.transitions)??0)/Math.max(1,finite(data.total_transitions)??1))));$('progress-fill').style.width=`${fraction*100}%`;$('progress-text').textContent=`${decimal(fraction*100,2)}% · ${int(data.transitions)} / ${int(data.total_transitions)}`;const age=Date.now()/1000-(finite(state.timestamp)??0),lamp=$('status-lamp');lamp.className='lamp '+(age<5?'live':age<30?'stale':'error');$('connection').textContent=age<5?'实时连接正常':age<30?'数据更新延迟':'训练数据已失联';$('phase-text').textContent=`阶段：${phaseNames[data.phase]||data.phase||'等待数据'}`;$('updated-at').textContent=`最后更新：${new Date((state.timestamp||0)*1000).toLocaleString('zh-CN',{hour12:false})}`;$('status-message').textContent=`投放 ${rate(data.env_steps_per_second)} · 更新 ${rate(data.updates_per_second)} · 面板队列丢弃 ${int(data.dropped_messages||0)} 条`;$('run-time').textContent=`运行时间：${duration(data.uptime_seconds)}`;drawChart('score-chart',history,[{key:'training_window_mean_score',color:'#0067c0'},{key:'training_window_max_score',color:'#d13438'},{key:'training_rolling_mean_score',color:'#107c10'},{key:'last_fast_eval_score',color:'#0099bc'},{key:'last_accurate_eval_score',color:'#8764b8'}],v=>short(v));drawChart('loss-chart',history,[{key:'loss',color:'#0067c0'},{key:'mean_abs_td_error',color:'#d13438'}],v=>decimal(v,3));drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'}],v=>short(v))}catch(error){$('status-lamp').className='lamp error';$('connection').textContent='无法读取训练状态';$('status-message').textContent=String(error)}finally{setTimeout(tick,1000)}}tick();
 </script>
 </body>
 </html>'''
@@ -488,6 +497,8 @@ def _dashboard_process_main(
                 payload['monitor_timestamp'] = time.time()
                 if kind == 'event':
                     state.add_event(payload)
+                elif kind == 'plot':
+                    state.update_plot(payload.pop('name'), payload)
                 else:
                     state.update_training(payload)
                 log.write(json.dumps(
@@ -530,9 +541,11 @@ def _dashboard_process_main(
                 body = _DASHBOARD_HTML.encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/html; charset=utf-8')
-            elif request_path == f'/plots/{CURVE_FILENAME}':
+            elif request_path in (
+                    f'/plots/{CURVE_FILENAME}',
+                    f'/plots/{EVENT_ANALYSIS_FILENAME}'):
                 plot_root = run_dir / 'plots'
-                plot_path = plot_root / CURVE_FILENAME
+                plot_path = plot_root / Path(request_path).name
                 try:
                     valid = (
                         not plot_root.is_symlink()
@@ -641,6 +654,11 @@ class DashboardPublisher:
             {'kind': event_kind, 'message': message, **values}, kind='event'
         )
 
+    def plot(self, name, metadata):
+        return self.publish(
+            {'name': str(name), **dict(metadata)}, kind='plot'
+        )
+
     def snapshot_curves(self, *, wait=False, timeout=30.0):
         """请求旁路进程立即更新曲线；正式收尾时可等待原子落盘。"""
 
@@ -681,3 +699,110 @@ class DashboardPublisher:
             if self.process.is_alive():
                 self.process.terminate()
                 self.process.join(1.0)
+
+
+def _read_jsonl(path):
+    rows = []
+    try:
+        with Path(path).open('r', encoding='utf-8') as handle:
+            for line in handle:
+                try:
+                    value = json.loads(line)
+                except (json.JSONDecodeError, UnicodeError):
+                    continue
+                if isinstance(value, dict):
+                    rows.append(value)
+    except OSError:
+        pass
+    return rows
+
+
+def _completed_dashboard_snapshot(run_dir):
+    run_dir = Path(run_dir)
+    state = _DashboardState(3600)
+    for row in _read_jsonl(run_dir / 'monitoring.jsonl'):
+        kind = row.get('kind')
+        payload = {
+            key: value for key, value in row.items()
+            if key not in ('kind', 'monitor_timestamp')
+        }
+        if kind == 'event':
+            state.add_event(row)
+        elif kind == 'plot':
+            name = payload.pop('name', 'plot')
+            state.update_plot(name, payload)
+        else:
+            state.update_training(payload)
+    resources = _read_jsonl(run_dir / 'resources.jsonl')
+    if resources:
+        state.update_resources(resources[-1])
+    for name, filename in (
+            ('training_curves', 'training_curves.json'),
+            ('evaluation_event_analysis', EVENT_ANALYSIS_FILENAME.replace(
+                '.png', '.json'))):
+        try:
+            metadata = json.loads(
+                (run_dir / 'plots' / filename).read_text(encoding='utf-8')
+            )
+        except (OSError, json.JSONDecodeError):
+            continue
+        state.update_plot(name, metadata)
+    state.update_training({'phase': 'finished'})
+    return state
+
+
+def serve_completed_dashboard(run_dir, *, host='127.0.0.1', port=8765):
+    """训练进程退出后继续提供只读面板和最终图片。"""
+
+    run_dir = Path(run_dir).resolve()
+    state = _completed_dashboard_snapshot(run_dir)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            request_path = self.path.partition('?')[0]
+            if request_path == '/api/status':
+                snapshot = state.snapshot()
+                snapshot['timestamp'] = time.time()
+                body = json.dumps(snapshot, ensure_ascii=False).encode('utf-8')
+                status = 200
+                content_type = 'application/json; charset=utf-8'
+            elif request_path in ('/', '/index.html'):
+                body = _DASHBOARD_HTML.encode('utf-8')
+                status = 200
+                content_type = 'text/html; charset=utf-8'
+            elif request_path in (
+                    f'/plots/{CURVE_FILENAME}',
+                    f'/plots/{EVENT_ANALYSIS_FILENAME}'):
+                plot_path = run_dir / 'plots' / Path(request_path).name
+                try:
+                    valid = (
+                        plot_path.is_file()
+                        and not plot_path.is_symlink()
+                        and plot_path.resolve(strict=True).parent
+                        == (run_dir / 'plots').resolve(strict=True)
+                    )
+                    body = plot_path.read_bytes() if valid else b'not found'
+                except OSError:
+                    valid = False
+                    body = b'not found'
+                status = 200 if valid else 404
+                content_type = 'image/png' if valid else 'text/plain'
+            else:
+                body = b'not found'
+                status = 404
+                content_type = 'text/plain'
+            self.send_response(status)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Cache-Control', 'no-store, max-age=0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format, *_args):
+            return
+
+    server = ThreadingHTTPServer((host, int(port)), Handler)
+    try:
+        server.serve_forever(poll_interval=0.5)
+    finally:
+        server.server_close()

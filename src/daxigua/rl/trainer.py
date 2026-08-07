@@ -28,7 +28,8 @@ from .checkpoint import (
 )
 from .autoscale import AdaptiveScaleController
 from .config import TrainingConfig
-from .evaluation import evaluate_policy
+from .evaluation import evaluate_policy, replay_critical_episodes
+from .event_analysis import render_evaluation_event_analysis
 from .learner import DqnLearner
 from .model import BaselineGnnDqn
 from .monitoring import DashboardPublisher, ResourceSampler
@@ -44,6 +45,34 @@ def _json_safe(value):
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     return value
+
+
+def epsilon_at_transition(dqn_config, transition, total_transitions):
+    """按显式折线或兼容旧配置的线性计划计算探索率。"""
+
+    transition = max(0, int(transition))
+    schedule = dqn_config.epsilon_schedule
+    if schedule:
+        if transition >= schedule[-1][0]:
+            return schedule[-1][1]
+        for (left_step, left_value), (right_step, right_value) in zip(
+                schedule, schedule[1:]):
+            if left_step <= transition <= right_step:
+                progress = (
+                    (transition - left_step) / (right_step - left_step)
+                )
+                return left_value + progress * (right_value - left_value)
+        return schedule[0][1]
+    decay_steps = max(
+        1,
+        int(total_transitions * dqn_config.epsilon_decay_fraction),
+    )
+    progress = min(1.0, transition / decay_steps)
+    return (
+        dqn_config.epsilon_start
+        + progress
+        * (dqn_config.epsilon_end - dqn_config.epsilon_start)
+    )
 
 
 def _git_identity(project_root):
@@ -115,6 +144,9 @@ class BaselineTrainer:
         1_000_000,
         5_000_000,
         10_000_000,
+        16_000_000,
+        20_000_000,
+        24_000_000,
         25_000_000,
         50_000_000,
         100_000_000,
@@ -499,21 +531,10 @@ class BaselineTrainer:
         )
 
     def epsilon(self):
-        decay_steps = max(
-            1,
-            int(
-                self.config.total_transitions
-                * self.config.dqn.epsilon_decay_fraction
-            ),
-        )
-        progress = min(1.0, self.transitions / decay_steps)
-        return (
-            self.config.dqn.epsilon_start
-            + progress
-            * (
-                self.config.dqn.epsilon_end
-                - self.config.dqn.epsilon_start
-            )
+        return epsilon_at_transition(
+            self.config.dqn,
+            self.transitions,
+            self.config.total_transitions,
         )
 
     @torch.no_grad()
@@ -666,7 +687,8 @@ class BaselineTrainer:
             transition,
             *,
             trajectory_output_path=None,
-            trajectory_episodes=0):
+            trajectory_episodes=0,
+            episode_index_output_path=None):
         summary, details = evaluate_policy(
             self.model,
             physics_fps=physics_fps,
@@ -680,6 +702,11 @@ class BaselineTrainer:
             max_episode_drops=self.config.evaluation.max_episode_drops,
             trajectory_output_path=trajectory_output_path,
             trajectory_episodes=trajectory_episodes,
+            episode_index_output_path=episode_index_output_path,
+            critical_event_min_level=(
+                self.config.analysis.critical_event_min_level
+            ),
+            score_bin_width=self.config.analysis.score_bin_width,
         )
         payload = {
             'transition': transition,
@@ -1044,22 +1071,52 @@ class BaselineTrainer:
 
             self.save_checkpoint('latest.pt')
             if final_evaluation:
+                index_30fps = (
+                    self.run_dir / 'analysis' / 'final_eval_30fps_index.pt'
+                )
+                index_120fps = (
+                    self.run_dir / 'analysis' / 'final_eval_120fps_index.pt'
+                )
                 self._evaluate(
                     30,
                     self.config.evaluation.final_episodes,
                     self.transitions,
-                    trajectory_output_path=(
-                        self.run_dir
-                        / 'analysis'
-                        / 'decision_trajectories_30fps.pt'
-                    ),
-                    trajectory_episodes=(
-                        self.config.analysis.trajectory_episodes
-                    ),
+                    episode_index_output_path=index_30fps,
                 )
                 self._evaluate(
-                    120, self.config.evaluation.final_episodes, self.transitions
+                    120,
+                    self.config.evaluation.final_episodes,
+                    self.transitions,
+                    episode_index_output_path=index_120fps,
                 )
+                replay_summary = replay_critical_episodes(
+                    self.model,
+                    episode_index_path=index_30fps,
+                    output_path=(
+                        self.run_dir
+                        / 'analysis'
+                        / 'critical_event_trajectories_30fps.pt'
+                    ),
+                    selected_episodes=(
+                        self.config.analysis.critical_event_episodes
+                    ),
+                    device=self.device,
+                    max_fruits=self.config.model.max_fruits,
+                    score_bin_width=self.config.analysis.score_bin_width,
+                    selection_seed=self.config.seed + 700,
+                )
+                self.dashboard.event(
+                    'critical_replay_finished',
+                    '关键事件局分层回放完成',
+                    **replay_summary,
+                )
+                event_plot = render_evaluation_event_analysis(
+                    self.run_dir,
+                    index_30fps,
+                    index_120fps,
+                    score_bin_width=self.config.analysis.score_bin_width,
+                )
+                self.dashboard.plot('evaluation_event_analysis', event_plot)
             self._export_transition_sample()
             final_path = self.save_checkpoint('final.pt')
             loaded = load_checkpoint(final_path, map_location='cpu')
