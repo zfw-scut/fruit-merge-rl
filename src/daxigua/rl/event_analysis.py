@@ -90,14 +90,18 @@ def render_evaluation_event_analysis(
     colors = ('#0067c0', '#8764b8', '#107c10', '#d13438')
     x = bin_starts.numpy()
 
+    def label(chinese, english):
+        return f'{chinese} / {english}' if has_chinese_font else english
+
     axis = axes[0, 0]
     axis.step(x, counts30.numpy() / max(1, scores30.numel()), where='post',
               label='30 FPS', color=colors[0], linewidth=2)
     axis.step(x, counts120.numpy() / max(1, scores120.numel()), where='post',
               label='120 FPS', color=colors[1], linewidth=2)
-    axis.set_title('分数密度 / Score density', loc='left', fontweight='bold')
-    axis.set_xlabel('分数 / Score')
-    axis.set_ylabel('对局比例 / Episode ratio')
+    axis.set_title(label('分数密度', 'Score density'),
+                   loc='left', fontweight='bold')
+    axis.set_xlabel(label('分数', 'Score'))
+    axis.set_ylabel(label('对局比例', 'Episode ratio'))
     axis.legend(frameon=False)
 
     axis = axes[0, 1]
@@ -110,19 +114,21 @@ def render_evaluation_event_analysis(
                 label=chinese if has_chinese_font else english,
                 color=color, linewidth=1.8,
             )
-    axis.set_title('30 FPS 的 L11 条件分布 / L11-conditioned',
+    axis.set_title(label('30 FPS 的 L11 条件分布',
+                         '30 FPS L11-conditioned distribution'),
                    loc='left', fontweight='bold')
-    axis.set_xlabel('分数 / Score')
-    axis.set_ylabel('条件比例 / Conditional ratio')
+    axis.set_xlabel(label('分数', 'Score'))
+    axis.set_ylabel(label('条件比例', 'Conditional ratio'))
     axis.legend(frameon=False, fontsize=9)
 
     axis = axes[1, 0]
     labels = [f'L{level}' for level in event_levels]
     axis.bar(labels, event_episode_rates, color=colors)
     axis.set_ylim(0.0, max(0.05, max(event_episode_rates, default=0.0) * 1.18))
-    axis.set_title('生成高等级水果的对局比例 / Created high levels',
+    axis.set_title(label('生成高等级水果的对局比例',
+                         'Episodes creating high-level fruits'),
                    loc='left', fontweight='bold')
-    axis.set_ylabel('对局比例 / Episode ratio')
+    axis.set_ylabel(label('对局比例', 'Episode ratio'))
     for index, value in enumerate(event_episode_rates):
         axis.text(index, value, f'{value:.1%}', ha='center', va='bottom')
 
@@ -130,9 +136,10 @@ def render_evaluation_event_analysis(
     source_counts = index30['source_level_merge_counts'].to(torch.float64)
     mean_counts = source_counts[:, 8:12].mean(dim=0)
     axis.bar(labels, mean_counts.numpy(), color=colors)
-    axis.set_title('每局高等级合成次数 / High-level merges per episode',
+    axis.set_title(label('每局高等级合成次数',
+                         'High-level merges per episode'),
                    loc='left', fontweight='bold')
-    axis.set_ylabel('平均次数 / Mean count')
+    axis.set_ylabel(label('平均次数', 'Mean count'))
     for index, value in enumerate(mean_counts.tolist()):
         axis.text(index, value, f'{value:.2f}', ha='center', va='bottom')
 
