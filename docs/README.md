@@ -12,6 +12,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model/MODEL_DESIGN_STATUS_OVERVIEW.md`：新模型组件、节点、边、输出、弃用项、设计状态和实现基础总览；
 - `model/GNN_DQN_BASELINE.md`：第一版 GNN-DQN 基线的模型范围、1-step Double DQN、纯分数奖励和排除项；
 - `model/GNN_DQN_TRAINING_SYSTEM.md`：30 FPS 独占训练、30/120 FPS 隔离评估、GPU Replay、性能标定、动态扩容、实时面板和云端归档规格；
+- `model/TRAINING_DATA_EXTENSION_ARCHITECTURE.md`：现有训练兼容的事实采集、派生监督、GPU/CPU 双出口和未来多任务扩展边界；
 - `model/FIVE_LAYER_EPSILON_ABLATION.md`：5层GNN的Fast/Slow epsilon成对训练、4096局双帧率评估和关键事件回放规格；
 - `model/REWARD_V2_ACCESSIBLE_SPACE.md`：纯可投放空间奖励、21列GPU几何、队列对齐、状态相关无合成参考与可视化契约；
 - `model/LOCAL_MODEL_VIEWER.md`：checkpoint 本地加载、120 FPS greedy 游玩、逐帧浏览器页面和 Q 值展示；
@@ -55,6 +56,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/34_归档四层分数基线扩容训练_2026_08_07.md`：记录5层门禁回退、4层正式训练、双帧率提升、性能代价与完整迁移证据。
 - `codex/36_五层GNN探索率对照与关键事件评估_2026_08_07.md`：实现分段epsilon、关键事件紧凑索引、动作锁定回放和串行训练编排。
 - `codex/37_归档五层GNN探索率对照训练_2026_08_07.md`：迁移Fast/Slow完整产物，归档双帧率、L11事件和探索率对照结论。
+- `codex/38_建立训练事实与派生监督扩展框架_2026_08_08.md`：建立不绑定具体优化算法的事实采集、派生监督和可插拔数据出口。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的

@@ -23,10 +23,54 @@ class ReplayBatch:
 class ReplayWriteTicket:
     indices: torch.Tensor
     source_rows: torch.Tensor
+    generations: torch.Tensor | None = None
 
     @property
     def count(self):
         return int(self.indices.numel())
+
+    @property
+    def reference(self):
+        if self.generations is None:
+            raise RuntimeError('versioned replay references are disabled')
+        return ReplayStateReference(
+            indices=self.indices,
+            generations=self.generations,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplayStateReference:
+    """带槽位代次的 Replay 只读引用。"""
+
+    indices: torch.Tensor
+    generations: torch.Tensor
+
+    def __post_init__(self):
+        if self.indices.shape != self.generations.shape:
+            raise ValueError('replay reference tensors must have equal shapes')
+        if self.indices.ndim != 1:
+            raise ValueError('replay reference tensors must be one-dimensional')
+        if self.indices.device != self.generations.device:
+            raise ValueError('replay reference tensors must share one device')
+
+    @property
+    def count(self):
+        return int(self.indices.numel())
+
+    def index_select(self, rows):
+        return type(self)(
+            indices=self.indices.index_select(0, rows),
+            generations=self.generations.index_select(0, rows),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReferencedReplayState:
+    """Replay 引用读取结果；``valid`` 为纯设备端代次校验。"""
+
+    state: TensorState
+    valid: torch.Tensor
 
 
 class GpuReplayBuffer:
@@ -53,7 +97,8 @@ class GpuReplayBuffer:
             queue_length=4,
             device='cuda',
             physics_fps=30.0,
-            seed=0):
+            seed=0,
+            enable_state_references=False):
         if capacity <= 0:
             raise ValueError('capacity must be positive')
         self.capacity = int(capacity)
@@ -63,8 +108,10 @@ class GpuReplayBuffer:
         if self.device.type == 'cuda' and self.device.index is None:
             self.device = torch.device('cuda', torch.cuda.current_device())
         self.physics_fps = float(physics_fps)
+        self.state_references_enabled = bool(enable_state_references)
         self._cursor = 0
         self._size = 0
+        self._next_generation = 1
         self._pending = None
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(int(seed))
@@ -103,6 +150,13 @@ class GpuReplayBuffer:
         self._stages = torch.empty(
             self.capacity, dtype=torch.uint8, device=self.device
         )
+        self._slot_generations = (
+            torch.zeros(
+                self.capacity, dtype=torch.int64, device=self.device
+            )
+            if self.state_references_enabled
+            else None
+        )
 
     def __len__(self):
         return self._size
@@ -116,7 +170,13 @@ class GpuReplayBuffer:
         tensors = (
             tuple(self._current.values())
             + tuple(self._next.values())
-            + (self._actions, self._rewards, self._terminals, self._stages)
+            + tuple(value for value in (
+                self._actions,
+                self._rewards,
+                self._terminals,
+                self._stages,
+                self._slot_generations,
+            ) if value is not None)
         )
         return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
 
@@ -160,7 +220,21 @@ class GpuReplayBuffer:
             torch.arange(count, device=self.device, dtype=torch.int64)
             + self._cursor
         ).remainder(self.capacity)
-        ticket = ReplayWriteTicket(indices=indices, source_rows=source_rows)
+        generations = None
+        if self.state_references_enabled:
+            generations = torch.arange(
+                self._next_generation,
+                self._next_generation + count,
+                device=self.device,
+                dtype=torch.int64,
+            )
+            self._next_generation += count
+            self._slot_generations.index_copy_(0, indices, generations)
+        ticket = ReplayWriteTicket(
+            indices=indices,
+            source_rows=source_rows,
+            generations=generations,
+        )
         self._copy_state(self._current, indices, state, source_rows)
         self._pending = ticket
         return ticket
@@ -226,6 +300,25 @@ class GpuReplayBuffer:
         )
 
     @torch.no_grad()
+    def gather_current(self, reference):
+        """读取被引用的决策前状态，并在设备端返回槽位是否仍有效。"""
+
+        if not isinstance(reference, ReplayStateReference):
+            raise TypeError('reference must be ReplayStateReference')
+        if not self.state_references_enabled:
+            raise RuntimeError('versioned replay references are disabled')
+        if reference.indices.device != self.device:
+            raise ValueError('reference and replay must use the same device')
+        indices = reference.indices
+        valid = self._slot_generations.index_select(0, indices).eq(
+            reference.generations
+        )
+        return ReferencedReplayState(
+            state=self._state_at(self._current, indices),
+            valid=valid,
+        )
+
+    @torch.no_grad()
     def sample(self, batch_size):
         batch_size = int(batch_size)
         if batch_size <= 0:
@@ -254,8 +347,12 @@ class GpuReplayBuffer:
             'capacity': self.capacity,
             'size': self._size,
             'cursor': self._cursor,
+            'next_generation': (
+                self._next_generation if self.state_references_enabled else None
+            ),
             'memory_bytes': self.memory_bytes,
             'physics_fps': self.physics_fps,
             'replay_saved_in_checkpoint': False,
             'stage_labels_saved': True,
+            'versioned_state_references': self.state_references_enabled,
         }

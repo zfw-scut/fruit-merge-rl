@@ -30,6 +30,8 @@ from .autoscale import AdaptiveScaleController
 from .config import TrainingConfig
 from .evaluation import evaluate_policy, replay_critical_episodes
 from .event_analysis import render_evaluation_event_analysis
+from .decision_data import ActionSelectionBatch
+from .key_decisions import KeyDecisionCollector
 from .learner import DqnLearner
 from .model import BaselineGnnDqn
 from .monitoring import DashboardPublisher, ResourceSampler
@@ -152,7 +154,13 @@ class BaselineTrainer:
         100_000_000,
     )
 
-    def __init__(self, config, *, project_root=None):
+    def __init__(
+            self,
+            config,
+            *,
+            project_root=None,
+            decision_selector=None,
+            decision_sinks=()):
         if not isinstance(config, TrainingConfig):
             raise TypeError('config must be TrainingConfig')
         self.config = config
@@ -216,6 +224,11 @@ class BaselineTrainer:
         ).to(self.device)
         self.learner = DqnLearner(base_model, config.dqn)
         self.model = self.learner.online_model
+        decision_collection_active = bool(
+            config.decision_data.enabled
+            and decision_selector is not None
+            and getattr(decision_selector, 'active', True)
+        )
         self.replay = GpuReplayBuffer(
             config.replay.capacity,
             max_fruits=config.model.max_fruits,
@@ -223,6 +236,15 @@ class BaselineTrainer:
             device=self.device,
             physics_fps=self.simulator_config.physics_fps,
             seed=config.seed + 1,
+            enable_state_references=decision_collection_active,
+        )
+        self.key_decision_collector = KeyDecisionCollector(
+            config.decision_data,
+            replay=self.replay,
+            simulator=self.simulator,
+            run_dir=self.run_dir,
+            selector=decision_selector,
+            extra_sinks=decision_sinks,
         )
         self.dashboard = DashboardPublisher(config.dashboard, self.run_dir)
         self.resource_sampler = ResourceSampler(os.getpid())
@@ -314,6 +336,7 @@ class BaselineTrainer:
 
     def _reset_finished(self, finished):
         if bool(finished.any().item()):
+            self.key_decision_collector.on_env_reset(finished)
             observation = self.simulator.reset(finished)
             if self.reward_computer is not None:
                 self.reward_computer.reset_rows(finished, observation)
@@ -538,7 +561,7 @@ class BaselineTrainer:
         )
 
     @torch.no_grad()
-    def _select_actions(self, state, epsilon):
+    def _select_action_batch(self, state, epsilon):
         self.model.eval()
         q_values = self.model(state)
         greedy = q_values.argmax(dim=1)
@@ -548,15 +571,30 @@ class BaselineTrainer:
             device=self.device,
         )
         explore = torch.rand(state.batch_size, device=self.device) < epsilon
-        return torch.where(explore, random_actions, greedy)
+        return ActionSelectionBatch(
+            actions=torch.where(explore, random_actions, greedy),
+            greedy_actions=greedy,
+            explore_mask=explore,
+            q_values=q_values,
+        )
+
+    @torch.no_grad()
+    def _select_actions(self, state, epsilon):
+        """保留现有内部/测试调用的动作 Tensor 兼容接口。"""
+
+        return self._select_action_batch(state, epsilon).actions
+
+    def _episode_finished(self, result):
+        return (
+            result.physics.done[:self.active_envs]
+            | (
+                result.observation.step_count[:self.active_envs]
+                >= self.config.max_episode_drops
+            )
+        )
 
     def _record_episodes(self, result):
-        active_done = result.physics.done[:self.active_envs]
-        time_limit = (
-            result.observation.step_count[:self.active_envs]
-            >= self.config.max_episode_drops
-        )
-        finished = active_done | time_limit
+        finished = self._episode_finished(result)
         if bool(finished.any().item()):
             finished_scores = [
                 int(value)
@@ -601,6 +639,7 @@ class BaselineTrainer:
             new_rows,
             seeds=self.config.seed + self.transitions + target_envs,
         )
+        self.key_decision_collector.on_env_reset(new_rows)
         targets = torch.zeros(
             self.config.max_envs, dtype=torch.int64, device=self.device
         )
@@ -650,6 +689,7 @@ class BaselineTrainer:
             replay_metadata=self.replay.metadata(),
             extra={
                 'replay_resume_policy': 'rebuild',
+                'decision_data': self.key_decision_collector.metrics(),
                 **(extra or {}),
             },
         )
@@ -872,6 +912,11 @@ class BaselineTrainer:
             **stage_seconds,
             **self.training_metrics.flush(),
             **self.reward_metrics.flush(),
+            **{
+                f'decision_data_{name}': value
+                for name, value
+                in self.key_decision_collector.metrics().items()
+            },
         }
         action_counts = self.action_counts.detach().cpu()
         payload['action_counts'] = action_counts.tolist()
@@ -943,6 +988,7 @@ class BaselineTrainer:
             'physics_seconds': 0.0,
             'reward_seconds': 0.0,
             'learner_seconds': 0.0,
+            'decision_data_seconds': 0.0,
         }
         try:
             while (
@@ -958,9 +1004,10 @@ class BaselineTrainer:
                 )
                 current_stages = self._classify_stages(observation)
                 actor_started = time.perf_counter()
-                active_actions = self._select_actions(
+                action_selection = self._select_action_batch(
                     current, self.epsilon()
                 )
+                active_actions = action_selection.actions
                 self.action_counts += torch.bincount(
                     active_actions,
                     minlength=self.config.model.action_count,
@@ -975,6 +1022,20 @@ class BaselineTrainer:
                 stage_seconds['actor_seconds'] += (
                     time.perf_counter() - actor_started
                 )
+                staged_decisions = None
+                if self.key_decision_collector.active:
+                    collection_started = time.perf_counter()
+                    staged_decisions = self.key_decision_collector.stage_pre(
+                        current=current,
+                        action_selection=action_selection,
+                        ticket=ticket,
+                        environment_rows=self._active_rows(),
+                        transition_start=previous_transitions,
+                        policy_version=self.learner.update_count,
+                    )
+                    stage_seconds['decision_data_seconds'] += (
+                        time.perf_counter() - collection_started
+                    )
 
                 physics_started = time.perf_counter()
                 result = self._step(full_actions, self._enabled_mask())
@@ -1002,6 +1063,19 @@ class BaselineTrainer:
                     terminals,
                     current_stages,
                 )
+                if staged_decisions is not None:
+                    collection_started = time.perf_counter()
+                    self.key_decision_collector.observe_post(
+                        staged_decisions,
+                        result=result,
+                        next_state=next_state,
+                        rewards=rewards,
+                        stages=current_stages,
+                        episode_finished=self._episode_finished(result),
+                    )
+                    stage_seconds['decision_data_seconds'] += (
+                        time.perf_counter() - collection_started
+                    )
                 self.transitions += self.active_envs
                 self.simulated_transitions += self.active_envs
                 window_transitions += self.active_envs
@@ -1066,6 +1140,7 @@ class BaselineTrainer:
                         'physics_seconds': 0.0,
                         'reward_seconds': 0.0,
                         'learner_seconds': 0.0,
+                        'decision_data_seconds': 0.0,
                     }
                     last_log = window_started
 
@@ -1118,6 +1193,7 @@ class BaselineTrainer:
                 )
                 self.dashboard.plot('evaluation_event_analysis', event_plot)
             self._export_transition_sample()
+            self.key_decision_collector.close()
             final_path = self.save_checkpoint('final.pt')
             loaded = load_checkpoint(final_path, map_location='cpu')
             if int(loaded['progress']['transitions']) != self.transitions:
@@ -1159,5 +1235,9 @@ class BaselineTrainer:
             )
             raise
         finally:
+            try:
+                self.key_decision_collector.close()
+            except BaseException:
+                pass
             self.resource_sampler.close()
             self.dashboard.close()

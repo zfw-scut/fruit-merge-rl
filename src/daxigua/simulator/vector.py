@@ -23,6 +23,7 @@ from daxigua.core import (
 
 from .config import SimulatorConfig
 from .types import (
+    BatchDecisionSidecar,
     BatchDropResult,
     BatchMergeEvents,
     BatchObservation,
@@ -1803,6 +1804,36 @@ class TensorVectorSimulator:
             empty_space_ratio=empty_space_ratio,
             danger_progress=danger_progress,
             over_danger_line=over_danger_line,
+        )
+
+    @torch.no_grad()
+    def export_decision_sidecar(self, rows=None):
+        """复制指定环境在决策边界的当前候选引擎状态。
+
+        该接口只读且保持结果常驻调用方所在设备。它不导出主 Replay 已保存的模型
+        状态，也不执行 CPU 转换、物理推进或状态恢复。
+        """
+
+        if rows is None:
+            rows = self._env_indices
+        else:
+            rows = torch.as_tensor(
+                rows, dtype=torch.int64, device=self.device
+            ).flatten()
+        if rows.ndim != 1:
+            raise ValueError('rows must be one-dimensional')
+        return BatchDecisionSidecar(
+            angles=self.angles.index_select(0, rows),
+            fruit_ids=self.fruit_ids.index_select(0, rows),
+            score=self.score.index_select(0, rows),
+            last_score=self.last_score.index_select(0, rows),
+            step_count=self.step_count.index_select(0, rows),
+            physics_frame=self.physics_frame.index_select(0, rows),
+            fail_frames=self.fail_frames.index_select(0, rows),
+            next_fruit_id=self.next_fruit_id.index_select(0, rows),
+            rng_state=self.rng_state.index_select(0, rows),
+            episode_count=self.episode_count.index_select(0, rows),
+            terminated=self.terminated.index_select(0, rows),
         )
 
     def action_candidates(self, env_index):

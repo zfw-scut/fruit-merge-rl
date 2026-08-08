@@ -196,6 +196,40 @@ class AnalysisExportConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DecisionDataConfig:
+    """训练期事实采集框架配置；默认关闭且不改变基线热路径。"""
+
+    enabled: bool = False
+    max_candidates_per_step: int = 8
+    gpu_retention_capacity: int = 0
+    archive_enabled: bool = True
+    archive_subdirectory: str = 'analysis/decision_facts'
+    archive_shard_records: int = 1024
+    archive_queue_size: int = 8
+    max_archive_bytes: int = 0
+
+    def __post_init__(self):
+        if self.max_candidates_per_step <= 0:
+            raise ValueError('max_candidates_per_step must be positive')
+        if self.gpu_retention_capacity < 0:
+            raise ValueError('gpu_retention_capacity cannot be negative')
+        if self.archive_shard_records <= 0:
+            raise ValueError('archive_shard_records must be positive')
+        if self.archive_queue_size <= 0:
+            raise ValueError('archive_queue_size must be positive')
+        if self.max_archive_bytes < 0:
+            raise ValueError('max_archive_bytes cannot be negative')
+        subdirectory = Path(self.archive_subdirectory)
+        if (
+                not self.archive_subdirectory.strip()
+                or subdirectory.is_absolute()
+                or '..' in subdirectory.parts):
+            raise ValueError(
+                'archive_subdirectory must stay inside the run directory'
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DashboardConfig:
     enabled: bool = True
     host: str = '127.0.0.1'
@@ -256,6 +290,9 @@ class TrainingConfig:
     replay: ReplayConfig = field(default_factory=ReplayConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     analysis: AnalysisExportConfig = field(default_factory=AnalysisExportConfig)
+    decision_data: DecisionDataConfig = field(
+        default_factory=DecisionDataConfig
+    )
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     autoscale: AutoScaleConfig = field(default_factory=AutoScaleConfig)
 
@@ -288,6 +325,7 @@ class TrainingConfig:
             replay=ReplayConfig(**data.get('replay', {})),
             evaluation=EvaluationConfig(**data.get('evaluation', {})),
             analysis=AnalysisExportConfig(**data.get('analysis', {})),
+            decision_data=DecisionDataConfig(**data.get('decision_data', {})),
             dashboard=DashboardConfig(**data.get('dashboard', {})),
             autoscale=AutoScaleConfig(**data.get('autoscale', {})),
         )

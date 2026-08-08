@@ -37,6 +37,7 @@ from .scenario_lab_server import ScenarioLabServer
 from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import ScenarioLabEvaluator, validate_scenario
 from .types import (
+    BatchDecisionSidecar,
     BatchDropResult,
     BatchMergeEvents,
     BatchObservation,
@@ -47,6 +48,7 @@ from .types import (
 from .vector import SingleEnvAdapter, TensorVectorSimulator, VectorEnv
 
 __all__ = [
+    'BatchDecisionSidecar',
     'BatchDropResult',
     'BatchMergeEvents',
     'BatchObservation',

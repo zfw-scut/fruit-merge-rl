@@ -4,6 +4,7 @@ from .config import (
     AnalysisExportConfig,
     AutoScaleConfig,
     DashboardConfig,
+    DecisionDataConfig,
     DqnConfig,
     EvaluationConfig,
     ModelConfig,
@@ -13,14 +14,37 @@ from .config import (
 )
 from .model import BaselineGnnDqn
 from .observations import TensorState
+from .decision_data import (
+    ActionSelectionBatch,
+    DecisionFactBatch,
+    DecisionSelectionBatch,
+    DerivedSupervisionBatch,
+    GpuDecisionBuffer,
+)
+from .key_decisions import (
+    DecisionPostContext,
+    DecisionPreContext,
+    EmptyDecisionSelector,
+    KeyDecisionCollector,
+)
 
 __all__ = [
     'AnalysisExportConfig',
+    'ActionSelectionBatch',
     'AutoScaleConfig',
     'BaselineGnnDqn',
     'DashboardConfig',
+    'DecisionDataConfig',
+    'DecisionFactBatch',
+    'DecisionPostContext',
+    'DecisionPreContext',
+    'DecisionSelectionBatch',
+    'DerivedSupervisionBatch',
     'DqnConfig',
     'EvaluationConfig',
+    'EmptyDecisionSelector',
+    'GpuDecisionBuffer',
+    'KeyDecisionCollector',
     'ModelConfig',
     'RewardConfig',
     'ReplayConfig',

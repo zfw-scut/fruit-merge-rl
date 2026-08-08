@@ -48,6 +48,45 @@ class BatchObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class BatchDecisionSidecar:
+    """决策边界当前已识别的重放候选附加状态。
+
+    模型状态和主 Replay 已经保存位置、速度、等级、碰撞半径、年龄、活动掩码、
+    队列和危险进度。本契约只补充当前已知可能用于未来状态恢复、但不应进入
+    模型输入的引擎字段。恢复器实现后仍需通过轨迹一致性测试确定字段集。
+    所有 Tensor 的第一维都对应同一批环境。
+    """
+
+    angles: torch.Tensor
+    fruit_ids: torch.Tensor
+    score: torch.Tensor
+    last_score: torch.Tensor
+    step_count: torch.Tensor
+    physics_frame: torch.Tensor
+    fail_frames: torch.Tensor
+    next_fruit_id: torch.Tensor
+    rng_state: torch.Tensor
+    episode_count: torch.Tensor
+    terminated: torch.Tensor
+
+    @property
+    def batch_size(self):
+        return int(self.score.shape[0])
+
+    def index_select(self, rows):
+        return type(self)(**{
+            field_name: getattr(self, field_name).index_select(0, rows)
+            for field_name in self.__dataclass_fields__
+        })
+
+    def cpu(self):
+        return type(self)(**{
+            field_name: getattr(self, field_name).detach().cpu()
+            for field_name in self.__dataclass_fields__
+        })
+
+
+@dataclass(frozen=True, slots=True)
 class BatchMergeEvents:
     """定长的批量合成事件缓冲。"""
 
