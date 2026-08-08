@@ -152,6 +152,8 @@ class ActionSelectionBatch:
     greedy_actions: torch.Tensor
     explore_mask: torch.Tensor
     q_values: torch.Tensor
+    uncertainty: torch.Tensor | None = None
+    active_learning_mask: torch.Tensor | None = None
 
     def __post_init__(self):
         if not isinstance(self.q_values, torch.Tensor) or self.q_values.ndim != 2:
@@ -174,6 +176,20 @@ class ActionSelectionBatch:
             raise TypeError('greedy_actions must use an integer dtype')
         if self.explore_mask.dtype != torch.bool:
             raise TypeError('explore_mask must use bool dtype')
+        if self.uncertainty is not None:
+            if self.uncertainty.shape != self.q_values.shape:
+                raise ValueError('uncertainty shape must match q_values')
+            if self.uncertainty.device != self.q_values.device:
+                raise ValueError('uncertainty and q_values must share device')
+        if self.active_learning_mask is not None:
+            _vector(
+                'active_learning_mask',
+                self.active_learning_mask,
+                batch_size,
+                device=self.q_values.device,
+            )
+            if self.active_learning_mask.dtype != torch.bool:
+                raise TypeError('active_learning_mask must use bool dtype')
 
     @property
     def batch_size(self):
@@ -328,6 +344,16 @@ class DecisionFactBatch:
                 ),
                 'explore_mask': self.action_selection.explore_mask.detach(),
                 'q_values': self.action_selection.q_values.detach(),
+                'uncertainty': (
+                    None
+                    if self.action_selection.uncertainty is None
+                    else self.action_selection.uncertainty.detach()
+                ),
+                'active_learning_mask': (
+                    None
+                    if self.action_selection.active_learning_mask is None
+                    else self.action_selection.active_learning_mask.detach()
+                ),
             },
             'outcome': {
                 'rewards': self.rewards.detach(),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import torch
 from torch import nn
@@ -17,6 +18,40 @@ from daxigua.core import (
 
 from .config import ModelConfig
 from .observations import TensorState
+
+
+class ActionEffectPredictions(NamedTuple):
+    merge_logit: torch.Tensor
+    merge_count_logits: torch.Tensor
+    q0_participated_logit: torch.Tensor
+    q0_lineage_depth_logits: torch.Tensor
+    q0_final_level_logits: torch.Tensor
+    contact_type_logits: torch.Tensor
+    contact_primary_type_logits: torch.Tensor
+    contact_position: torch.Tensor
+    contact_level_delta_logits: torch.Tensor
+    contact_normal: torch.Tensor
+    contact_age: torch.Tensor
+    contact_normal_speed: torch.Tensor
+    generation_exists_logits: torch.Tensor
+    generation_position: torch.Tensor
+    generation_level_logits: torch.Tensor
+    score_delta: torch.Tensor
+    fruit_count_delta: torch.Tensor
+    final_exists_logit: torch.Tensor
+    final_state: torch.Tensor
+    stable_logit: torch.Tensor
+    settle_timeout_logit: torch.Tensor
+    terminal_logit: torch.Tensor
+    settle_duration: torch.Tensor
+    danger_delta: torch.Tensor
+    over_danger_line_logit: torch.Tensor
+
+
+class ModelOutput(NamedTuple):
+    q_values: torch.Tensor
+    head_q_values: torch.Tensor
+    action_effects: ActionEffectPredictions | None
 
 
 def _mlp(input_dim, hidden_dim, output_dim):
@@ -216,6 +251,26 @@ class BaselineGnnDqn(nn.Module):
         self.action_norm = nn.LayerNorm(hidden_dim)
         self.value_head = _mlp(hidden_dim, hidden_dim, 1)
         self.advantage_head = _mlp(hidden_dim, hidden_dim, 1)
+        self.extra_value_heads = nn.ModuleList(
+            _mlp(hidden_dim, hidden_dim, 1)
+            for _ in range(self.config.policy_head_count - 1)
+        )
+        self.extra_advantage_heads = nn.ModuleList(
+            _mlp(hidden_dim, hidden_dim, 1)
+            for _ in range(self.config.policy_head_count - 1)
+        )
+        if self.config.action_effect_enabled:
+            self.action_effect_encoder = _mlp(
+                hidden_dim, hidden_dim, hidden_dim
+            )
+            self.action_effect_binary_head = nn.Linear(hidden_dim, 14)
+            self.action_effect_categorical_head = nn.Linear(hidden_dim, 91)
+            self.action_effect_continuous_head = nn.Linear(hidden_dim, 21)
+        else:
+            self.action_effect_encoder = None
+            self.action_effect_binary_head = None
+            self.action_effect_categorical_head = None
+            self.action_effect_continuous_head = None
 
         display_radii = [0.0] + [
             float(fruit_radius(level))
@@ -619,7 +674,51 @@ class BaselineGnnDqn(nn.Module):
         ))
         return self.action_norm(base + light_summary + detail_summary)
 
-    def forward(self, state):
+    def _predict_action_effects(self, action_hidden):
+        if not self.config.action_effect_enabled:
+            return None
+        hidden = self.action_effect_encoder(action_hidden)
+        binary = self.action_effect_binary_head(hidden)
+        categorical = self.action_effect_categorical_head(hidden)
+        continuous = self.action_effect_continuous_head(hidden)
+        batch, actions, _ = hidden.shape
+        return ActionEffectPredictions(
+            merge_logit=binary[..., 0],
+            merge_count_logits=categorical[..., 0:9],
+            q0_participated_logit=binary[..., 1],
+            q0_lineage_depth_logits=categorical[..., 9:17],
+            q0_final_level_logits=categorical[..., 17:29],
+            contact_type_logits=binary[..., 2:6],
+            contact_primary_type_logits=categorical[..., 29:34],
+            contact_position=continuous[..., 0:2],
+            contact_level_delta_logits=categorical[..., 34:55],
+            contact_normal=continuous[..., 2:4],
+            contact_age=continuous[..., 4],
+            contact_normal_speed=continuous[..., 5],
+            generation_exists_logits=binary[..., 6:9],
+            generation_position=continuous[..., 6:12].reshape(
+                batch, actions, 3, 2
+            ),
+            generation_level_logits=categorical[..., 55:91].reshape(
+                batch, actions, 3, 12
+            ),
+            score_delta=continuous[..., 12],
+            fruit_count_delta=continuous[..., 13],
+            final_exists_logit=binary[..., 9],
+            final_state=continuous[..., 14:19],
+            stable_logit=binary[..., 10],
+            settle_timeout_logit=binary[..., 11],
+            terminal_logit=binary[..., 12],
+            settle_duration=continuous[..., 19],
+            danger_delta=continuous[..., 20],
+            over_danger_line_logit=binary[..., 13],
+        )
+
+    def forward_with_details(
+            self,
+            state,
+            predict_action_effects=True,
+            action_effect_batch_size=None):
         self._validate_state(state)
         fruit_hidden = self._encode_fruits(state)
         queue_hidden = self._encode_queue(state)
@@ -633,6 +732,37 @@ class BaselineGnnDqn(nn.Module):
             global_hidden,
             queue_flat,
         )
-        value = self.value_head(global_hidden)
-        advantage = self.advantage_head(action_hidden).squeeze(-1)
-        return value + advantage - advantage.mean(dim=1, keepdim=True)
+        head_values = []
+        value_heads = (self.value_head, *self.extra_value_heads)
+        advantage_heads = (self.advantage_head, *self.extra_advantage_heads)
+        for value_head, advantage_head in zip(value_heads, advantage_heads):
+            value = value_head(global_hidden)
+            advantage = advantage_head(action_hidden).squeeze(-1)
+            head_values.append(
+                value + advantage - advantage.mean(dim=1, keepdim=True)
+            )
+        head_q_values = torch.stack(head_values, dim=1)
+        return ModelOutput(
+            q_values=head_q_values.mean(dim=1),
+            head_q_values=head_q_values,
+            action_effects=(
+                self._predict_action_effects(
+                    action_hidden
+                    if action_effect_batch_size is None
+                    else action_hidden[:action_effect_batch_size]
+                )
+                if predict_action_effects
+                else None
+            ),
+        )
+
+    def forward(
+            self,
+            state,
+            return_details=False,
+            predict_action_effects=False,
+            action_effect_batch_size=None):
+        output = self.forward_with_details(
+            state, predict_action_effects, action_effect_batch_size
+        )
+        return output if return_details else output.q_values

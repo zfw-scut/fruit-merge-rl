@@ -163,6 +163,17 @@ simulator.reset(reset_mask)
 `configs/gnn_dqn_reward_v2_1.toml` 使用状态相关参考空间奖励。通用
 `VectorEnv` 仍必须显式提供 `RewardComputer`，不能把游戏分数静默当成其它任务的奖励。
 
+辅助动作效果、多策略头 bootstrap 和低 epsilon 不确定性探索使用独立配置
+`configs/gnn_dqn_auxiliary_action_l5_24m.toml`。云服务器先运行：
+
+```powershell
+& $python tools\preflight_training.py `
+    --config configs\gnn_dqn_auxiliary_action_l5_24m.toml
+```
+
+预检通过后再用相同配置启动 `tools\train_gnn_dqn.py`；不要把预览图或 smoke 指标当作
+正式效果结论。
+
 ## 验证和性能
 
 PowerShell：

@@ -23,6 +23,7 @@ from daxigua.core import (
 
 from .config import SimulatorConfig
 from .types import (
+    BatchActionEffectEvents,
     BatchDecisionSidecar,
     BatchDropResult,
     BatchMergeEvents,
@@ -49,6 +50,14 @@ def _angular_cross(angular_velocity, radius_vector):
         ),
         dim=-1,
     )
+
+
+def _gather_row(values, indices):
+    width = values.shape[-1]
+    return values.gather(
+        1,
+        indices[:, None, None].expand(-1, 1, width),
+    ).squeeze(1)
 
 
 class TensorVectorSimulator:
@@ -159,6 +168,26 @@ class TensorVectorSimulator:
         self._event_new_fruit_ids = torch.zeros_like(
             self._event_source_levels
         )
+        self._first_contact_type_mask = torch.zeros_like(self.score)
+        self._first_contact_primary_type = torch.zeros_like(self.score)
+        self._first_contact_position = torch.zeros(
+            (batch, 2), dtype=self.float_dtype, device=self.device
+        )
+        self._first_contact_level_delta = torch.zeros_like(self.score)
+        self._first_contact_normal = torch.zeros_like(
+            self._first_contact_position
+        )
+        self._first_contact_age_frames = torch.full_like(self.score, -1)
+        self._first_contact_normal_speed = torch.zeros(
+            batch, dtype=self.float_dtype, device=self.device
+        )
+        self._q0_participated = torch.zeros(
+            batch, dtype=torch.bool, device=self.device
+        )
+        self._q0_lineage_depth = torch.zeros_like(self.score)
+        self._q0_final_fruit_id = torch.zeros_like(self.score)
+        self._q0_final_level = torch.zeros_like(self.score)
+        self._q0_final_slot = torch.full_like(self.score, -1)
 
         pair_indices = torch.triu_indices(
             capacity,
@@ -329,6 +358,18 @@ class TensorVectorSimulator:
         self._event_score_deltas.zero_()
         self._event_source_ids.zero_()
         self._event_new_fruit_ids.zero_()
+        self._first_contact_type_mask.zero_()
+        self._first_contact_primary_type.zero_()
+        self._first_contact_position.zero_()
+        self._first_contact_level_delta.zero_()
+        self._first_contact_normal.zero_()
+        self._first_contact_age_frames.fill_(-1)
+        self._first_contact_normal_speed.zero_()
+        self._q0_participated.zero_()
+        self._q0_lineage_depth.zero_()
+        self._q0_final_fruit_id.zero_()
+        self._q0_final_level.zero_()
+        self._q0_final_slot.fill_(-1)
 
     def action_positions(self):
         """返回每个环境当前水果的全部投放位置。"""
@@ -414,6 +455,10 @@ class TensorVectorSimulator:
         self._last_drop_x.copy_(drop_x)
         self._last_drop_id.copy_(fruit_id)
         self._last_queue_after.copy_(self.fruit_queue)
+        if self.config.track_action_effects:
+            self._q0_final_fruit_id.copy_(fruit_id)
+            self._q0_final_level.copy_(level)
+            self._q0_final_slot.copy_(slots)
 
     def _drop_fast_forward_eligibility(self):
         """判断投放前各环境能否安全跳过新水果的无碰撞下落。"""
@@ -932,6 +977,44 @@ class TensorVectorSimulator:
             source_ids,
             pair_new_id,
         )
+        if self.config.track_action_effects:
+            lineage_id = self._q0_final_fruit_id[:, None]
+            lineage_merge = selected & (
+                (source_ids[..., 0] == lineage_id)
+                | (source_ids[..., 1] == lineage_id)
+            )
+            has_lineage_merge = lineage_merge.any(dim=1)
+            selected_new_id = (
+                pair_new_id * lineage_merge.to(torch.int64)
+            ).sum(dim=1)
+            selected_level = (
+                target_level * lineage_merge.to(torch.int64)
+            ).sum(dim=1)
+            selected_slot = (
+                pair_i.view(1, -1)
+                * lineage_merge.to(torch.int64)
+            ).sum(dim=1)
+            self._q0_participated |= has_lineage_merge
+            self._q0_lineage_depth += has_lineage_merge.to(torch.int64)
+            self._q0_final_fruit_id = torch.where(
+                has_lineage_merge,
+                selected_new_id,
+                self._q0_final_fruit_id,
+            )
+            self._q0_final_level = torch.where(
+                has_lineage_merge,
+                selected_level,
+                self._q0_final_level,
+            )
+            self._q0_final_slot = torch.where(
+                has_lineage_merge & (selected_new_id > 0),
+                selected_slot,
+                torch.where(
+                    has_lineage_merge,
+                    torch.full_like(self._q0_final_slot, -1),
+                    self._q0_final_slot,
+                ),
+            )
 
         frame_score = event_score * selected_int
         frame_score_total = frame_score.sum(dim=1)
@@ -1208,6 +1291,183 @@ class TensorVectorSimulator:
         ).clamp_max(self.config.max_collision_substeps)
         return torch.where(running, counts, torch.ones_like(counts))
 
+    def _record_first_contacts(self, running):
+        """记录原始 q0 在最早语义帧内的全部接触和主接触。"""
+
+        if not self.config.track_action_effects:
+            return
+        q0_mask = (
+            self.active
+            & (self.fruit_ids == self._last_drop_id[:, None])
+            & running[:, None]
+        )
+        present = q0_mask.any(dim=1)
+        slots = q0_mask.to(torch.int8).argmax(dim=1)
+        envs = self._env_indices
+        position = self.positions[envs, slots]
+        velocity = self.velocities[envs, slots]
+        radius = self.physics_radii[envs, slots]
+        level = self.levels[envs, slots]
+        age = self.age_frames[envs, slots]
+
+        left = present & (
+            position[:, 0] - radius <= self.config.wall_width
+        )
+        right = present & (
+            position[:, 0] + radius
+            >= self.config.board_width - self.config.wall_width
+        )
+        floor = present & (
+            position[:, 1] + radius
+            >= self.config.board_height - self.config.wall_width
+        )
+        wall_candidates = torch.stack((floor, left, right), dim=1)
+        wall_normals = torch.tensor(
+            ((0.0, -1.0), (1.0, 0.0), (-1.0, 0.0)),
+            dtype=self.float_dtype,
+            device=self.device,
+        ).unsqueeze(0).expand(self.num_envs, -1, -1)
+        wall_speeds = (
+            -(velocity[:, None, :] * wall_normals).sum(dim=-1)
+        ).clamp_min(0.0)
+        wall_positions = torch.stack((
+            torch.stack((
+                position[:, 0],
+                torch.full_like(
+                    position[:, 1],
+                    self.config.board_height - self.config.wall_width,
+                ),
+            ), dim=-1),
+            torch.stack((
+                torch.full_like(
+                    position[:, 0], self.config.wall_width
+                ),
+                position[:, 1],
+            ), dim=-1),
+            torch.stack((
+                torch.full_like(
+                    position[:, 0],
+                    self.config.board_width - self.config.wall_width,
+                ),
+                position[:, 1],
+            ), dim=-1),
+        ), dim=1)
+
+        delta = position[:, None, :] - self.positions
+        distance_squared = delta.square().sum(dim=-1)
+        distance = distance_squared.clamp_min(1e-12).sqrt()
+        radius_sum = radius[:, None] + self.physics_radii
+        fruit_candidates = (
+            present[:, None]
+            & self.active
+            & ~q0_mask
+            & (distance <= radius_sum)
+        )
+        fruit_normals = delta / distance.unsqueeze(-1)
+        fallback = torch.zeros_like(fruit_normals)
+        fallback[..., 0] = 1.0
+        fruit_normals = torch.where(
+            (distance_squared < 1e-12).unsqueeze(-1),
+            fallback,
+            fruit_normals,
+        )
+        relative_velocity = velocity[:, None, :] - self.velocities
+        fruit_speeds = (
+            -(relative_velocity * fruit_normals).sum(dim=-1)
+        ).clamp_min(0.0)
+        fruit_scores = fruit_speeds.masked_fill(
+            ~fruit_candidates, -1.0
+        )
+        fruit_slot = fruit_scores.argmax(dim=1)
+        fruit_found = fruit_candidates.any(dim=1)
+        fruit_normal = _gather_row(fruit_normals, fruit_slot)
+        fruit_position = position - fruit_normal * radius[:, None]
+        fruit_speed = fruit_scores.gather(
+            1, fruit_slot[:, None]
+        ).squeeze(1).clamp_min(0.0)
+        fruit_level = self.levels.gather(
+            1, fruit_slot[:, None]
+        ).squeeze(1)
+        fruit_level_delta = fruit_level - level
+
+        contact_mask = (
+            floor.to(torch.int64)
+            | (left.to(torch.int64) << 1)
+            | (right.to(torch.int64) << 2)
+            | (fruit_found.to(torch.int64) << 3)
+        )
+        any_contact = contact_mask != 0
+        candidates = torch.cat(
+            (wall_candidates, fruit_found[:, None]), dim=1
+        )
+        speeds = torch.cat((wall_speeds, fruit_speed[:, None]), dim=1)
+        best_scores = speeds.masked_fill(~candidates, -1.0)
+        primary = best_scores.argmax(dim=1)
+        primary_speed = best_scores.gather(
+            1, primary[:, None]
+        ).squeeze(1).clamp_min(0.0)
+        all_positions = torch.cat(
+            (wall_positions, fruit_position[:, None, :]), dim=1
+        )
+        all_normals = torch.cat(
+            (wall_normals, fruit_normal[:, None, :]), dim=1
+        )
+        primary_position = _gather_row(all_positions, primary)
+        primary_normal = _gather_row(all_normals, primary)
+        primary_type = primary + 1
+
+        unrecorded = self._first_contact_age_frames < 0
+        earlier = any_contact & (
+            unrecorded | (age < self._first_contact_age_frames)
+        )
+        same_frame = any_contact & (
+            age == self._first_contact_age_frames
+        )
+        self._first_contact_type_mask = torch.where(
+            earlier,
+            contact_mask,
+            torch.where(
+                same_frame,
+                self._first_contact_type_mask | contact_mask,
+                self._first_contact_type_mask,
+            ),
+        )
+        replace_primary = earlier | (
+            same_frame
+            & (primary_speed > self._first_contact_normal_speed)
+        )
+        self._first_contact_age_frames = torch.where(
+            earlier, age, self._first_contact_age_frames
+        )
+        self._first_contact_primary_type = torch.where(
+            replace_primary, primary_type, self._first_contact_primary_type
+        )
+        self._first_contact_position = torch.where(
+            replace_primary[:, None],
+            primary_position,
+            self._first_contact_position,
+        )
+        self._first_contact_normal = torch.where(
+            replace_primary[:, None],
+            primary_normal,
+            self._first_contact_normal,
+        )
+        self._first_contact_normal_speed = torch.where(
+            replace_primary,
+            primary_speed,
+            self._first_contact_normal_speed,
+        )
+        primary_is_fruit = replace_primary & (primary == 3)
+        self._first_contact_level_delta = torch.where(
+            primary_is_fruit,
+            fruit_level_delta,
+            torch.where(
+                replace_primary,
+                torch.zeros_like(self._first_contact_level_delta),
+                self._first_contact_level_delta,
+            ),
+        )
+
     def _advance_collision_substeps(self, running):
         """推进一个语义帧，并只对需要的环境增加内部碰撞子步。"""
 
@@ -1223,8 +1483,10 @@ class TensorVectorSimulator:
                     selected, dt=substep_dt, increment_age=False
                 )
                 for _ in range(self.config.solver_iterations):
+                    self._record_first_contacts(selected)
                     self._resolve_walls(selected)
                     self._resolve_fruit_contacts(selected)
+                self._record_first_contacts(selected)
                 self._resolve_walls(selected)
                 self._resolve_merges(selected)
         return substep_counts
@@ -1257,6 +1519,24 @@ class TensorVectorSimulator:
             score_deltas=self._event_score_deltas,
             source_ids=self._event_source_ids,
             new_fruit_ids=self._event_new_fruit_ids,
+        )
+
+    def _action_effect_view(self):
+        if not self.config.track_action_effects:
+            return None
+        return BatchActionEffectEvents(
+            first_contact_type_mask=self._first_contact_type_mask,
+            first_contact_primary_type=self._first_contact_primary_type,
+            first_contact_position=self._first_contact_position,
+            first_contact_level_delta=self._first_contact_level_delta,
+            first_contact_normal=self._first_contact_normal,
+            first_contact_age_frames=self._first_contact_age_frames,
+            first_contact_normal_speed=self._first_contact_normal_speed,
+            q0_participated=self._q0_participated,
+            q0_lineage_depth=self._q0_lineage_depth,
+            q0_final_fruit_id=self._q0_final_fruit_id,
+            q0_final_level=self._q0_final_level,
+            q0_final_slot=self._q0_final_slot,
         )
 
     def _drop_result_view(self):
@@ -1466,6 +1746,18 @@ class TensorVectorSimulator:
             self._event_score_deltas,
             self._event_source_ids,
             self._event_new_fruit_ids,
+            self._first_contact_type_mask,
+            self._first_contact_primary_type,
+            self._first_contact_position,
+            self._first_contact_level_delta,
+            self._first_contact_normal,
+            self._first_contact_age_frames,
+            self._first_contact_normal_speed,
+            self._q0_participated,
+            self._q0_lineage_depth,
+            self._q0_final_fruit_id,
+            self._q0_final_level,
+            self._q0_final_slot,
             self._display_radii,
             self._dropped_radii,
             self._merged_radii,
@@ -1504,6 +1796,7 @@ class TensorVectorSimulator:
             self.config.max_physics_frames,
             self.config.stable_frames,
             self.config.solver_iterations,
+            self.config.track_action_effects,
             self.config.drop_fast_forward,
             self.config.adaptive_collision_substeps,
             self.config.max_collision_substeps,
@@ -1542,6 +1835,7 @@ class TensorVectorSimulator:
             collision_substeps=collision_substeps,
             score_delta=self.score - score_before,
             merge_events=self._merge_event_view(),
+            action_effects=self._action_effect_view(),
         )
         result = BatchStepResult(
             observation=self.observe(),
@@ -1665,6 +1959,7 @@ class TensorVectorSimulator:
             collision_substeps=collision_substeps,
             score_delta=self.score - score_before,
             merge_events=self._merge_event_view(),
+            action_effects=self._action_effect_view(),
         )
         result = BatchStepResult(
             observation=self.observe(),

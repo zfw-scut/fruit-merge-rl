@@ -131,6 +131,30 @@ class BatchMergeEvents:
 
 
 @dataclass(frozen=True, slots=True)
+class BatchActionEffectEvents:
+    """一次投放中为动作效果监督累计的定长物理事件。"""
+
+    first_contact_type_mask: torch.Tensor
+    first_contact_primary_type: torch.Tensor
+    first_contact_position: torch.Tensor
+    first_contact_level_delta: torch.Tensor
+    first_contact_normal: torch.Tensor
+    first_contact_age_frames: torch.Tensor
+    first_contact_normal_speed: torch.Tensor
+    q0_participated: torch.Tensor
+    q0_lineage_depth: torch.Tensor
+    q0_final_fruit_id: torch.Tensor
+    q0_final_level: torch.Tensor
+    q0_final_slot: torch.Tensor
+
+    def index_select(self, rows):
+        return type(self)(**{
+            field_name: getattr(self, field_name).index_select(0, rows)
+            for field_name in self.__dataclass_fields__
+        })
+
+
+@dataclass(frozen=True, slots=True)
 class BatchDropResult:
     """一批环境的即时投放结果。"""
 
@@ -154,6 +178,7 @@ class BatchPhysicsResult:
     settle_timeout: torch.Tensor | None = None
     fast_forwarded_frames: torch.Tensor | None = None
     collision_substeps: torch.Tensor | None = None
+    action_effects: BatchActionEffectEvents | None = None
 
 
 @dataclass(frozen=True, slots=True)

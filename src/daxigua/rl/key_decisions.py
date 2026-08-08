@@ -134,6 +134,11 @@ def _select_physics(physics, rows):
         collision_substeps=_select_optional(
             physics.collision_substeps, rows
         ),
+        action_effects=(
+            None
+            if physics.action_effects is None
+            else physics.action_effects.index_select(rows)
+        ),
     )
 
 
@@ -309,6 +314,20 @@ class KeyDecisionCollector:
                 0, safe_rows
             ),
             q_values=pre.action_selection.q_values.index_select(0, safe_rows),
+            uncertainty=(
+                None
+                if pre.action_selection.uncertainty is None
+                else pre.action_selection.uncertainty.index_select(
+                    0, safe_rows
+                )
+            ),
+            active_learning_mask=(
+                None
+                if pre.action_selection.active_learning_mask is None
+                else pre.action_selection.active_learning_mask.index_select(
+                    0, safe_rows
+                )
+            ),
         )
         policy_versions = torch.full_like(
             selection.rows, pre.policy_version, dtype=torch.int64

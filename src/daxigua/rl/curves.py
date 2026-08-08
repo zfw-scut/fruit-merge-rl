@@ -183,6 +183,14 @@ def render_training_curve_snapshot(run_dir):
             '训练吞吐 / Throughput'
             if has_chinese_font else 'Training throughput'
         ),
+        'auxiliary': (
+            '辅助动作效果损失 / Auxiliary action-effect losses'
+            if has_chinese_font else 'Auxiliary action-effect losses'
+        ),
+        'merge_density': (
+            '高等级新水果生成密度 / High-level fruit creation density'
+            if has_chinese_font else 'High-level fruit creation density'
+        ),
     }
     colors = {
         'blue': '#0067c0',
@@ -190,6 +198,9 @@ def render_training_curve_snapshot(run_dir):
         'green': '#107c10',
         'red': '#d13438',
         'violet': '#8764b8',
+        'orange': '#ca5010',
+        'pink': '#c239b3',
+        'slate': '#69797e',
     }
 
     def bilingual(chinese, english):
@@ -205,7 +216,7 @@ def render_training_curve_snapshot(run_dir):
     )
     try:
         figure, axes = plt.subplots(
-            2, 2, figsize=(14, 8.8), constrained_layout=True
+            3, 2, figsize=(14, 12.4), constrained_layout=True
         )
         figure.patch.set_facecolor('#f3f6fa')
         figure.suptitle(labels['title'], fontsize=18, fontweight='bold')
@@ -274,9 +285,17 @@ def render_training_curve_snapshot(run_dir):
         )
         _plot_or_note(
             optimization, loss_x, loss_y,
-            label='Huber Loss', color=colors['blue'], linewidth=1.8,
+            label='Total Loss', color=colors['blue'], linewidth=1.8,
         )
-        optimization.set_ylabel('Huber Loss', color=colors['blue'])
+        dqn_x, dqn_y = _series(
+            metrics, 'transitions', 'dqn_loss', x_scale=1_000_000
+        )
+        if dqn_x:
+            optimization.plot(
+                dqn_x, dqn_y, label='DQN Huber Loss',
+                color=colors['green'], linewidth=1.5,
+            )
+        optimization.set_ylabel('Loss', color=colors['blue'])
         td_axis = optimization.twinx()
         td_axis.spines['top'].set_visible(False)
         td_axis.spines['right'].set_color('#c6d0dc')
@@ -314,6 +333,75 @@ def render_training_curve_snapshot(run_dir):
                 color=color, linewidth=1.8,
             )
         throughput.legend(frameon=False, fontsize=8, loc='best')
+
+        auxiliary = axes[2, 0]
+        _style_axis(auxiliary, has_chinese_font)
+        auxiliary.set_title(
+            labels['auxiliary'], loc='left', fontweight='bold'
+        )
+        auxiliary.set_ylabel('Loss')
+        for key, series_label, color in (
+                ('aux_loss_merge', bilingual('合成', 'Merge'), colors['blue']),
+                ('aux_loss_q0_lineage', bilingual('q0 谱系', 'q0 lineage'), colors['green']),
+                ('aux_loss_first_contact', bilingual('首次接触', 'First contact'), colors['orange']),
+                ('aux_loss_generation', bilingual('新水果', 'Generated fruit'), colors['violet']),
+                ('aux_loss_outcome', bilingual('最终结果', 'Outcome'), colors['pink'])):
+            xs, ys = _series(metrics, 'transitions', key, x_scale=1_000_000)
+            if xs:
+                auxiliary.plot(
+                    xs, ys, label=series_label, color=color, linewidth=1.6
+                )
+        if not auxiliary.lines:
+            auxiliary.text(
+                0.5, 0.5, 'Waiting for auxiliary losses',
+                transform=auxiliary.transAxes, ha='center', va='center',
+                color='#7a8696',
+            )
+        if auxiliary.lines:
+            auxiliary.legend(frameon=False, fontsize=8, loc='best')
+
+        merge_density = axes[2, 1]
+        _style_axis(merge_density, has_chinese_font)
+        merge_density.set_title(
+            labels['merge_density'], loc='left', fontweight='bold'
+        )
+        merge_density.set_ylabel(
+            bilingual('每千次投放生成数', 'Created / 1k drops')
+        )
+        density_colors = (
+            colors['slate'], colors['cyan'], colors['green'],
+            colors['orange'], colors['red'],
+        )
+        for level, color in zip(range(7, 12), density_colors, strict=True):
+            xs = []
+            ys = []
+            for row in evaluations:
+                transition = _finite(row.get('transition'))
+                density = row.get('created_level_density_per_1000_drops')
+                if transition is None or not isinstance(density, list):
+                    continue
+                if level >= len(density):
+                    continue
+                value = _finite(density[level])
+                if value is None:
+                    continue
+                xs.append(transition / 1_000_000)
+                ys.append(value)
+            if xs:
+                merge_density.plot(
+                    xs, ys, marker='o', markersize=3,
+                    label=f'L{level}', color=color, linewidth=1.5,
+                )
+        if not merge_density.lines:
+            merge_density.text(
+                0.5, 0.5, 'Waiting for evaluation events',
+                transform=merge_density.transAxes, ha='center', va='center',
+                color='#7a8696',
+            )
+        if merge_density.lines:
+            merge_density.legend(
+                frameon=False, fontsize=8, loc='best', ncol=3
+            )
 
         generated_at = time.time()
         latest_transition = max(

@@ -24,6 +24,8 @@ class ModelConfig:
     motion_neighbors: int = 2
     vertical_neighbors_per_direction: int = 2
     action_key_fruits: int = 8
+    policy_head_count: int = 1
+    action_effect_enabled: bool = False
     dropout: float = 0.0
 
     def __post_init__(self):
@@ -33,6 +35,7 @@ class ModelConfig:
             'queue_layers', 'level_embedding_dim', 'max_neighbors',
             'nearest_neighbors', 'motion_neighbors',
             'vertical_neighbors_per_direction', 'action_key_fruits',
+            'policy_head_count',
         )
         for name in integer_names:
             if getattr(self, name) <= 0:
@@ -65,6 +68,12 @@ class DqnConfig:
     fused_adam: bool = True
     compile_model: bool = False
     compile_mode: str = 'reduce-overhead'
+    bootstrap_probability: float = 0.8
+    auxiliary_loss_weight: float = 0.2
+    active_learning_enabled: bool = False
+    active_learning_epsilon_threshold: float = 0.15
+    active_learning_fraction: float = 0.75
+    uncertainty_bonus: float = 1.0
 
     def __post_init__(self):
         schedule = tuple(
@@ -100,6 +109,18 @@ class DqnConfig:
                 raise ValueError('epsilon schedule values must be in [0, 1]')
         if self.utd_ratio <= 0.0:
             raise ValueError('utd_ratio must be positive')
+        if not 0.0 < self.bootstrap_probability <= 1.0:
+            raise ValueError('bootstrap_probability must be in (0, 1]')
+        if self.auxiliary_loss_weight < 0.0:
+            raise ValueError('auxiliary_loss_weight cannot be negative')
+        if not 0.0 <= self.active_learning_epsilon_threshold <= 1.0:
+            raise ValueError(
+                'active_learning_epsilon_threshold must be in [0, 1]'
+            )
+        if not 0.0 <= self.active_learning_fraction <= 1.0:
+            raise ValueError('active_learning_fraction must be in [0, 1]')
+        if self.uncertainty_bonus < 0.0:
+            raise ValueError('uncertainty_bonus cannot be negative')
         if self.compile_mode not in ('default', 'reduce-overhead', 'max-autotune'):
             raise ValueError('unsupported torch.compile mode')
 

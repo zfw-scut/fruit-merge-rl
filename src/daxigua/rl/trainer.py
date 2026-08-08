@@ -27,6 +27,7 @@ from .checkpoint import (
     write_artifact_manifest,
 )
 from .autoscale import AdaptiveScaleController
+from .action_effects import build_action_effect_targets
 from .config import TrainingConfig
 from .evaluation import evaluate_policy, replay_critical_episodes
 from .event_analysis import render_evaluation_event_analysis
@@ -190,6 +191,7 @@ class BaselineTrainer:
             action_count=config.model.action_count,
             queue_length=config.model.queue_length,
             use_cuda_extension=self.device.type == 'cuda',
+            track_action_effects=config.model.action_effect_enabled,
         )
         self.simulator = TensorVectorSimulator(
             config.max_envs,
@@ -237,6 +239,9 @@ class BaselineTrainer:
             physics_fps=self.simulator_config.physics_fps,
             seed=config.seed + 1,
             enable_state_references=decision_collection_active,
+            policy_head_count=config.model.policy_head_count,
+            bootstrap_probability=config.dqn.bootstrap_probability,
+            action_effects_enabled=config.model.action_effect_enabled,
         )
         self.key_decision_collector = KeyDecisionCollector(
             config.decision_data,
@@ -266,6 +271,7 @@ class BaselineTrainer:
         self.best_accurate_score = float('-inf')
         self.last_fast_eval_score = None
         self.last_accurate_eval_score = None
+        self.last_eval_created_density = [None] * 12
         self.best_training_score = 0
         self.completed_accurate_milestones = set()
         self.completed_checkpoint_milestones = set()
@@ -274,6 +280,11 @@ class BaselineTrainer:
             dtype=torch.int64,
             device=self.device,
         )
+        self.actor_metric_sums = torch.zeros(
+            3, dtype=torch.float32, device=self.device
+        )
+        self.actor_metric_batches = 0
+        self.actor_metric_decisions = 0
         self.stage_thresholds = (16, 64, 128)
         self.stop_requested = False
         self.stop_reason = None
@@ -357,6 +368,27 @@ class BaselineTrainer:
             self.reward_metrics.add(reward_step.scalar_metrics())
         return reward_step.reward
 
+    def _build_action_effect_targets(
+            self,
+            current,
+            next_state,
+            result,
+            current_fruit_count,
+            current_danger_progress):
+        if not self.config.model.action_effect_enabled:
+            return None
+        return build_action_effect_targets(
+            current,
+            next_state,
+            result,
+            board_width=self.simulator_config.board_width,
+            board_height=self.simulator_config.board_height,
+            gravity_y=self.simulator_config.gravity_y,
+            max_physics_frames=self.simulator_config.max_physics_frames,
+            current_fruit_count=current_fruit_count,
+            current_danger_progress=current_danger_progress,
+        )
+
     @torch.no_grad()
     def estimate_stage_thresholds(self):
         if self.device.type != 'cuda':
@@ -428,6 +460,8 @@ class BaselineTrainer:
             self.config.max_envs, dtype=torch.int64, device=self.device
         )
         for stage, (low, high) in enumerate(bounds):
+            if stage >= self.active_envs:
+                continue
             rows = torch.arange(
                 stage, self.active_envs, 4, device=self.device
             )
@@ -499,6 +533,8 @@ class BaselineTrainer:
                 physics_fps=self.simulator_config.physics_fps,
                 rows=self._active_rows(),
             )
+            current_fruit_count = current.active.sum(dim=1)
+            current_danger_progress = current.danger_progress.clone()
             stages = self._classify_stages(observation)
             admit = torch.zeros(
                 self.active_envs, dtype=torch.bool, device=self.device
@@ -526,6 +562,13 @@ class BaselineTrainer:
             rewards = self._compute_rewards(result)
             terminals = result.physics.done[:self.active_envs]
             if ticket is not None:
+                action_effects = self._build_action_effect_targets(
+                    current,
+                    next_state,
+                    result,
+                    current_fruit_count,
+                    current_danger_progress,
+                )
                 self.replay.finish_append(
                     ticket,
                     next_state,
@@ -533,6 +576,7 @@ class BaselineTrainer:
                     rewards,
                     terminals,
                     stages,
+                    action_effects,
                 )
             timeout = (
                 result.observation.step_count >= self.config.max_episode_drops
@@ -563,7 +607,12 @@ class BaselineTrainer:
     @torch.no_grad()
     def _select_action_batch(self, state, epsilon):
         self.model.eval()
-        q_values = self.model(state)
+        output = self.model(state, True)
+        q_values = output.q_values
+        centered_heads = output.head_q_values - output.head_q_values.mean(
+            dim=2, keepdim=True
+        )
+        uncertainty = centered_heads.float().std(dim=1, correction=0)
         greedy = q_values.argmax(dim=1)
         random_actions = torch.randint(
             self.config.model.action_count,
@@ -571,11 +620,30 @@ class BaselineTrainer:
             device=self.device,
         )
         explore = torch.rand(state.batch_size, device=self.device) < epsilon
+        active_learning = torch.zeros_like(explore)
+        explore_actions = random_actions
+        if (
+                self.config.dqn.active_learning_enabled
+                and self.config.model.policy_head_count > 1
+                and epsilon <= self.config.dqn.active_learning_epsilon_threshold):
+            active_learning = explore & (
+                torch.rand(state.batch_size, device=self.device)
+                < self.config.dqn.active_learning_fraction
+            )
+            uncertain_actions = (
+                q_values.float()
+                + self.config.dqn.uncertainty_bonus * uncertainty
+            ).argmax(dim=1)
+            explore_actions = torch.where(
+                active_learning, uncertain_actions, random_actions
+            )
         return ActionSelectionBatch(
-            actions=torch.where(explore, random_actions, greedy),
+            actions=torch.where(explore, explore_actions, greedy),
             greedy_actions=greedy,
             explore_mask=explore,
             q_values=q_values,
+            uncertainty=uncertainty,
+            active_learning_mask=active_learning,
         )
 
     @torch.no_grad()
@@ -754,6 +822,11 @@ class BaselineTrainer:
             **{key: value for key, value in details.items() if key != 'scores'},
         }
         self._append_jsonl('evaluations/metrics.jsonl', payload)
+        self.last_eval_created_density = list(
+            details.get(
+                'created_level_density_per_1000_drops', [None] * 12
+            )
+        )
         if physics_fps == 30:
             self.last_fast_eval_score = summary.mean_score
         else:
@@ -909,15 +982,36 @@ class BaselineTrainer:
             ),
             'last_fast_eval_score': self.last_fast_eval_score,
             'last_accurate_eval_score': self.last_accurate_eval_score,
+            'active_learning_action_fraction': (
+                float(self.actor_metric_sums[0].item())
+                / max(1, self.actor_metric_decisions)
+            ),
+            'epsilon_explore_action_fraction': (
+                float(self.actor_metric_sums[1].item())
+                / max(1, self.actor_metric_decisions)
+            ),
+            'actor_policy_disagreement': (
+                float(self.actor_metric_sums[2].item())
+                / max(1, self.actor_metric_batches)
+            ),
             **stage_seconds,
             **self.training_metrics.flush(),
             **self.reward_metrics.flush(),
+            **{
+                f'eval_created_l{level}_per_1000': (
+                    self.last_eval_created_density[level]
+                )
+                for level in range(7, 12)
+            },
             **{
                 f'decision_data_{name}': value
                 for name, value
                 in self.key_decision_collector.metrics().items()
             },
         }
+        self.actor_metric_sums.zero_()
+        self.actor_metric_batches = 0
+        self.actor_metric_decisions = 0
         action_counts = self.action_counts.detach().cpu()
         payload['action_counts'] = action_counts.tolist()
         payload['action_distribution'] = (
@@ -1002,11 +1096,20 @@ class BaselineTrainer:
                     physics_fps=self.simulator_config.physics_fps,
                     rows=self._active_rows(),
                 )
+                current_fruit_count = current.active.sum(dim=1)
+                current_danger_progress = current.danger_progress.clone()
                 current_stages = self._classify_stages(observation)
                 actor_started = time.perf_counter()
                 action_selection = self._select_action_batch(
                     current, self.epsilon()
                 )
+                self.actor_metric_sums[0] += (
+                    action_selection.active_learning_mask.sum()
+                )
+                self.actor_metric_sums[1] += action_selection.explore_mask.sum()
+                self.actor_metric_sums[2] += action_selection.uncertainty.mean()
+                self.actor_metric_batches += 1
+                self.actor_metric_decisions += self.active_envs
                 active_actions = action_selection.actions
                 self.action_counts += torch.bincount(
                     active_actions,
@@ -1055,6 +1158,13 @@ class BaselineTrainer:
                     time.perf_counter() - reward_started
                 )
                 terminals = result.physics.done[:self.active_envs]
+                action_effects = self._build_action_effect_targets(
+                    current,
+                    next_state,
+                    result,
+                    current_fruit_count,
+                    current_danger_progress,
+                )
                 self.replay.finish_append(
                     ticket,
                     next_state,
@@ -1062,6 +1172,7 @@ class BaselineTrainer:
                     rewards,
                     terminals,
                     current_stages,
+                    action_effects,
                 )
                 if staged_decisions is not None:
                     collection_started = time.perf_counter()

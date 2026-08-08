@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
+from .action_effects import ActionEffectTargets
 from .observations import TensorState
 
 
@@ -17,6 +18,8 @@ class ReplayBatch:
     next_state: TensorState
     terminal: torch.Tensor
     stage: torch.Tensor
+    bootstrap_mask: torch.Tensor | None = None
+    action_effects: ActionEffectTargets | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +91,33 @@ class GpuReplayBuffer:
         'danger_progress',
         'over_danger_line',
     )
+    _ACTION_EFFECT_SPECS = {
+        'merge_happened': ((), torch.bool),
+        'merge_count': ((), torch.uint8),
+        'q0_participated': ((), torch.bool),
+        'q0_lineage_depth': ((), torch.uint8),
+        'q0_final_level': ((), torch.uint8),
+        'contact_type_bits': ((4,), torch.bool),
+        'contact_primary_type': ((), torch.uint8),
+        'contact_position': ((2,), torch.float32),
+        'contact_level_delta': ((), torch.uint8),
+        'contact_normal': ((2,), torch.float32),
+        'contact_age': ((), torch.float32),
+        'contact_normal_speed': ((), torch.float32),
+        'generation_exists': ((3,), torch.bool),
+        'generation_position': ((3, 2), torch.float32),
+        'generation_level': ((3,), torch.uint8),
+        'score_delta': ((), torch.float32),
+        'fruit_count_delta': ((), torch.float32),
+        'final_exists': ((), torch.bool),
+        'final_state': ((5,), torch.float32),
+        'stable': ((), torch.bool),
+        'settle_timeout': ((), torch.bool),
+        'terminal': ((), torch.bool),
+        'settle_duration': ((), torch.float32),
+        'danger_delta': ((), torch.float32),
+        'over_danger_line': ((), torch.bool),
+    }
 
     def __init__(
             self,
@@ -98,7 +128,10 @@ class GpuReplayBuffer:
             device='cuda',
             physics_fps=30.0,
             seed=0,
-            enable_state_references=False):
+            enable_state_references=False,
+            policy_head_count=1,
+            bootstrap_probability=0.8,
+            action_effects_enabled=False):
         if capacity <= 0:
             raise ValueError('capacity must be positive')
         self.capacity = int(capacity)
@@ -109,6 +142,13 @@ class GpuReplayBuffer:
             self.device = torch.device('cuda', torch.cuda.current_device())
         self.physics_fps = float(physics_fps)
         self.state_references_enabled = bool(enable_state_references)
+        self.policy_head_count = int(policy_head_count)
+        self.bootstrap_probability = float(bootstrap_probability)
+        self.action_effects_enabled = bool(action_effects_enabled)
+        if self.policy_head_count <= 0:
+            raise ValueError('policy_head_count must be positive')
+        if not 0.0 < self.bootstrap_probability <= 1.0:
+            raise ValueError('bootstrap_probability must be in (0, 1]')
         self._cursor = 0
         self._size = 0
         self._next_generation = 1
@@ -150,6 +190,23 @@ class GpuReplayBuffer:
         self._stages = torch.empty(
             self.capacity, dtype=torch.uint8, device=self.device
         )
+        self._bootstrap_masks = torch.empty(
+            (self.capacity, self.policy_head_count),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        self._action_effects = (
+            {
+                name: torch.empty(
+                    (self.capacity,) + shape,
+                    dtype=dtype,
+                    device=self.device,
+                )
+                for name, (shape, dtype) in self._ACTION_EFFECT_SPECS.items()
+            }
+            if self.action_effects_enabled
+            else None
+        )
         self._slot_generations = (
             torch.zeros(
                 self.capacity, dtype=torch.int64, device=self.device
@@ -175,8 +232,12 @@ class GpuReplayBuffer:
                 self._rewards,
                 self._terminals,
                 self._stages,
+                self._bootstrap_masks,
                 self._slot_generations,
             ) if value is not None)
+            + (() if self._action_effects is None else tuple(
+                self._action_effects.values()
+            ))
         )
         return sum(tensor.numel() * tensor.element_size() for tensor in tensors)
 
@@ -236,6 +297,25 @@ class GpuReplayBuffer:
             generations=generations,
         )
         self._copy_state(self._current, indices, state, source_rows)
+        if self.policy_head_count == 1:
+            masks = torch.ones(
+                (count, 1), dtype=torch.bool, device=self.device
+            )
+        else:
+            masks = torch.rand(
+                (count, self.policy_head_count),
+                generator=self._generator,
+                device=self.device,
+            ) < self.bootstrap_probability
+            empty = ~masks.any(dim=1)
+            fallback = torch.randint(
+                self.policy_head_count,
+                (count,),
+                generator=self._generator,
+                device=self.device,
+            )
+            masks[torch.arange(count, device=self.device), fallback] |= empty
+        self._bootstrap_masks.index_copy_(0, indices, masks)
         self._pending = ticket
         return ticket
 
@@ -247,7 +327,8 @@ class GpuReplayBuffer:
             actions,
             rewards,
             terminals,
-            stages=None):
+            stages=None,
+            action_effects=None):
         if ticket is not self._pending:
             raise RuntimeError('replay write ticket is not active')
         self._validate_state(next_state)
@@ -271,6 +352,18 @@ class GpuReplayBuffer:
                 device=self.device,
             )
         self._stages.index_copy_(0, indices, select(stages, torch.uint8))
+        if self.action_effects_enabled:
+            if not isinstance(action_effects, ActionEffectTargets):
+                raise TypeError(
+                    'action_effects must be provided when effect replay is enabled'
+                )
+            if action_effects.batch_size != next_state.batch_size:
+                raise ValueError('action effect batch does not match state')
+            for name, destination in self._action_effects.items():
+                source = getattr(action_effects, name).index_select(0, rows)
+                destination.index_copy_(0, indices, source.to(destination.dtype))
+        elif action_effects is not None:
+            raise ValueError('action-effect replay is disabled')
         self._cursor = (self._cursor + ticket.count) % self.capacity
         self._size = min(self.capacity, self._size + ticket.count)
         self._pending = None
@@ -284,10 +377,17 @@ class GpuReplayBuffer:
             next_state,
             terminals,
             mask=None,
-            stages=None):
+            stages=None,
+            action_effects=None):
         ticket = self.begin_append(current, mask=mask)
         self.finish_append(
-            ticket, next_state, actions, rewards, terminals, stages
+            ticket,
+            next_state,
+            actions,
+            rewards,
+            terminals,
+            stages,
+            action_effects,
         )
 
     def _state_at(self, storage, indices):
@@ -340,6 +440,15 @@ class GpuReplayBuffer:
             next_state=self._state_at(self._next, indices),
             terminal=self._terminals.index_select(0, indices),
             stage=self._stages.index_select(0, indices),
+            bootstrap_mask=self._bootstrap_masks.index_select(0, indices),
+            action_effects=(
+                None
+                if self._action_effects is None
+                else ActionEffectTargets(**{
+                    name: values.index_select(0, indices)
+                    for name, values in self._action_effects.items()
+                })
+            ),
         )
 
     def metadata(self):
@@ -354,5 +463,9 @@ class GpuReplayBuffer:
             'physics_fps': self.physics_fps,
             'replay_saved_in_checkpoint': False,
             'stage_labels_saved': True,
+            'policy_head_count': self.policy_head_count,
+            'bootstrap_probability': self.bootstrap_probability,
+            'bootstrap_masks_saved': True,
+            'action_effects_saved': self.action_effects_enabled,
             'versioned_state_references': self.state_references_enabled,
         }

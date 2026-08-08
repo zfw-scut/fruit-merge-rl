@@ -376,6 +376,118 @@ __device__ inline void record_trace_frame(
   trace_record_counts[trace_row] = record_index + 1;
 }
 
+__device__ inline void record_first_contact(
+    KernelState& state,
+    int active_slot_upper_bound,
+    int64_t drop_id,
+    int board_width,
+    int board_height,
+    int wall_width,
+    int64_t* first_contact_type_mask,
+    int64_t* first_contact_primary_type,
+    float* first_contact_position,
+    int64_t* first_contact_level_delta,
+    float* first_contact_normal,
+    int64_t* first_contact_age_frames,
+    float* first_contact_normal_speed) {
+  int q0_slot = -1;
+  for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
+    int index = state.slot_index(slot);
+    if (state.active[index] && state.fruit_ids[index] == drop_id) {
+      q0_slot = slot;
+      break;
+    }
+  }
+  if (q0_slot < 0) return;
+
+  int q0_index = state.slot_index(q0_slot);
+  int64_t age = state.age_frames[q0_index];
+  int64_t recorded_age = first_contact_age_frames[state.env];
+  if (recorded_age >= 0 && age > recorded_age) return;
+
+  Vec2 position = state.position(q0_slot);
+  Vec2 velocity = state.velocity(q0_slot);
+  float radius = state.physics_radii[q0_index];
+  int64_t q0_level = state.levels[q0_index];
+  int64_t type_mask = 0;
+  int64_t primary_type = 0;
+  int64_t level_delta = 0;
+  float best_speed = -1.0f;
+  Vec2 best_position{0.0f, 0.0f};
+  Vec2 best_normal{0.0f, 0.0f};
+
+  auto consider = [&](bool touching_contact, int64_t bit, int64_t type,
+                      Vec2 normal, Vec2 contact_position, float speed,
+                      int64_t candidate_level_delta) {
+    if (!touching_contact) return;
+    type_mask |= bit;
+    if (speed > best_speed) {
+      best_speed = speed;
+      primary_type = type;
+      best_position = contact_position;
+      best_normal = normal;
+      level_delta = candidate_level_delta;
+    }
+  };
+
+  consider(
+      position.y + radius >= static_cast<float>(board_height - wall_width),
+      1, 1, {0.0f, -1.0f},
+      {position.x, static_cast<float>(board_height - wall_width)},
+      fmaxf(velocity.y, 0.0f), 0);
+  consider(
+      position.x - radius <= static_cast<float>(wall_width),
+      2, 2, {1.0f, 0.0f},
+      {static_cast<float>(wall_width), position.y},
+      fmaxf(-velocity.x, 0.0f), 0);
+  consider(
+      position.x + radius >= static_cast<float>(board_width - wall_width),
+      4, 3, {-1.0f, 0.0f},
+      {static_cast<float>(board_width - wall_width), position.y},
+      fmaxf(velocity.x, 0.0f), 0);
+
+  for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
+    if (slot == q0_slot) continue;
+    int index = state.slot_index(slot);
+    if (!state.active[index]) continue;
+    Vec2 delta = sub(position, state.position(slot));
+    float radius_sum = radius + state.physics_radii[index];
+    float distance_squared = dot(delta, delta);
+    if (fabsf(delta.x) > radius_sum || fabsf(delta.y) > radius_sum
+        || distance_squared > radius_sum * radius_sum) {
+      continue;
+    }
+    float distance = sqrtf(fmaxf(distance_squared, 1e-12f));
+    Vec2 normal = distance_squared < 1e-12f
+        ? Vec2{1.0f, 0.0f}
+        : mul(delta, 1.0f / distance);
+    Vec2 relative_velocity = sub(velocity, state.velocity(slot));
+    float speed = fmaxf(-dot(relative_velocity, normal), 0.0f);
+    consider(true, 8, 4, normal, sub(position, mul(normal, radius)), speed,
+             state.levels[index] - q0_level);
+  }
+
+  if (type_mask == 0) return;
+  bool earlier = recorded_age < 0 || age < recorded_age;
+  bool same_frame = recorded_age == age;
+  if (earlier) {
+    first_contact_age_frames[state.env] = age;
+    first_contact_type_mask[state.env] = type_mask;
+  } else if (same_frame) {
+    first_contact_type_mask[state.env] |= type_mask;
+  } else {
+    return;
+  }
+  if (!earlier && best_speed <= first_contact_normal_speed[state.env]) return;
+  first_contact_primary_type[state.env] = primary_type;
+  first_contact_position[state.env * 2] = best_position.x;
+  first_contact_position[state.env * 2 + 1] = best_position.y;
+  first_contact_level_delta[state.env] = level_delta;
+  first_contact_normal[state.env * 2] = best_normal.x;
+  first_contact_normal[state.env * 2 + 1] = best_normal.y;
+  first_contact_normal_speed[state.env] = fmaxf(best_speed, 0.0f);
+}
+
 __global__ void vector_step_kernel(
     const int64_t* actions,
     const bool* enabled,
@@ -414,6 +526,18 @@ __global__ void vector_step_kernel(
     int64_t* event_score_deltas,
     int64_t* event_source_ids,
     int64_t* event_new_fruit_ids,
+    int64_t* first_contact_type_mask,
+    int64_t* first_contact_primary_type,
+    float* first_contact_position,
+    int64_t* first_contact_level_delta,
+    float* first_contact_normal,
+    int64_t* first_contact_age_frames,
+    float* first_contact_normal_speed,
+    bool* q0_participated,
+    int64_t* q0_lineage_depth,
+    int64_t* q0_final_fruit_id,
+    int64_t* q0_final_level,
+    int64_t* q0_final_slot,
     const float* display_radii,
     const float* dropped_radii,
     const float* merged_radii,
@@ -453,6 +577,7 @@ __global__ void vector_step_kernel(
     int max_physics_frames,
     int stable_frames,
     int solver_iterations,
+    bool track_action_effects,
     bool drop_fast_forward,
     bool adaptive_collision_substeps,
     int max_collision_substeps,
@@ -490,6 +615,22 @@ __global__ void vector_step_kernel(
   int event_base = env * max_fruits;
   int64_t score_before = score[env];
   event_count[env] = 0;
+  if (track_action_effects) {
+    first_contact_type_mask[env] = 0;
+    first_contact_primary_type[env] = 0;
+    first_contact_position[env * 2] = 0.0f;
+    first_contact_position[env * 2 + 1] = 0.0f;
+    first_contact_level_delta[env] = 0;
+    first_contact_normal[env * 2] = 0.0f;
+    first_contact_normal[env * 2 + 1] = 0.0f;
+    first_contact_age_frames[env] = -1;
+    first_contact_normal_speed[env] = 0.0f;
+    q0_participated[env] = false;
+    q0_lineage_depth[env] = 0;
+    q0_final_fruit_id[env] = 0;
+    q0_final_level[env] = 0;
+    q0_final_slot[env] = -1;
+  }
   frames_simulated[env] = 0;
   fast_forwarded_frames[env] = 0;
   collision_substeps[env] = 0;
@@ -569,6 +710,11 @@ __global__ void vector_step_kernel(
   last_drop_level[env] = level;
   last_drop_x[env] = drop_x;
   last_drop_id[env] = drop_id;
+  if (track_action_effects) {
+    q0_final_fruit_id[env] = drop_id;
+    q0_final_level[env] = level;
+    q0_final_slot[env] = free_slot;
+  }
   step_count[env] += 1;
 
   active_slot_upper_bound = free_slot + 1;
@@ -685,6 +831,15 @@ __global__ void vector_step_kernel(
       }
 
       for (int iteration = 0; iteration < solver_iterations; ++iteration) {
+        if (track_action_effects) {
+          record_first_contact(
+              state, active_slot_upper_bound, drop_id,
+              board_width, board_height, wall_width,
+              first_contact_type_mask, first_contact_primary_type,
+              first_contact_position, first_contact_level_delta,
+              first_contact_normal, first_contact_age_frames,
+              first_contact_normal_speed);
+        }
         for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
           resolve_walls(
               state, slot, board_width, board_height, wall_width,
@@ -707,6 +862,15 @@ __global__ void vector_step_kernel(
       resolve_walls(
           state, slot, board_width, board_height, wall_width,
           fruit_elasticity, restitution_velocity_threshold, wall_friction);
+    }
+    if (track_action_effects) {
+      record_first_contact(
+          state, active_slot_upper_bound, drop_id,
+          board_width, board_height, wall_width,
+          first_contact_type_mask, first_contact_primary_type,
+          first_contact_position, first_contact_level_delta,
+          first_contact_normal, first_contact_age_frames,
+          first_contact_normal_speed);
     }
 
     for (int slot_i = 0; slot_i < active_slot_upper_bound; ++slot_i) {
@@ -765,6 +929,15 @@ __global__ void vector_step_kernel(
         event_source_ids[event_index * 2 + 1] = source_id_j;
         event_new_fruit_ids[event_index] = new_id;
         event_count[env] += 1;
+        if (track_action_effects
+            && (source_id_i == q0_final_fruit_id[env]
+                || source_id_j == q0_final_fruit_id[env])) {
+          q0_participated[env] = true;
+          q0_lineage_depth[env] += 1;
+          q0_final_fruit_id[env] = new_id;
+          q0_final_level[env] = target_level;
+          q0_final_slot[env] = target_level > 0 ? slot_i : -1;
+        }
 
         last_score[env] = score[env];
         score[env] += delta_score;
@@ -948,6 +1121,18 @@ void vector_step_cuda(
     torch::Tensor event_score_deltas,
     torch::Tensor event_source_ids,
     torch::Tensor event_new_fruit_ids,
+    torch::Tensor first_contact_type_mask,
+    torch::Tensor first_contact_primary_type,
+    torch::Tensor first_contact_position,
+    torch::Tensor first_contact_level_delta,
+    torch::Tensor first_contact_normal,
+    torch::Tensor first_contact_age_frames,
+    torch::Tensor first_contact_normal_speed,
+    torch::Tensor q0_participated,
+    torch::Tensor q0_lineage_depth,
+    torch::Tensor q0_final_fruit_id,
+    torch::Tensor q0_final_level,
+    torch::Tensor q0_final_slot,
     torch::Tensor display_radii,
     torch::Tensor dropped_radii,
     torch::Tensor merged_radii,
@@ -986,6 +1171,7 @@ void vector_step_cuda(
     int64_t max_physics_frames,
     int64_t stable_frames,
     int64_t solver_iterations,
+    bool track_action_effects,
     bool drop_fast_forward,
     bool adaptive_collision_substeps,
     int64_t max_collision_substeps,
@@ -1033,7 +1219,20 @@ void vector_step_cuda(
       event_new_levels.data_ptr<int64_t>(), event_positions.data_ptr<float>(),
       event_score_deltas.data_ptr<int64_t>(),
       event_source_ids.data_ptr<int64_t>(),
-      event_new_fruit_ids.data_ptr<int64_t>(), display_radii.data_ptr<float>(),
+      event_new_fruit_ids.data_ptr<int64_t>(),
+      first_contact_type_mask.data_ptr<int64_t>(),
+      first_contact_primary_type.data_ptr<int64_t>(),
+      first_contact_position.data_ptr<float>(),
+      first_contact_level_delta.data_ptr<int64_t>(),
+      first_contact_normal.data_ptr<float>(),
+      first_contact_age_frames.data_ptr<int64_t>(),
+      first_contact_normal_speed.data_ptr<float>(),
+      q0_participated.data_ptr<bool>(),
+      q0_lineage_depth.data_ptr<int64_t>(),
+      q0_final_fruit_id.data_ptr<int64_t>(),
+      q0_final_level.data_ptr<int64_t>(),
+      q0_final_slot.data_ptr<int64_t>(),
+      display_radii.data_ptr<float>(),
       dropped_radii.data_ptr<float>(), merged_radii.data_ptr<float>(),
       mass_table.data_ptr<float>(), merge_scores.data_ptr<int64_t>(),
       frames_simulated.data_ptr<int64_t>(),
@@ -1058,6 +1257,7 @@ void vector_step_cuda(
       static_cast<int>(queue_length), static_cast<int>(physics_fps),
       static_cast<int>(max_physics_frames), static_cast<int>(stable_frames),
       static_cast<int>(solver_iterations),
+      track_action_effects,
       drop_fast_forward,
       adaptive_collision_substeps,
       static_cast<int>(max_collision_substeps),

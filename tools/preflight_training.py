@@ -19,6 +19,7 @@ if str(SRC_ROOT) not in sys.path:
 
 import torch
 
+from daxigua.rl.action_effects import build_action_effect_targets
 from daxigua.rl.checkpoint import load_checkpoint, save_checkpoint_atomic
 from daxigua.rl.config import TrainingConfig
 from daxigua.rl.curves import render_training_curve_snapshot
@@ -67,7 +68,10 @@ def run_preflight(args):
         device = torch.device('cuda', torch.cuda.current_device())
     simulator_config = SimulatorConfig.training_fast(
         max_fruits=config.model.max_fruits,
+        action_count=config.model.action_count,
+        queue_length=config.model.queue_length,
         use_cuda_extension=device.type == 'cuda',
+        track_action_effects=config.model.action_effect_enabled,
     )
     simulator = TensorVectorSimulator(
         args.smoke_envs,
@@ -109,6 +113,9 @@ def run_preflight(args):
         max_fruits=config.model.max_fruits,
         device=device,
         physics_fps=simulator_config.physics_fps,
+        policy_head_count=config.model.policy_head_count,
+        bootstrap_probability=config.dqn.bootstrap_probability,
+        action_effects_enabled=config.model.action_effect_enabled,
     )
     observation = simulator.observe()
     if reward_computer is not None:
@@ -123,6 +130,8 @@ def run_preflight(args):
     if not bool(torch.isfinite(q_values).all().item()):
         raise FloatingPointError('model produced non-finite Q values')
     actions = q_values.argmax(dim=1)
+    current_fruit_count = current.active.sum(dim=1)
+    current_danger_progress = current.danger_progress.clone()
     ticket = replay.begin_append(current)
     result = simulator.step(actions)
     reward_step = (
@@ -139,12 +148,28 @@ def run_preflight(args):
     next_state = TensorState.from_observation(
         result.observation, physics_fps=simulator_config.physics_fps
     )
+    action_effects = (
+        build_action_effect_targets(
+            current,
+            next_state,
+            result,
+            board_width=simulator_config.board_width,
+            board_height=simulator_config.board_height,
+            gravity_y=simulator_config.gravity_y,
+            max_physics_frames=simulator_config.max_physics_frames,
+            current_fruit_count=current_fruit_count,
+            current_danger_progress=current_danger_progress,
+        )
+        if config.model.action_effect_enabled
+        else None
+    )
     replay.finish_append(
         ticket,
         next_state,
         actions,
         rewards,
         result.physics.done,
+        action_effects=action_effects,
     )
     while len(replay) < args.smoke_batch_size:
         replay.append(
@@ -155,6 +180,7 @@ def run_preflight(args):
             torch.zeros(
                 args.smoke_envs, dtype=torch.bool, device=device
             ),
+            action_effects=action_effects,
         )
     learner_metrics = learner.update(replay, args.smoke_batch_size)
     if not bool(torch.isfinite(learner_metrics['loss']).item()):
@@ -233,6 +259,14 @@ def run_preflight(args):
         'smoke_batch_size': args.smoke_batch_size,
         'q_shape': list(q_values.shape),
         'learner_loss': float(learner_metrics['loss'].item()),
+        'dqn_loss': float(learner_metrics['dqn_loss'].item()),
+        'auxiliary_loss': (
+            float(learner_metrics['aux_loss_total'].item())
+            if 'aux_loss_total' in learner_metrics else None
+        ),
+        'policy_disagreement': float(
+            learner_metrics['policy_disagreement'].item()
+        ),
         'target_synced': learner_metrics['target_synced'],
         'replay_memory_bytes': replay.memory_bytes,
         'peak_cuda_memory_mb': peak_memory,

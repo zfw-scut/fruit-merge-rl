@@ -9,6 +9,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model/STRATEGIC_REGION_ANCHORS.md`：7 个固定横向战略锚点、软归属、垂直区域摘要和高层计划位置语义；
 - `model/HIGH_LEVEL_PLAN_LIFECYCLE.md`：事件驱动的可变时长显式计划、完成、中止、抢占和分类最长时域；
 - `model/ACTION_CONDITIONED_EFFECT_VIEW.md`：共享物理水果 GNN、21 个单向动作探针、反事实隔离和 Dueling 读出；
+- `model/AUXILIARY_ACTION_EFFECT_LEARNING.md`：实际动作效果标签、多策略头 bootstrap、不确定性主动探索、辅助 loss 和云端监控；
 - `model/MODEL_DESIGN_STATUS_OVERVIEW.md`：新模型组件、节点、边、输出、弃用项、设计状态和实现基础总览；
 - `model/GNN_DQN_BASELINE.md`：第一版 GNN-DQN 基线的模型范围、1-step Double DQN、纯分数奖励和排除项；
 - `model/GNN_DQN_TRAINING_SYSTEM.md`：30 FPS 独占训练、30/120 FPS 隔离评估、GPU Replay、性能标定、动态扩容、实时面板和云端归档规格；
@@ -57,6 +58,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/36_五层GNN探索率对照与关键事件评估_2026_08_07.md`：实现分段epsilon、关键事件紧凑索引、动作锁定回放和串行训练编排。
 - `codex/37_归档五层GNN探索率对照训练_2026_08_07.md`：迁移Fast/Slow完整产物，归档双帧率、L11事件和探索率对照结论。
 - `codex/38_建立训练事实与派生监督扩展框架_2026_08_08.md`：建立不绑定具体优化算法的事实采集、派生监督和可插拔数据出口。
+- `codex/39_实现辅助动作学习与不确定性主动探索_2026_08_09.md`：实现 CUDA 动作事件、GPU Replay 标签、多策略头、辅助 loss、主动探索和面板曲线。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的

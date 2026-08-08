@@ -48,6 +48,7 @@ class SimulatorConfig:
     position_correction: float = 0.75
     merge_tolerance: float = 0.25
     sync_interval_frames: int = 8
+    track_action_effects: bool = False
     use_cuda_extension: bool = True
     cuda_threads_per_block: int = 128
 
@@ -112,6 +113,7 @@ class SimulatorConfig:
         for name in (
             'drop_fast_forward',
             'adaptive_collision_substeps',
+            'track_action_effects',
             'use_cuda_extension',
         ):
             if not isinstance(getattr(self, name), bool):

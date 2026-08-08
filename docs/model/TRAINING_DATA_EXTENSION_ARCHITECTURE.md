@@ -1,7 +1,7 @@
 # 训练事实与派生监督扩展架构
 
-- 状态：基础框架已实现；具体优化任务未实现
-- 更新日期：2026-08-08
+- 状态：基础框架与第一版密集辅助动作监督已实现；关键决策条件和反事实任务未实现
+- 更新日期：2026-08-09
 - 当前基线：5 层 Fast epsilon、`score_v1`、1-step Dueling Double DQN
 
 ## 1. 目标与边界
@@ -26,15 +26,15 @@
 
 - 关键决策触发条件；
 - 行为段边界算法；
-- 动作效果预测头和辅助 loss；
 - 反事实状态恢复、动作分支和归因；
 - 最优上下界求解器与课程调度；
 - 高层规划器、计划类型和 latent 尺寸；
 - BMCTS；
 - 多 GPU 任务传输和权重同步。
 
-这些功能只能作为独立 producer、consumer 或 selector 接入，不能反向成为当前 TD 训练的
-运行依赖。
+第一版辅助动作效果任务已经作为当前 TD 训练的可开关 GPU 分支接入，详细语义见
+`AUXILIARY_ACTION_EFFECT_LEARNING.md`。其余功能只能作为独立 producer、consumer 或
+selector 接入，不能反向成为默认 TD 训练的运行依赖。
 
 ## 2. 分层结构
 
@@ -43,7 +43,8 @@
 ├─ CUDA TensorVectorSimulator
 ├─ GNN-DQN actor
 ├─ GpuReplayBuffer
-└─ DqnLearner
+├─ 可选动作效果标签与辅助头
+└─ 多策略头 DqnLearner
 
 训练事实扩展
 ├─ ActionSelectionBatch
@@ -57,7 +58,6 @@
 └─ AsyncDecisionArchive
 
 未来派生任务
-├─ auxiliary action producer
 ├─ counterfactual producer
 ├─ oracle / curriculum producer
 ├─ hierarchical planner producer
@@ -77,22 +77,26 @@ DerivedSupervisionBatch
 
 ```text
 observe
-→ 一次 GNN-DQN 前向得到 21 维 Q
-→ epsilon-greedy ActionSelectionBatch
-→ Replay.begin_append
+→ 一次 GNN-DQN 前向得到多头 21 维 Q、均值和分歧
+→ epsilon-greedy / 低 epsilon 不确定性探索 ActionSelectionBatch
+→ Replay.begin_append，固化 bootstrap mask
 → selector.prepare + 决策 sidecar
 → simulator.step
-→ reward + Replay.finish_append
+→ reward + 动作效果标签 + Replay.finish_append
 → selector.select 固定容量候选
 → DecisionFactBatch
 → 可选 GPU buffer / 异步 archive
 → episode reset
-→ learner update
+→ 按头 bootstrap TD + 实际动作辅助 loss learner update
 ```
 
 采集器复用 actor 已计算的 Q 和 Replay 已复制的决策前模型状态，不增加模型前向。选择器
 返回固定容量的 `DecisionSelectionBatch`，用 `valid_mask` 标记实际记录，避免公共契约依赖
 动态 Python 对象数量。
+
+密集辅助标签不经过 KeyDecisionCollector：每条实际 transition 都在 CUDA/GPU 热路径内
+生成并进入 Replay。Collector 仍用于未来关键决策稀有样本、行为段和反事实派生任务，
+两条路径共享身份和物理事实，但互不依赖。
 
 ## 4. 稳定事实身份
 
@@ -238,7 +242,7 @@ BaselineTrainer(..., decision_selector=selector, decision_sinks=(...))
 
 ## 10. 后续开发约束
 
-- 辅助动作学习先消费事实 batch；关键状态的多动作标签以后作为派生监督追加；
+- 当前辅助动作学习只监督实际执行动作；关键状态的多动作反事实标签以后作为派生监督追加；
 - 客观事件行为段可以离线标注，不要求 Collector 在线完成状态机；
 - 反事实任务必须携带事实 decision/segment 身份和使用的冻结 policy version；
 - privileged oracle、同信息搜索和 BMCTS 必须区分 `information_scope`；

@@ -1,5 +1,6 @@
 """第一版 GNN-DQN 基线训练组件。"""
 
+from .action_effects import ActionEffectTargets, build_action_effect_targets
 from .config import (
     AnalysisExportConfig,
     AutoScaleConfig,
@@ -30,6 +31,7 @@ from .key_decisions import (
 
 __all__ = [
     'AnalysisExportConfig',
+    'ActionEffectTargets',
     'ActionSelectionBatch',
     'AutoScaleConfig',
     'BaselineGnnDqn',
@@ -50,4 +52,5 @@ __all__ = [
     'ReplayConfig',
     'TensorState',
     'TrainingConfig',
+    'build_action_effect_targets',
 ]

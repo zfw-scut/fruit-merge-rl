@@ -448,6 +448,9 @@ def evaluate_policy(
     )
     l11_created = output_created_counts[:, 11]
     l11_removed = output_source_counts[:, 11]
+    total_drops = max(1, int(output_drops.sum().item()))
+    created_level_totals = output_created_counts.sum(dim=0).to(torch.int64)
+    source_level_totals = output_source_counts.sum(dim=0).to(torch.int64)
     details = {
         'scores': scores,
         'drops': drops,
@@ -460,6 +463,14 @@ def evaluate_policy(
         'action_distribution': (
             completed_action_counts.to(torch.float64)
             / completed_action_counts.sum().clamp_min(1)
+        ).tolist(),
+        'created_level_counts': created_level_totals.tolist(),
+        'source_level_merge_counts': source_level_totals.tolist(),
+        'created_level_density_per_1000_drops': (
+            created_level_totals.to(torch.float64) * 1000.0 / total_drops
+        ).tolist(),
+        'source_level_merge_density_per_1000_drops': (
+            source_level_totals.to(torch.float64) * 1000.0 / total_drops
         ).tolist(),
         'score_p10': _percentile(scores, 0.10),
         'score_p25': _percentile(scores, 0.25),
