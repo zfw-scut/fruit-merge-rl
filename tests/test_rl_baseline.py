@@ -289,6 +289,15 @@ class RewardTrainingConfigTest(unittest.TestCase):
             fast_l5.evaluation.seed_base, slow_l5.evaluation.seed_base
         )
 
+        auxiliary_l5 = TrainingConfig.from_toml(
+            project_root / 'configs' / 'gnn_dqn_auxiliary_action_l5_24m.toml'
+        )
+        self.assertEqual(auxiliary_l5.dqn.epsilon_decay_fraction, 0.75)
+        self.assertEqual(
+            auxiliary_l5.dqn.epsilon_schedule,
+            ((0, 1.0), (18_000_000, 0.05), (24_000_000, 0.05)),
+        )
+
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):
     def test_censored_stage_quantiles_use_the_pilot_window_quartiles(self):
