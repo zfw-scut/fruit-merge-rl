@@ -306,9 +306,32 @@ class RewardTrainingConfigTest(unittest.TestCase):
             auxiliary_l5.dqn.epsilon_schedule,
             ((0, 1.0), (6_400_000, 0.05), (24_000_000, 0.05)),
         )
-        self.assertEqual(auxiliary_l5.dqn.active_learning_top_k, 4)
+        self.assertFalse(auxiliary_l5.dqn.active_learning_enabled)
+        self.assertEqual(auxiliary_l5.replay.batch_size, 256)
+        self.assertTrue(auxiliary_l5.branch_learning.enabled)
         self.assertEqual(
-            auxiliary_l5.dqn.active_learning_max_probability, 0.40
+            auxiliary_l5.branch_learning.transition_budget, 4_000_000
+        )
+        self.assertEqual(auxiliary_l5.branch_learning.actions_per_state, 4)
+        self.assertEqual(auxiliary_l5.branch_learning.loss_weight, 0.25)
+        self.assertAlmostEqual(
+            auxiliary_l5.branch_learning.transition_budget
+            / auxiliary_l5.branch_learning.actions_per_state
+            / auxiliary_l5.total_transitions,
+            1 / 24,
+        )
+        self.assertAlmostEqual(
+            auxiliary_l5.branch_learning.learner_batch_size
+            / (
+                auxiliary_l5.replay.batch_size
+                + auxiliary_l5.branch_learning.learner_batch_size
+            ),
+            0.20,
+        )
+        self.assertAlmostEqual(
+            auxiliary_l5.branch_learning.loss_weight
+            / (1.0 + auxiliary_l5.branch_learning.loss_weight),
+            0.20,
         )
 
 
@@ -450,6 +473,9 @@ class DashboardTest(unittest.TestCase):
             'transitions': 1000,
             'env_steps_per_second': 200.0,
             'updates_per_second': 0.5,
+            'branch_steps_per_second': 40.0,
+            'branch_aux_loss_total': 0.75,
+            'branch_sample_fraction': 0.20,
             'training_window_mean_score': 123.0,
             'training_window_max_score': 456.0,
             'training_rolling_mean_score': 120.0,
@@ -457,6 +483,9 @@ class DashboardTest(unittest.TestCase):
         history = state.snapshot()['history']
         self.assertEqual(history[0]['training_window_mean_score'], 123.0)
         self.assertEqual(history[0]['training_window_max_score'], 456.0)
+        self.assertEqual(history[0]['branch_steps_per_second'], 40.0)
+        self.assertEqual(history[0]['branch_aux_loss_total'], 0.75)
+        self.assertEqual(history[0]['branch_sample_fraction'], 0.20)
         self.assertIn('训练效果曲线', _DASHBOARD_HTML)
         self.assertIn('窗口局均分', _DASHBOARD_HTML)
         self.assertIn('score-chart', _DASHBOARD_HTML)

@@ -1,7 +1,7 @@
 # 训练事实与派生监督扩展架构
 
-- 状态：基础框架与第一版密集辅助动作监督已实现；关键决策条件和反事实任务未实现
-- 更新日期：2026-08-09
+- 状态：基础框架、密集辅助监督与单步旁路主动采样已实现；行为段反事实任务未实现
+- 更新日期：2026-08-10
 - 当前基线：5 层 Fast epsilon、`score_v1`、1-step Dueling Double DQN
 
 ## 1. 目标与边界
@@ -36,6 +36,10 @@
 `AUXILIARY_ACTION_EFFECT_LEARNING.md`。其余功能只能作为独立 producer、consumer 或
 selector 接入，不能反向成为默认 TD 训练的运行依赖。
 
+2026-08-10新增的单步旁路只解决“从正常父状态获得少量未执行动作监督”这一项：它复制
+当前完整模拟器行，执行一次替代投放并写入隔离Replay。它不是行为段反事实归因，不保存
+长期分支轨迹，也不改变通用`DerivedSupervisionBatch`的未来契约。
+
 ## 2. 分层结构
 
 ```text
@@ -43,6 +47,7 @@ selector 接入，不能反向成为默认 TD 训练的运行依赖。
 ├─ CUDA TensorVectorSimulator
 ├─ GNN-DQN actor
 ├─ GpuReplayBuffer
+├─ 可选 Branch GpuReplayBuffer + 单步克隆模拟器
 ├─ 可选动作效果标签与辅助头
 └─ 多策略头 DqnLearner
 
@@ -97,6 +102,11 @@ observe
 密集辅助标签不经过 KeyDecisionCollector：每条实际 transition 都在 CUDA/GPU 热路径内
 生成并进入 Replay。Collector 仍用于未来关键决策稀有样本、行为段和反事实派生任务，
 两条路径共享身份和物理事实，但互不依赖。
+
+旁路主动样本同样不经过KeyDecisionCollector。父actor已有的多头Q与分歧负责排序；选中的
+父模拟器行在GPU内复制，四个替代动作各推进一个决策边界后进入独立Replay。主Replay的
+24M预算、父动作和父环境演化保持不变。learner不从父batch中让出名额，而是附加较小的
+旁路batch，并用独立loss系数限制其有效贡献。
 
 ## 4. 稳定事实身份
 

@@ -217,34 +217,69 @@ class DqnLearner:
             'aux_loss_total': total.detach(),
         }
 
-    def update(self, replay, batch_size):
+    def update(
+            self,
+            replay,
+            batch_size,
+            *,
+            branch_replay=None,
+            branch_batch_size=0,
+            branch_loss_weight=0.0):
         batch = replay.sample(batch_size)
-        combined = TensorState.cat((batch.current, batch.next_state))
+        branch_batch_size = int(branch_batch_size)
+        use_branch = branch_replay is not None and branch_batch_size > 0
+        branch = (
+            branch_replay.sample(branch_batch_size) if use_branch else None
+        )
+        current_states = [batch.current]
+        next_states = [batch.next_state]
+        if branch is not None:
+            current_states.append(branch.current)
+            next_states.append(branch.next_state)
+        current = TensorState.cat(current_states)
+        next_state = TensorState.cat(next_states)
+        combined = TensorState.cat((current, next_state))
+        total_batch_size = current.batch_size
         self.online_model.train()
         with self._autocast():
             combined_output = self.online_model(
-                combined, True, True, batch_size
+                combined, True, True, total_batch_size
             )
             current_heads, next_online_heads = (
-                combined_output.head_q_values.split(batch_size, dim=0)
+                combined_output.head_q_values.split(total_batch_size, dim=0)
+            )
+            actions = (
+                batch.action
+                if branch is None
+                else torch.cat((batch.action, branch.action), dim=0)
             )
             chosen_heads = current_heads.gather(
                 2,
-                batch.action[:, None, None].expand(
+                actions[:, None, None].expand(
                     -1, current_heads.shape[1], 1
                 ),
             ).squeeze(2)
             with torch.no_grad():
                 next_actions = next_online_heads.argmax(dim=2)
                 next_target_heads = self.target_model(
-                    batch.next_state, True, False
+                    next_state, True, False
                 ).head_q_values
                 next_target_q = next_target_heads.gather(
                     2, next_actions.unsqueeze(2)
                 ).squeeze(2)
-                target = batch.reward.unsqueeze(1) + (
-                    ~batch.terminal
-                ).to(batch.reward.dtype).unsqueeze(1) * (
+                rewards = (
+                    batch.reward
+                    if branch is None
+                    else torch.cat((batch.reward, branch.reward), dim=0)
+                )
+                terminals = (
+                    batch.terminal
+                    if branch is None
+                    else torch.cat((batch.terminal, branch.terminal), dim=0)
+                )
+                target = rewards.unsqueeze(1) + (
+                    ~terminals
+                ).to(rewards.dtype).unsqueeze(1) * (
                     self.config.gamma * next_target_q.float()
                 )
             td_values = F.huber_loss(
@@ -256,24 +291,62 @@ class DqnLearner:
             bootstrap_mask = batch.bootstrap_mask
             if bootstrap_mask is None:
                 bootstrap_mask = torch.ones_like(
-                    chosen_heads, dtype=torch.bool
+                    chosen_heads[:batch_size], dtype=torch.bool
                 )
-            dqn_loss = _masked_mean(td_values, bootstrap_mask)
+            branch_bootstrap_mask = None
+            if branch is not None:
+                branch_bootstrap_mask = branch.bootstrap_mask
+                if branch_bootstrap_mask is None:
+                    branch_bootstrap_mask = torch.ones_like(
+                        chosen_heads[batch_size:], dtype=torch.bool
+                    )
+            dqn_loss = _masked_mean(
+                td_values[:batch_size], bootstrap_mask
+            )
+            action_effect_predictions = combined_output.action_effects
+            parent_predictions = (
+                None
+                if action_effect_predictions is None
+                else type(action_effect_predictions)(*(
+                    value[:batch_size]
+                    for value in action_effect_predictions
+                ))
+            )
             auxiliary_loss, auxiliary_metrics = self._action_effect_loss(
-                (
-                    None
-                    if combined_output.action_effects is None
-                    else type(combined_output.action_effects)(*(
-                        value[:batch_size]
-                        for value in combined_output.action_effects
-                    ))
-                ),
+                parent_predictions,
                 batch.action_effects,
                 batch.action,
             )
-            loss = dqn_loss + (
+            parent_loss = dqn_loss + (
                 self.config.auxiliary_loss_weight * auxiliary_loss
             )
+            branch_dqn_loss = parent_loss.new_zeros(())
+            branch_auxiliary_loss = parent_loss.new_zeros(())
+            branch_auxiliary_metrics = {}
+            if branch is not None:
+                branch_dqn_loss = _masked_mean(
+                    td_values[batch_size:], branch_bootstrap_mask
+                )
+                branch_predictions = (
+                    None
+                    if action_effect_predictions is None
+                    else type(action_effect_predictions)(*(
+                        value[batch_size:total_batch_size]
+                        for value in action_effect_predictions
+                    ))
+                )
+                (
+                    branch_auxiliary_loss,
+                    branch_auxiliary_metrics,
+                ) = self._action_effect_loss(
+                    branch_predictions,
+                    branch.action_effects,
+                    branch.action,
+                )
+            branch_loss = branch_dqn_loss + (
+                self.config.auxiliary_loss_weight * branch_auxiliary_loss
+            )
+            loss = parent_loss + float(branch_loss_weight) * branch_loss
 
         if self.device.type == 'cuda':
             torch._assert_async(torch.isfinite(loss), 'non-finite DQN loss')
@@ -291,15 +364,20 @@ class DqnLearner:
             self.target_module.load_state_dict(self.online_module.state_dict())
             target_synced = True
 
-        td_error = target.detach() - chosen_heads.detach().float()
-        centered_heads = current_heads - current_heads.mean(
+        td_error = (
+            target[:batch_size].detach()
+            - chosen_heads[:batch_size].detach().float()
+        )
+        centered_heads = current_heads[:batch_size] - current_heads[
+            :batch_size
+        ].mean(
             dim=2, keepdim=True
         )
         result = {
             'loss': loss.detach(),
             'dqn_loss': dqn_loss.detach(),
-            'mean_q': chosen_heads.detach().float().mean(),
-            'mean_target': target.detach().mean(),
+            'mean_q': chosen_heads[:batch_size].detach().float().mean(),
+            'mean_target': target[:batch_size].detach().mean(),
             'mean_reward': batch.reward.detach().mean(),
             'mean_abs_td_error': td_error.abs().mean(),
             'max_abs_td_error': td_error.abs().amax(),
@@ -310,8 +388,34 @@ class DqnLearner:
             'grad_norm': torch.as_tensor(grad_norm).detach().float(),
             'target_synced': target_synced,
             'update_count': self.update_count,
+            'branch_sample_fraction': dqn_loss.new_tensor(
+                0.0
+                if branch is None
+                else branch_batch_size / total_batch_size
+            ),
         }
         result.update(auxiliary_metrics)
+        if branch is not None:
+            branch_td_error = (
+                target[batch_size:].detach()
+                - chosen_heads[batch_size:].detach().float()
+            )
+            branch_centered = current_heads[batch_size:] - current_heads[
+                batch_size:
+            ].mean(dim=2, keepdim=True)
+            result.update({
+                'branch_loss': branch_loss.detach(),
+                'branch_dqn_loss': branch_dqn_loss.detach(),
+                'branch_mean_reward': branch.reward.detach().mean(),
+                'branch_mean_abs_td_error': branch_td_error.abs().mean(),
+                'branch_policy_disagreement': branch_centered.float().std(
+                    dim=1, correction=0
+                ).mean().detach(),
+            })
+            result.update({
+                f'branch_{name}': value
+                for name, value in branch_auxiliary_metrics.items()
+            })
         return result
 
     def state_dict(self):

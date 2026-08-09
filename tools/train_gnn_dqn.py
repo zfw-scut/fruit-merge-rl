@@ -142,6 +142,18 @@ def resolve_config(args):
         autoscale=autoscale,
     )
     if args.smoke:
+        smoke_branch = resolved.branch_learning
+        if smoke_branch.enabled:
+            smoke_branch = replace(
+                smoke_branch,
+                transition_budget=8,
+                start_transition=0,
+                actions_per_state=4,
+                simulator_batch_size=8,
+                replay_capacity=16,
+                replay_warmup=8,
+                learner_batch_size=2,
+            )
         resolved = replace(
             resolved,
             max_envs=8,
@@ -159,6 +171,7 @@ def resolve_config(args):
                 warmup_transitions=16,
                 warmup_stage_ratios=(1.0, 0.0, 0.0, 0.0),
             ),
+            branch_learning=smoke_branch,
             evaluation=replace(
                 resolved.evaluation,
                 fast_interval_transitions=1_000_000,

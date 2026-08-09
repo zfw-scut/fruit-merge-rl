@@ -49,11 +49,7 @@ compile_model = true
 compile_mode = "reduce-overhead"
 bootstrap_probability = 0.8
 auxiliary_loss_weight = 0.05
-active_learning_enabled = true
-active_learning_start_epsilon = 0.50
-active_learning_full_epsilon = 0.05
-active_learning_max_probability = 0.40
-active_learning_top_k = 4
+active_learning_enabled = false
 
 [reward]
 kind = "score_v1"
@@ -63,9 +59,20 @@ queue_weights = [0.50, 0.30, 0.20]
 
 [replay]
 capacity = 1048576
-batch_size = 512
+batch_size = 256
 warmup_transitions = 262144
 warmup_stage_ratios = [0.30, 0.30, 0.25, 0.15]
+
+[branch_learning]
+enabled = true
+transition_budget = 4000000
+start_transition = 6400000
+actions_per_state = 4
+simulator_batch_size = 256
+replay_capacity = 262144
+replay_warmup = 65536
+learner_batch_size = 64
+loss_weight = 0.25
 
 [evaluation]
 fast_interval_transitions = 2097152

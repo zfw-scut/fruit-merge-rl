@@ -193,6 +193,68 @@ class ReplayConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class BranchLearningConfig:
+    """不修改父轨迹的单步主动克隆训练配置。"""
+
+    enabled: bool = False
+    transition_budget: int = 0
+    start_transition: int = 0
+    actions_per_state: int = 4
+    simulator_batch_size: int = 256
+    replay_capacity: int = 262_144
+    replay_warmup: int = 65_536
+    learner_batch_size: int = 64
+    loss_weight: float = 0.25
+
+    def __post_init__(self):
+        integer_names = (
+            'transition_budget', 'start_transition', 'actions_per_state',
+            'simulator_batch_size', 'replay_capacity', 'replay_warmup',
+            'learner_batch_size',
+        )
+        for name in integer_names:
+            if getattr(self, name) < 0:
+                raise ValueError(f'{name} cannot be negative')
+        for name in (
+                'actions_per_state', 'simulator_batch_size',
+                'replay_capacity', 'replay_warmup', 'learner_batch_size'):
+            if getattr(self, name) <= 0:
+                raise ValueError(f'{name} must be positive')
+        if self.replay_warmup > self.replay_capacity:
+            raise ValueError('branch replay_warmup cannot exceed capacity')
+        if self.learner_batch_size > self.replay_warmup:
+            raise ValueError(
+                'branch learner_batch_size cannot exceed replay_warmup'
+            )
+        if self.simulator_batch_size < self.actions_per_state:
+            raise ValueError(
+                'branch simulator batch must fit one cloned state'
+            )
+        if self.loss_weight < 0.0:
+            raise ValueError('branch loss_weight cannot be negative')
+        if self.enabled and self.transition_budget <= 0:
+            raise ValueError(
+                'enabled branch learning requires a positive transition budget'
+            )
+        if (
+                self.enabled
+                and self.transition_budget % self.actions_per_state != 0):
+            raise ValueError(
+                'branch transition budget must be divisible by actions_per_state'
+            )
+        if self.enabled and (
+                self.simulator_batch_size % self.actions_per_state != 0):
+            raise ValueError(
+                'branch simulator batch must be divisible by actions_per_state'
+            )
+        if self.enabled and (
+                self.transition_budget % self.simulator_batch_size != 0):
+            raise ValueError(
+                'branch transition budget must be divisible by simulator batch'
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationConfig:
     fast_interval_transitions: int = 2_097_152
     accurate_milestones: tuple[int, ...] = (
@@ -322,6 +384,9 @@ class TrainingConfig:
     dqn: DqnConfig = field(default_factory=DqnConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
     replay: ReplayConfig = field(default_factory=ReplayConfig)
+    branch_learning: BranchLearningConfig = field(
+        default_factory=BranchLearningConfig
+    )
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     analysis: AnalysisExportConfig = field(default_factory=AnalysisExportConfig)
     decision_data: DecisionDataConfig = field(
@@ -349,6 +414,33 @@ class TrainingConfig:
             raise ValueError(
                 'active_learning_top_k cannot exceed model.action_count'
             )
+        branch = self.branch_learning
+        if branch.enabled:
+            if self.dqn.active_learning_enabled:
+                raise ValueError(
+                    'direct active learning and branch learning are mutually '
+                    'exclusive'
+                )
+            if not self.model.action_effect_enabled:
+                raise ValueError(
+                    'branch learning requires action-effect supervision'
+                )
+            if self.model.policy_head_count <= 1:
+                raise ValueError(
+                    'branch learning requires multiple policy heads'
+                )
+            if branch.actions_per_state >= self.model.action_count:
+                raise ValueError(
+                    'branch actions_per_state must leave out the parent action'
+                )
+            if branch.start_transition >= self.total_transitions:
+                raise ValueError(
+                    'branch start_transition must precede total_transitions'
+                )
+            if self.reward.kind != 'score_v1':
+                raise ValueError(
+                    'the first branch-learning pipeline supports score_v1 only'
+                )
 
     @classmethod
     def from_toml(cls, path):
@@ -369,6 +461,9 @@ class TrainingConfig:
             dqn=DqnConfig(**dqn_data),
             reward=RewardConfig(**data.get('reward', {})),
             replay=ReplayConfig(**data.get('replay', {})),
+            branch_learning=BranchLearningConfig(
+                **data.get('branch_learning', {})
+            ),
             evaluation=EvaluationConfig(**data.get('evaluation', {})),
             analysis=AnalysisExportConfig(**data.get('analysis', {})),
             decision_data=DecisionDataConfig(**data.get('decision_data', {})),

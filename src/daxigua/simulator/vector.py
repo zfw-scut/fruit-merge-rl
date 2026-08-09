@@ -71,6 +71,14 @@ class TensorVectorSimulator:
     _RNG_INCREMENT = 12345
     _RNG_MASK = 0x7FFFFFFF
     _SEED_STRIDE = 747796405
+    _CLONE_STATE_FIELDS = (
+        'positions', 'velocities', 'angles', 'angular_velocities', 'levels',
+        'physics_radii', 'masses', 'inverse_masses', 'inverse_inertias',
+        'fruit_ids', 'age_frames', 'active', 'fruit_queue', 'score',
+        'last_score', 'step_count', 'physics_frame', 'fail_frames',
+        'next_fruit_id', 'rng_state', 'episode_count', 'terminated',
+        'needs_reset',
+    )
 
     def __init__(
             self,
@@ -2100,6 +2108,59 @@ class TensorVectorSimulator:
             danger_progress=danger_progress,
             over_danger_line=over_danger_line,
         )
+
+    @torch.no_grad()
+    def copy_rows_from(
+            self,
+            source,
+            source_rows,
+            destination_rows=None,
+            *,
+            validate_rows=True):
+        """在同一设备内把稳定决策状态批量复制到本模拟器槽位。"""
+
+        if not isinstance(source, TensorVectorSimulator):
+            raise TypeError('source must be TensorVectorSimulator')
+        if source.device != self.device:
+            raise ValueError('source and destination simulators must share device')
+        if source.config != self.config:
+            raise ValueError('source and destination simulators must share config')
+        source_rows = torch.as_tensor(
+            source_rows, dtype=torch.int64, device=self.device
+        ).flatten()
+        if destination_rows is None:
+            destination_rows = torch.arange(
+                source_rows.numel(), dtype=torch.int64, device=self.device
+            )
+        else:
+            destination_rows = torch.as_tensor(
+                destination_rows, dtype=torch.int64, device=self.device
+            ).flatten()
+        if source_rows.shape != destination_rows.shape:
+            raise ValueError('source and destination rows must have equal shape')
+        if source_rows.numel() == 0:
+            return
+        if validate_rows:
+            if bool(
+                    ((source_rows < 0) | (source_rows >= source.num_envs))
+                    .any().item()):
+                raise IndexError('source row is out of range')
+            if bool(
+                    (
+                        (destination_rows < 0)
+                        | (destination_rows >= self.num_envs)
+                    ).any().item()):
+                raise IndexError('destination row is out of range')
+            if int(torch.unique(destination_rows).numel()) != int(
+                    destination_rows.numel()):
+                raise ValueError('destination rows must be unique')
+        for name in self._CLONE_STATE_FIELDS:
+            getattr(self, name).index_copy_(
+                0,
+                destination_rows,
+                getattr(source, name).index_select(0, source_rows),
+            )
+        self._last_batch_result = None
 
     @torch.no_grad()
     def export_decision_sidecar(self, rows=None):

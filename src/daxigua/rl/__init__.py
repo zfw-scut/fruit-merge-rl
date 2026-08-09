@@ -4,6 +4,7 @@ from .action_effects import ActionEffectTargets, build_action_effect_targets
 from .config import (
     AnalysisExportConfig,
     AutoScaleConfig,
+    BranchLearningConfig,
     DashboardConfig,
     DecisionDataConfig,
     DqnConfig,
@@ -35,6 +36,7 @@ __all__ = [
     'ActionSelectionBatch',
     'AutoScaleConfig',
     'BaselineGnnDqn',
+    'BranchLearningConfig',
     'DashboardConfig',
     'DecisionDataConfig',
     'DecisionFactBatch',

@@ -28,6 +28,7 @@ from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
+from daxigua.rl.trainer import ranked_active_learning_candidates
 from daxigua.simulator import (
     SimulatorConfig,
     SpatialRewardComputer,
@@ -186,6 +187,121 @@ def run_preflight(args):
     if not bool(torch.isfinite(learner_metrics['loss']).item()):
         raise FloatingPointError('learner update produced non-finite loss')
 
+    branch_replay = None
+    branch_metrics = None
+    branch_transition_count = 0
+    projected_branch_replay_memory = 0
+    if config.branch_learning.enabled:
+        branch = config.branch_learning
+        source_count = max(
+            1,
+            min(
+                args.smoke_envs,
+                args.smoke_batch_size,
+            ) // branch.actions_per_state,
+        )
+        branch_batch_size = source_count * branch.actions_per_state
+        branch_simulator = TensorVectorSimulator(
+            branch_batch_size,
+            config=simulator_config,
+            device=device,
+        )
+        source_rows = torch.arange(
+            source_count, dtype=torch.int64, device=device
+        )
+        expanded_sources = source_rows.unsqueeze(1).expand(
+            -1, branch.actions_per_state
+        ).reshape(-1)
+        branch_simulator.copy_rows_from(
+            simulator,
+            expanded_sources,
+        )
+        with torch.inference_mode():
+            source_output = model(next_state.index_select(source_rows), True)
+            source_uncertainty = (
+                source_output.head_q_values
+                - source_output.head_q_values.mean(dim=2, keepdim=True)
+            ).float().std(dim=1, correction=0)
+            candidates, _value_ranks, _uncertainty_ranks = (
+                ranked_active_learning_candidates(
+                    source_output.q_values,
+                    source_uncertainty,
+                    config.model.action_count,
+                )
+            )
+            parent_actions = source_output.q_values.argmax(dim=1)
+            alternatives = candidates[
+                candidates.ne(parent_actions.unsqueeze(1))
+            ].view(source_count, config.model.action_count - 1)
+            branch_actions = alternatives[
+                :, :branch.actions_per_state
+            ].reshape(-1)
+        branch_current = TensorState.from_observation(
+            branch_simulator.observe(),
+            physics_fps=simulator_config.physics_fps,
+            clone=True,
+        )
+        branch_fruit_count = branch_current.active.sum(dim=1)
+        branch_danger_progress = branch_current.danger_progress.clone()
+        branch_result = branch_simulator.step(branch_actions)
+        branch_next = TensorState.from_observation(
+            branch_result.observation,
+            physics_fps=simulator_config.physics_fps,
+        )
+        branch_effects = build_action_effect_targets(
+            branch_current,
+            branch_next,
+            branch_result,
+            board_width=simulator_config.board_width,
+            board_height=simulator_config.board_height,
+            gravity_y=simulator_config.gravity_y,
+            max_physics_frames=simulator_config.max_physics_frames,
+            current_fruit_count=branch_fruit_count,
+            current_danger_progress=branch_danger_progress,
+        )
+        branch_rewards = branch_result.physics.score_delta.to(
+            torch.float32
+        ) / config.reward.score_divisor
+        branch_learner_batch_size = min(
+            branch.learner_batch_size,
+            args.smoke_batch_size,
+        )
+        branch_replay = GpuReplayBuffer(
+            max(branch_batch_size * 2, branch_learner_batch_size * 2),
+            max_fruits=config.model.max_fruits,
+            device=device,
+            physics_fps=simulator_config.physics_fps,
+            policy_head_count=config.model.policy_head_count,
+            bootstrap_probability=config.dqn.bootstrap_probability,
+            action_effects_enabled=True,
+        )
+        while len(branch_replay) < branch_learner_batch_size:
+            branch_replay.append(
+                branch_current,
+                branch_actions,
+                branch_rewards,
+                branch_next,
+                branch_result.physics.done,
+                action_effects=branch_effects,
+            )
+        branch_metrics = learner.update(
+            replay,
+            args.smoke_batch_size,
+            branch_replay=branch_replay,
+            branch_batch_size=branch_learner_batch_size,
+            branch_loss_weight=branch.loss_weight,
+        )
+        if not bool(torch.isfinite(branch_metrics['loss']).item()):
+            raise FloatingPointError(
+                'branch learner update produced non-finite loss'
+            )
+        branch_transition_count = branch_batch_size
+        projected_branch_replay_memory = int(
+            branch_replay.memory_bytes
+            * branch.replay_capacity
+            / branch_replay.capacity
+        )
+
     smoke_dir = args.output.parent / '_checkpoint_smoke'
     smoke_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = smoke_dir / 'round_trip.pt'
@@ -248,6 +364,9 @@ def run_preflight(args):
     else:
         peak_memory = 0.0
         device_name = 'cpu'
+    projected_parent_replay_memory = int(
+        replay.memory_bytes * config.replay.capacity / replay.capacity
+    )
     return {
         'ready': True,
         'timestamp': time.time(),
@@ -267,8 +386,58 @@ def run_preflight(args):
         'policy_disagreement': float(
             learner_metrics['policy_disagreement'].item()
         ),
+        'branch_learning_enabled': config.branch_learning.enabled,
+        'branch_smoke_transitions': branch_transition_count,
+        'branch_replay_memory_bytes': (
+            0 if branch_replay is None else branch_replay.memory_bytes
+        ),
+        'projected_branch_replay_memory_bytes': (
+            projected_branch_replay_memory
+        ),
+        'branch_composite_loss': (
+            None
+            if branch_metrics is None
+            else float(branch_metrics['loss'].item())
+        ),
+        'branch_dqn_loss': (
+            None
+            if branch_metrics is None
+            else float(branch_metrics['branch_dqn_loss'].item())
+        ),
+        'branch_auxiliary_loss': (
+            None
+            if branch_metrics is None
+            else float(branch_metrics['branch_aux_loss_total'].item())
+        ),
+        'branch_sample_fraction': (
+            None
+            if branch_metrics is None
+            else float(branch_metrics['branch_sample_fraction'].item())
+        ),
+        'configured_branch_sample_fraction': (
+            0.0
+            if not config.branch_learning.enabled
+            else config.branch_learning.learner_batch_size / (
+                config.replay.batch_size
+                + config.branch_learning.learner_batch_size
+            )
+        ),
+        'configured_branch_effective_loss_fraction': (
+            0.0
+            if not config.branch_learning.enabled
+            else config.branch_learning.loss_weight / (
+                1.0 + config.branch_learning.loss_weight
+            )
+        ),
         'target_synced': learner_metrics['target_synced'],
         'replay_memory_bytes': replay.memory_bytes,
+        'projected_parent_replay_memory_bytes': (
+            projected_parent_replay_memory
+        ),
+        'projected_total_replay_memory_bytes': (
+            projected_parent_replay_memory
+            + projected_branch_replay_memory
+        ),
         'peak_cuda_memory_mb': peak_memory,
         'evaluations': evaluations,
         'checkpoint_round_trip': True,

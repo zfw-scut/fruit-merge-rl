@@ -1,6 +1,7 @@
 """辅助动作效果、多策略头与主动学习基础契约测试。"""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 import unittest
 from tempfile import TemporaryDirectory
@@ -11,6 +12,7 @@ from daxigua.rl.action_effects import build_action_effect_targets
 from daxigua.rl.config import (
     AnalysisExportConfig,
     AutoScaleConfig,
+    BranchLearningConfig,
     DashboardConfig,
     DqnConfig,
     EvaluationConfig,
@@ -96,6 +98,35 @@ def _training_config(directory, device):
         ),
         dashboard=DashboardConfig(enabled=False),
         autoscale=AutoScaleConfig(enabled=False),
+    )
+
+
+def _branch_training_config(directory, device):
+    config = _training_config(directory, device)
+    return replace(
+        config,
+        total_transitions=8,
+        dqn=replace(
+            config.dqn,
+            active_learning_enabled=False,
+        ),
+        replay=replace(
+            config.replay,
+            capacity=8,
+            batch_size=2,
+            warmup_transitions=2,
+        ),
+        branch_learning=BranchLearningConfig(
+            enabled=True,
+            transition_budget=4,
+            start_transition=0,
+            actions_per_state=2,
+            simulator_batch_size=4,
+            replay_capacity=4,
+            replay_warmup=2,
+            learner_batch_size=1,
+            loss_weight=0.5,
+        ),
     )
 
 
@@ -213,6 +244,23 @@ class ActionEffectLearningTest(unittest.TestCase):
                 'aux_loss_first_contact', 'policy_disagreement'):
             self.assertTrue(bool(torch.isfinite(metrics[name])))
 
+        branch_metrics = learner.update(
+            replay,
+            2,
+            branch_replay=replay,
+            branch_batch_size=1,
+            branch_loss_weight=0.5,
+        )
+        self.assertAlmostEqual(
+            float(branch_metrics['branch_sample_fraction']), 1 / 3
+        )
+        self.assertTrue(bool(torch.isfinite(
+            branch_metrics['branch_dqn_loss']
+        )))
+        self.assertTrue(bool(torch.isfinite(
+            branch_metrics['branch_aux_loss_total']
+        )))
+
     def test_rank_fusion_orders_candidates_without_value_scaling(self):
         q_values = torch.tensor(((1.0, 0.8, 0.7, 0.6),))
         uncertainty = torch.tensor(((0.1, 0.4, 0.3, 0.2),))
@@ -265,6 +313,57 @@ class ActionEffectLearningTest(unittest.TestCase):
             for row in rows
         ))
         self.assertEqual(status['phase'], 'completed')
+
+    def test_single_step_branch_learning_preserves_parent_budget(self):
+        with TemporaryDirectory() as directory:
+            trainer = BaselineTrainer(
+                _branch_training_config(directory, 'cpu')
+            )
+            result = trainer.run(final_evaluation=False)
+            rows = [
+                json.loads(line)
+                for line in (Path(directory) / 'metrics.jsonl').read_text(
+                    encoding='utf-8'
+                ).splitlines()
+            ]
+            resumed = BaselineTrainer(
+                _branch_training_config(directory, 'cpu')
+            )
+            resumed.resume(Path(directory) / 'checkpoints' / 'final.pt')
+        self.assertEqual(result['transitions'], 8)
+        self.assertEqual(result['branch_transitions'], 4)
+        self.assertEqual(result['branch_source_states'], 2)
+        self.assertEqual(result['branch_progress_fraction'], 1.0)
+        self.assertEqual(len(trainer.branch_replay), 4)
+        self.assertEqual(resumed.branch_transitions, 4)
+        self.assertEqual(resumed.branch_replay_training_threshold, 1)
+        self.assertTrue(torch.equal(
+            trainer.branch_generator.get_state(),
+            resumed.branch_generator.get_state(),
+        ))
+        self.assertTrue(all(
+            row.get('active_learning_action_fraction', 0.0) == 0.0
+            for row in rows
+        ))
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is unavailable')
+    def test_cuda_single_step_branch_learning_runs_end_to_end(self):
+        with TemporaryDirectory() as directory:
+            trainer = BaselineTrainer(
+                _branch_training_config(directory, 'cuda')
+            )
+            result = trainer.run(final_evaluation=False)
+            resumed = BaselineTrainer(
+                _branch_training_config(directory, 'cuda')
+            )
+            resumed.resume(Path(directory) / 'checkpoints' / 'final.pt')
+        self.assertEqual(result['transitions'], 8)
+        self.assertEqual(result['branch_transitions'], 4)
+        self.assertEqual(result['branch_source_states'], 2)
+        self.assertTrue(torch.equal(
+            trainer.branch_generator.get_state(),
+            resumed.branch_generator.get_state(),
+        ))
 
     @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is unavailable')
     def test_cuda_trainer_runs_auxiliary_pipeline_end_to_end(self):

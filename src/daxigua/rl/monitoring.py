@@ -246,17 +246,21 @@ const eventNames={preflight_finished:'预检完成',autotune_finished:'性能标
 const groups={
  progress:[
   ['transitions','累计投放','Transitions',(v)=>int(v)],['total_transitions','计划投放','Target',(v)=>int(v)],
+  ['branch_transitions','旁路主动投放','Branch Transitions',(v,d)=>`${int(v)} / ${int(d.branch_total_transitions)}`],
   ['updates','模型更新','Updates',(v)=>int(v)],['episodes','已完成局数','Episodes',(v)=>int(v)],
   ['active_envs','活跃环境','Active Envs',(v)=>int(v)],['epsilon','探索率','Epsilon',(v)=>ratioPercent(v)],
   ['replay_size','Replay 占用','Replay',(v,d)=>`${int(v)} / ${int(d.replay_capacity)}`],
+  ['branch_replay_size','主动 Replay','Branch Replay',(v,d)=>`${int(v)} / ${int(d.branch_replay_capacity)}`],
   ['eta_seconds','预计剩余','ETA',(v)=>duration(v)]],
  throughput:[
   ['env_steps_per_second','投放速度','Drops',(v)=>rate(v)],['updates_per_second','更新速度','Updates',(v)=>rate(v)],
+  ['branch_steps_per_second','旁路主动速度','Branch Drops',(v)=>rate(v)],
   ['learner_samples_per_second','学习样本速度','Learner Samples',(v)=>rate(v)],
   ['physics_seconds','物理耗时（窗口）','Physics',(v)=>`${decimal(v,2)} 秒`],
   ['reward_seconds','奖励几何耗时（窗口）','Reward Geometry',(v)=>`${decimal(v,2)} 秒`],
   ['actor_seconds','决策耗时（窗口）','Actor',(v)=>`${decimal(v,2)} 秒`],
   ['learner_seconds','学习耗时（窗口）','Learner',(v)=>`${decimal(v,2)} 秒`],
+  ['branch_seconds','旁路主动耗时（窗口）','Branch Physics',(v)=>`${decimal(v,2)} 秒`],
   ['training_window_episodes','统计窗口局数','Window Episodes',(v)=>int(v)],
   ['training_window_mean_drops','窗口平均局长','Mean Drops',(v)=>decimal(v,1)]],
  resources:[
@@ -269,6 +273,7 @@ const groups={
   ['process_rss_mb','训练进程内存','Process RSS',(v)=>gib(v)]],
  learning:[
   ['loss','总损失','Total Loss',(v)=>decimal(v,5)],['dqn_loss','DQN 损失','DQN Loss',(v)=>decimal(v,5)],['aux_loss_total','辅助效果损失','Auxiliary Loss',(v)=>decimal(v,5)],['mean_reward','平均奖励','Mean Reward',(v)=>decimal(v,4)],
+  ['branch_dqn_loss','旁路 DQN 损失','Branch DQN Loss',(v)=>decimal(v,5)],['branch_aux_loss_total','旁路辅助损失','Branch Auxiliary Loss',(v)=>decimal(v,5)],['branch_sample_fraction','旁路样本比例','Branch Sample Share',(v)=>ratioPercent(v)],
   ['spatial_reward','空间奖励','Spatial Reward',(v)=>decimal(v,5)],
   ['spatial_previous_potential','投放前空间势能','Space Before',(v)=>decimal(v,4)],
   ['spatial_next_potential','投放后空间势能','Space After',(v)=>decimal(v,4)],
@@ -276,7 +281,7 @@ const groups={
   ['spatial_reference_loss','无合成参考损失','No-merge Reference',(v)=>decimal(v,5)],
   ['spatial_positive_rate','正空间奖励比例','Positive Rate',(v)=>ratioPercent(v)],
   ['mean_q','平均 Q 值','Mean Q',(v)=>decimal(v,4)],['mean_target','平均 TD 目标','TD Target',(v)=>decimal(v,4)],
-  ['mean_abs_td_error','平均绝对 TD 误差','Abs TD Error',(v)=>decimal(v,4)],['policy_disagreement','策略头分歧','Policy Disagreement',(v)=>decimal(v,5)],['active_learning_action_fraction','主动学习分支比例','Active Branch',(v)=>ratioPercent(v)],['epsilon_explore_action_fraction','Epsilon 随机分支比例','Epsilon Branch',(v)=>ratioPercent(v)],['active_learning_effective_action_fraction','主动学习有效改动作比例','Effective Active',(v)=>ratioPercent(v)],['active_learning_greedy_overlap_rate','主动/贪心重叠率','Active-Greedy Overlap',(v)=>ratioPercent(v)],['active_selected_rank_correlation','被选动作双排名相关性','Selected Rank Correlation',(v)=>decimal(v,4)],['grad_norm','梯度范数','Grad Norm',(v)=>decimal(v,3)],
+  ['mean_abs_td_error','平均绝对 TD 误差','Abs TD Error',(v)=>decimal(v,4)],['policy_disagreement','策略头分歧','Policy Disagreement',(v)=>decimal(v,5)],['epsilon_explore_action_fraction','Epsilon 随机分支比例','Epsilon Branch',(v)=>ratioPercent(v)],['active_selected_rank_correlation','旁路动作双排名相关性','Branch Rank Correlation',(v)=>decimal(v,4)],['grad_norm','梯度范数','Grad Norm',(v)=>decimal(v,3)],
   ['training_window_mean_score','窗口局均分','Window Mean Score',(v)=>score(v)],
   ['training_window_max_score','窗口最高分','Window Max Score',(v)=>score(v)],
   ['training_rolling_mean_score','近 4096 局均分','Rolling Mean',(v)=>score(v)],
@@ -302,8 +307,8 @@ async function tick(){
   $('phase-text').textContent=`阶段：${phaseNames[data.phase]||data.phase||'等待数据'}`;$('updated-at').textContent=`最后更新：${new Date((state.timestamp||0)*1000).toLocaleString('zh-CN',{hour12:false})}`;$('status-message').textContent=terminal?(data.completion_message||$('connection').textContent):`投放 ${rate(data.env_steps_per_second)} · 更新 ${rate(data.updates_per_second)} · 面板队列丢弃 ${int(data.dropped_messages||0)} 条`;$('run-time').textContent=`运行时间：${duration(data.uptime_seconds)}`;
   drawChart('score-chart',history,[{key:'training_window_mean_score',color:'#0067c0'},{key:'training_window_max_score',color:'#d13438'},{key:'training_rolling_mean_score',color:'#107c10'},{key:'last_fast_eval_score',color:'#0099bc'},{key:'last_accurate_eval_score',color:'#8764b8'}],v=>short(v));
   drawChart('loss-chart',history,[{key:'loss',color:'#0067c0'},{key:'dqn_loss',color:'#107c10'},{key:'mean_abs_td_error',color:'#d13438'}],v=>decimal(v,3));
-  drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'}],v=>short(v));
-  drawChart('aux-loss-chart',history,[{key:'aux_loss_merge',color:'#0067c0'},{key:'aux_loss_q0_lineage',color:'#107c10'},{key:'aux_loss_first_contact',color:'#ca5010'},{key:'aux_loss_generation',color:'#8764b8'},{key:'aux_loss_outcome',color:'#c239b3'}],v=>decimal(v,3));
+  drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'},{key:'branch_steps_per_second',color:'#ca5010'}],v=>short(v));
+  drawChart('aux-loss-chart',history,[{key:'aux_loss_merge',color:'#0067c0'},{key:'aux_loss_q0_lineage',color:'#107c10'},{key:'aux_loss_first_contact',color:'#ca5010'},{key:'aux_loss_generation',color:'#8764b8'},{key:'aux_loss_outcome',color:'#c239b3'},{key:'branch_aux_loss_total',color:'#69797e'}],v=>decimal(v,3));
   drawChart('merge-density-chart',history,[{key:'eval_created_l7_per_1000',color:'#69797e'},{key:'eval_created_l8_per_1000',color:'#0099bc'},{key:'eval_created_l9_per_1000',color:'#107c10'},{key:'eval_created_l10_per_1000',color:'#ca5010'},{key:'eval_created_l11_per_1000',color:'#d13438'}],v=>decimal(v,2));
   drawChart('active-rank-chart',history,[{key:'active_selected_rank_correlation',color:'#0067c0'}],v=>decimal(v,3));
   drawChart('gpu-resource-chart',resourceHistory,[{key:'gpu_utilization',color:'#0067c0'},{key:'gpu_memory_utilization',color:'#8764b8'}],v=>percent(v,0));
@@ -425,8 +430,18 @@ class _DashboardState:
                 }
                 optional_names = (
                     'learner_samples_per_second',
+                    'branch_steps_per_second',
                     'loss',
+                    'dqn_loss',
                     'mean_abs_td_error',
+                    'aux_loss_merge',
+                    'aux_loss_q0_lineage',
+                    'aux_loss_first_contact',
+                    'aux_loss_generation',
+                    'aux_loss_outcome',
+                    'branch_dqn_loss',
+                    'branch_aux_loss_total',
+                    'branch_sample_fraction',
                     'training_window_mean_score',
                     'training_window_max_score',
                     'training_rolling_mean_score',
@@ -439,6 +454,11 @@ class _DashboardState:
                     'active_learning_effective_action_fraction',
                     'active_learning_greedy_overlap_rate',
                     'active_selected_rank_correlation',
+                    'eval_created_l7_per_1000',
+                    'eval_created_l8_per_1000',
+                    'eval_created_l9_per_1000',
+                    'eval_created_l10_per_1000',
+                    'eval_created_l11_per_1000',
                 )
                 for name in optional_names:
                     if name in payload:

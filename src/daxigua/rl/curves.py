@@ -336,7 +336,8 @@ def render_training_curve_snapshot(run_dir):
         )
         for key, series_label, color in (
                 ('env_steps_per_second', bilingual('投放', 'Env'), colors['blue']),
-                ('learner_samples_per_second', bilingual('学习样本', 'Learner'), colors['green'])):
+                ('learner_samples_per_second', bilingual('学习样本', 'Learner'), colors['green']),
+                ('branch_steps_per_second', bilingual('旁路主动投放', 'Branch'), colors['orange'])):
             xs, ys = _series(metrics, 'transitions', key, x_scale=1_000_000)
             _plot_or_note(
                 throughput, xs, ys, label=series_label,
@@ -355,7 +356,8 @@ def render_training_curve_snapshot(run_dir):
                 ('aux_loss_q0_lineage', bilingual('q0 谱系', 'q0 lineage'), colors['green']),
                 ('aux_loss_first_contact', bilingual('首次接触', 'First contact'), colors['orange']),
                 ('aux_loss_generation', bilingual('新水果', 'Generated fruit'), colors['violet']),
-                ('aux_loss_outcome', bilingual('最终结果', 'Outcome'), colors['pink'])):
+                ('aux_loss_outcome', bilingual('最终结果', 'Outcome'), colors['pink']),
+                ('branch_aux_loss_total', bilingual('旁路主动总损失', 'Branch total'), colors['slate'])):
             xs, ys = _series(metrics, 'transitions', key, x_scale=1_000_000)
             if xs:
                 auxiliary.plot(

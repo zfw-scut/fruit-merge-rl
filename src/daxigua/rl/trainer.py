@@ -310,6 +310,31 @@ class BaselineTrainer:
             bootstrap_probability=config.dqn.bootstrap_probability,
             action_effects_enabled=config.model.action_effect_enabled,
         )
+        self.branch_simulator = None
+        self.branch_replay = None
+        self.branch_generator = None
+        self.branch_replay_training_threshold = 0
+        if config.branch_learning.enabled:
+            branch = config.branch_learning
+            self.branch_generator = torch.Generator(device=self.device)
+            self.branch_generator.manual_seed(config.seed + 3)
+            self.branch_replay_training_threshold = branch.replay_warmup
+            self.branch_simulator = TensorVectorSimulator(
+                branch.simulator_batch_size,
+                config=self.simulator_config,
+                device=self.device,
+            )
+            self.branch_replay = GpuReplayBuffer(
+                branch.replay_capacity,
+                max_fruits=config.model.max_fruits,
+                queue_length=config.model.queue_length,
+                device=self.device,
+                physics_fps=self.simulator_config.physics_fps,
+                seed=config.seed + 2,
+                policy_head_count=config.model.policy_head_count,
+                bootstrap_probability=config.dqn.bootstrap_probability,
+                action_effects_enabled=True,
+            )
         self.key_decision_collector = KeyDecisionCollector(
             config.decision_data,
             replay=self.replay,
@@ -332,6 +357,8 @@ class BaselineTrainer:
         self.metric_window_scores = []
         self.metric_window_drops = []
         self.transitions = 0
+        self.branch_transitions = 0
+        self.branch_source_states = 0
         self.simulated_transitions = 0
         self.episodes = 0
         self.update_credit = 0.0
@@ -767,6 +794,150 @@ class BaselineTrainer:
 
         return self._select_action_batch(state, epsilon).actions
 
+    def _branch_target_at(self, parent_transitions):
+        branch = self.config.branch_learning
+        if not branch.enabled:
+            return 0
+        horizon = self.config.total_transitions - branch.start_transition
+        eligible = min(
+            horizon,
+            max(0, int(parent_transitions) - branch.start_transition),
+        )
+        raw_target = branch.transition_budget * eligible // horizon
+        return (
+            raw_target // branch.simulator_batch_size
+            * branch.simulator_batch_size
+        )
+
+    @torch.no_grad()
+    def _collect_branch_transitions(
+            self,
+            *,
+            current_stages,
+            action_selection,
+            parent_transitions_after_step):
+        """从未修改的父状态旁路执行一次主动动作并写入独立 Replay。"""
+
+        if self.branch_simulator is None or self.branch_replay is None:
+            return 0
+        branch = self.config.branch_learning
+        target = self._branch_target_at(parent_transitions_after_step)
+        pending = target - self.branch_transitions
+        if pending <= 0:
+            return 0
+        if pending % branch.simulator_batch_size != 0:
+            raise RuntimeError('branch scheduler produced a partial simulator batch')
+        source_count = (
+            branch.simulator_batch_size // branch.actions_per_state
+        )
+        if source_count > self.active_envs:
+            raise RuntimeError('branch simulator requires too many parent states')
+        pending_source_count = pending // branch.actions_per_state
+        if pending_source_count > self.active_envs:
+            raise RuntimeError(
+                'branch schedule selected one parent state more than once '
+                'inside a decision batch'
+            )
+        pending_source_rows = torch.randperm(
+            self.active_envs,
+            device=self.device,
+            generator=self.branch_generator,
+        )[:pending_source_count]
+        destination_rows = torch.arange(
+            branch.simulator_batch_size,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        produced = 0
+        while produced < pending:
+            source_start = produced // branch.actions_per_state
+            source_rows = pending_source_rows[
+                source_start:source_start + source_count
+            ]
+            parent_actions = action_selection.actions.index_select(
+                0, source_rows
+            )
+            ranked, _value_ranks, _uncertainty_ranks = (
+                ranked_active_learning_candidates(
+                    action_selection.q_values.index_select(0, source_rows),
+                    action_selection.uncertainty.index_select(0, source_rows),
+                    self.config.model.action_count,
+                )
+            )
+            alternatives = ranked[
+                ranked.ne(parent_actions.unsqueeze(1))
+            ].view(source_count, self.config.model.action_count - 1)
+            selected_actions = alternatives[
+                :, :branch.actions_per_state
+            ]
+            selected_value_ranks = _value_ranks.gather(
+                1, selected_actions
+            ).reshape(-1).to(torch.float32)
+            selected_uncertainty_ranks = _uncertainty_ranks.gather(
+                1, selected_actions
+            ).reshape(-1).to(torch.float32)
+            self.actor_rank_correlation_sums += torch.stack((
+                torch.ones_like(selected_value_ranks),
+                selected_value_ranks,
+                selected_uncertainty_ranks,
+                selected_value_ranks.square(),
+                selected_uncertainty_ranks.square(),
+                selected_value_ranks * selected_uncertainty_ranks,
+            )).sum(dim=1)
+            expanded_sources = source_rows.unsqueeze(1).expand(
+                -1, branch.actions_per_state
+            ).reshape(-1)
+            branch_actions = selected_actions.reshape(-1)
+            self.branch_simulator.copy_rows_from(
+                self.simulator,
+                expanded_sources,
+                destination_rows,
+                validate_rows=False,
+            )
+            branch_observation = self.branch_simulator.observe()
+            branch_current = TensorState.from_observation(
+                branch_observation,
+                physics_fps=self.simulator_config.physics_fps,
+                clone=True,
+            )
+            current_fruit_count = branch_current.active.sum(dim=1)
+            current_danger_progress = branch_current.danger_progress.clone()
+            ticket = self.branch_replay.begin_append(branch_current)
+            result = self.branch_simulator.step(branch_actions)
+            branch_next = TensorState.from_observation(
+                result.observation,
+                physics_fps=self.simulator_config.physics_fps,
+            )
+            rewards = result.physics.score_delta.to(
+                torch.float32
+            ) / self.config.reward.score_divisor
+            stages = current_stages.index_select(
+                0, source_rows
+            ).unsqueeze(1).expand(
+                -1, branch.actions_per_state
+            ).reshape(-1)
+            action_effects = self._build_action_effect_targets(
+                branch_current,
+                branch_next,
+                result,
+                current_fruit_count,
+                current_danger_progress,
+            )
+            self.branch_replay.finish_append(
+                ticket,
+                branch_next,
+                branch_actions,
+                rewards,
+                result.physics.done,
+                stages,
+                action_effects,
+            )
+            produced += branch.simulator_batch_size
+            self.branch_transitions += branch.simulator_batch_size
+            self.branch_source_states += source_count
+            self.simulated_transitions += branch.simulator_batch_size
+        return produced
+
     @torch.no_grad()
     def _accumulate_actor_metrics(self, selection):
         active = selection.active_learning_mask
@@ -873,6 +1044,7 @@ class BaselineTrainer:
         raise RuntimeError('autoscale pre-roll did not reach its target stages')
 
     def _progress(self):
+        branch_budget = self.config.branch_learning.transition_budget
         return {
             'transitions': self.transitions,
             'total_transitions': self.config.total_transitions,
@@ -880,6 +1052,14 @@ class BaselineTrainer:
                 1.0, self.transitions / self.config.total_transitions
             ),
             'simulated_transitions': self.simulated_transitions,
+            'branch_transitions': self.branch_transitions,
+            'branch_total_transitions': branch_budget,
+            'branch_progress_fraction': (
+                0.0
+                if branch_budget <= 0
+                else min(1.0, self.branch_transitions / branch_budget)
+            ),
+            'branch_source_states': self.branch_source_states,
             'episodes': self.episodes,
             'updates': self.learner.update_count,
             'active_envs': self.active_envs,
@@ -899,6 +1079,19 @@ class BaselineTrainer:
             replay_metadata=self.replay.metadata(),
             extra={
                 'replay_resume_policy': 'rebuild',
+                'branch_replay_resume_policy': (
+                    'rebuild_from_future_branches'
+                ),
+                'branch_generator_state': (
+                    None
+                    if self.branch_generator is None
+                    else self.branch_generator.get_state()
+                ),
+                'branch_replay_metadata': (
+                    None
+                    if self.branch_replay is None
+                    else self.branch_replay.metadata()
+                ),
                 'decision_data': self.key_decision_collector.metrics(),
                 **(extra or {}),
             },
@@ -912,6 +1105,23 @@ class BaselineTrainer:
         restore_rng_state(checkpoint['rng_state'])
         progress = checkpoint['progress']
         self.transitions = int(progress['transitions'])
+        self.branch_transitions = int(
+            progress.get('branch_transitions', 0)
+        )
+        self.branch_source_states = int(
+            progress.get('branch_source_states', 0)
+        )
+        if self.branch_replay is not None:
+            self.branch_replay_training_threshold = (
+                self.config.branch_learning.learner_batch_size
+            )
+            branch_generator_state = checkpoint.get('extra', {}).get(
+                'branch_generator_state'
+            )
+            if branch_generator_state is not None:
+                self.branch_generator.set_state(
+                    branch_generator_state.detach().cpu()
+                )
         self.simulated_transitions = int(progress['simulated_transitions'])
         self.episodes = int(progress['episodes'])
         self.best_accurate_score = float(progress['best_accurate_score'])
@@ -919,7 +1129,11 @@ class BaselineTrainer:
         self.last_accurate_eval_score = progress.get('last_accurate_eval_score')
         self.best_training_score = int(progress.get('best_training_score', 0))
         self.dashboard.event(
-            'resumed', '已恢复模型与优化器，Replay 将重新预热'
+            'resumed',
+            '已恢复模型与优化器；主 Replay 重新预热，主动 Replay 从后续旁路样本重建',
+            branch_replay_training_threshold=(
+                self.branch_replay_training_threshold
+            ),
         )
 
     def _append_jsonl(self, name, payload):
@@ -1074,6 +1288,7 @@ class BaselineTrainer:
             started,
             window_started,
             window_transitions,
+            window_branch_transitions,
             window_updates,
             stage_seconds):
         now = time.perf_counter()
@@ -1097,10 +1312,29 @@ class BaselineTrainer:
             'epsilon': self.epsilon(),
             'replay_size': len(self.replay),
             'replay_capacity': self.replay.capacity,
+            'branch_replay_size': (
+                0 if self.branch_replay is None else len(self.branch_replay)
+            ),
+            'branch_replay_capacity': (
+                0
+                if self.branch_replay is None
+                else self.branch_replay.capacity
+            ),
             'env_steps_per_second': speed,
+            'branch_steps_per_second': window_branch_transitions / window,
             'updates_per_second': window_updates / window,
             'learner_samples_per_second': (
-                window_updates * self.config.replay.batch_size / window
+                window_updates * (
+                    self.config.replay.batch_size
+                    + (
+                        self.config.branch_learning.learner_batch_size
+                        if (
+                            self.branch_replay is not None
+                            and len(self.branch_replay)
+                            >= self.branch_replay_training_threshold
+                        ) else 0
+                    )
+                ) / window
             ),
             'uptime_seconds': uptime,
             'eta_seconds': remaining / max(speed, 1e-9),
@@ -1229,6 +1463,7 @@ class BaselineTrainer:
 
         window_started = time.perf_counter()
         window_transitions = 0
+        window_branch_transitions = 0
         window_updates = 0
         last_log = window_started
         last_heartbeat = window_started
@@ -1239,6 +1474,7 @@ class BaselineTrainer:
             'reward_seconds': 0.0,
             'learner_seconds': 0.0,
             'decision_data_seconds': 0.0,
+            'branch_seconds': 0.0,
         }
         try:
             while (
@@ -1271,6 +1507,19 @@ class BaselineTrainer:
                     device=self.device,
                 )
                 full_actions[:self.active_envs] = active_actions
+                branch_started = time.perf_counter()
+                produced_branches = self._collect_branch_transitions(
+                    current_stages=current_stages,
+                    action_selection=action_selection,
+                    parent_transitions_after_step=min(
+                        self.config.total_transitions,
+                        previous_transitions + self.active_envs,
+                    ),
+                )
+                stage_seconds['branch_seconds'] += (
+                    time.perf_counter() - branch_started
+                )
+                window_branch_transitions += produced_branches
                 ticket = self.replay.begin_append(current)
                 stage_seconds['actor_seconds'] += (
                     time.perf_counter() - actor_started
@@ -1351,8 +1600,25 @@ class BaselineTrainer:
                 self.update_credit -= updates
                 learner_started = time.perf_counter()
                 for _ in range(updates):
+                    use_branch = bool(
+                        self.branch_replay is not None
+                        and len(self.branch_replay)
+                        >= self.branch_replay_training_threshold
+                    )
                     metrics = self.learner.update(
-                        self.replay, self.config.replay.batch_size
+                        self.replay,
+                        self.config.replay.batch_size,
+                        branch_replay=(
+                            self.branch_replay if use_branch else None
+                        ),
+                        branch_batch_size=(
+                            self.config.branch_learning.learner_batch_size
+                            if use_branch else 0
+                        ),
+                        branch_loss_weight=(
+                            self.config.branch_learning.loss_weight
+                            if use_branch else 0.0
+                        ),
                     )
                     self.training_metrics.add(metrics)
                 stage_seconds['learner_seconds'] += (
@@ -1373,8 +1639,20 @@ class BaselineTrainer:
                         'epsilon': self.epsilon(),
                         'replay_size': len(self.replay),
                         'replay_capacity': self.replay.capacity,
+                        'branch_transitions': self.branch_transitions,
+                        'branch_total_transitions': (
+                            self.config.branch_learning.transition_budget
+                        ),
+                        'branch_replay_size': (
+                            0
+                            if self.branch_replay is None
+                            else len(self.branch_replay)
+                        ),
                         'env_steps_per_second': (
                             window_transitions / heartbeat_window
+                        ),
+                        'branch_steps_per_second': (
+                            window_branch_transitions / heartbeat_window
                         ),
                         'updates_per_second': (
                             window_updates / heartbeat_window
@@ -1390,11 +1668,13 @@ class BaselineTrainer:
                         started=started,
                         window_started=window_started,
                         window_transitions=window_transitions,
+                        window_branch_transitions=window_branch_transitions,
                         window_updates=window_updates,
                         stage_seconds=stage_seconds,
                     )
                     window_started = time.perf_counter()
                     window_transitions = 0
+                    window_branch_transitions = 0
                     window_updates = 0
                     stage_seconds = {
                         'actor_seconds': 0.0,
@@ -1402,6 +1682,7 @@ class BaselineTrainer:
                         'reward_seconds': 0.0,
                         'learner_seconds': 0.0,
                         'decision_data_seconds': 0.0,
+                        'branch_seconds': 0.0,
                     }
                     last_log = window_started
 
@@ -1461,6 +1742,11 @@ class BaselineTrainer:
                 raise RuntimeError('final checkpoint round-trip validation failed')
             completed = (
                 self.transitions >= self.config.total_transitions
+                and (
+                    not self.config.branch_learning.enabled
+                    or self.branch_transitions
+                    >= self.config.branch_learning.transition_budget
+                )
                 and not self.stop_requested
             )
             terminal_phase = 'completed' if completed else 'stopped'

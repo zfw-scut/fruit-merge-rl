@@ -122,6 +122,38 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         ]
         self.assertEqual(len(torch.unique(final_x)), 4)
 
+    def test_decision_state_rows_clone_without_modifying_source(self):
+        config = self._config(track_action_effects=True)
+        source = TensorVectorSimulator(2, config=config, device='cpu')
+        destination = TensorVectorSimulator(4, config=config, device='cpu')
+        source.reset(
+            seeds=torch.tensor((11, 22)),
+            fruit_queue=torch.ones((2, 4), dtype=torch.int64),
+        )
+        source.step(torch.tensor((1, 5)))
+        before = source.observe().clone()
+        source_rows = torch.tensor((1, 0, 1, 0))
+
+        destination.copy_rows_from(source, source_rows)
+
+        cloned = destination.observe()
+        self.assertTrue(torch.equal(
+            cloned.positions, before.positions.index_select(0, source_rows)
+        ))
+        self.assertTrue(torch.equal(
+            cloned.fruit_queue,
+            before.fruit_queue.index_select(0, source_rows),
+        ))
+        cloned_step_count = cloned.step_count.clone()
+        self.assertTrue(torch.equal(source.observe().positions, before.positions))
+        result = destination.step(torch.tensor((0, 2, 4, 6)))
+        self.assertTrue(bool(result.physics.stable.all()))
+        self.assertTrue(torch.equal(
+            result.observation.step_count,
+            cloned_step_count + 1,
+        ))
+        self.assertTrue(torch.equal(source.observe().positions, before.positions))
+
     def test_kinematic_rest_correction_is_per_fruit(self):
         simulator = TensorVectorSimulator(
             1,
