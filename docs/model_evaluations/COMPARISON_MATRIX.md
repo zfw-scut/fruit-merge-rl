@@ -82,6 +82,11 @@ bonus影子诊断表明bonus=1在18M后的候选改变率中位约13.02%，实�
 下一步如做主动学习对照，优先比较bonus=1与2。完整证据见
 [`model-auxiliary-action-epsilon18m-r2.md`](model-auxiliary-action-epsilon18m-r2.md)。
 
+`【事实】` 18M版本并未跌破5层Fast：30/120 FPS仍分别领先318.48（+7.46%）和
+281.92（+7.23%），逐局成对95%区间均不跨0。其后期辅助loss、DQN loss、策略头分歧和
+bootstrap有效率与首轮近似，当前更符合“延长随机探索降低高价值轨迹利用时间”，而不是
+辅助任务失效；该原因仍是单seed假设。
+
 ## 2. 最终真实游戏效果
 
 | 指标 | `baseline-r1` | `reward-v2-r1` | `reward-v2.1-r1` | V2.1相对V2 | V2.1相对基线 |
