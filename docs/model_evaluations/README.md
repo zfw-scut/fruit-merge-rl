@@ -20,6 +20,7 @@
 | `baseline-scale-v1-l4-r1` | 游戏合成分数 | `f6edba2` | [`model-baseline-scale-v1-l4-r1.md`](model-baseline-scale-v1-l4-r1.md) | 30/120 FPS局均分提高14.10%/13.68%，保留为上一代效果基准 |
 | `baseline-scale-v1-l5-epsilon-r1` | 游戏合成分数 | `56c2e3d` | [`model-baseline-scale-v1-l5-epsilon-r1.md`](model-baseline-scale-v1-l5-epsilon-r1.md) | Fast在30/120 FPS达到4268.14/3897.29，成为当前效果基准；Slow未证明延长随机探索有效 |
 | `auxiliary-action-r1` | 游戏合成分数 + 实际动作辅助监督 | `feb10ec` | [`model-auxiliary-action-r1.md`](model-auxiliary-action-r1.md) | 完整配置在30/120 FPS达到4849.65/4476.35，成为当前效果领先配置；单模块因果仍待消融 |
+| `auxiliary-action-epsilon18m-r2` | 同上，延长epsilon探索 + bonus影子诊断 | `0e9c1da` | [`model-auxiliary-action-epsilon18m-r2.md`](model-auxiliary-action-epsilon18m-r2.md) | 30/120 FPS为4586.62/4179.21，低于首轮5.42%/6.64%；18M日程不升级为默认 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
 | `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线；墙边投放增加属于常见策略，不能单独判为缺陷 |
 
@@ -66,5 +67,7 @@
   仍需第二个训练seed判断该结论能否跨训练随机性复现；
 - 辅助动作完整配置已在同一组4096评估seed上显著超过5层Fast，但训练seed不同，且多策略头、
   辅助监督、主动探索和batch同时变化；仍需第二训练seed与最小模块消融；
+- 同训练seed的辅助动作6.4M/18M epsilon对照中，18M版本在双帧率和L11事件上均下降；
+  当前不采用18M为默认，但仍需第二训练seed判断该差异能否跨训练随机性复现；
 - 训练完成事件与最后一次资源采样仍发生在内部产物清单之后，使`monitoring.jsonl`和
   `resources.jsonl`比内部清单多一小段；外层迁移归档哈希已独立核对，不影响迁移完整性。
