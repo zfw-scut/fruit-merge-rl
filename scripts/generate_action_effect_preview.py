@@ -17,7 +17,6 @@ def _metric_rows():
         transition = index * 500_000
         progress = index / 48.0
         decay = math.exp(-3.1 * progress)
-        uncertainty = 0.004 + 0.012 * progress
         rows.append({
             'transitions': transition,
             'training_rolling_mean_score': 1650 + 2550 * progress,
@@ -33,15 +32,9 @@ def _metric_rows():
             'aux_loss_outcome': 0.49 * decay + 0.065,
             'env_steps_per_second': 57_000 + 2800 * math.sin(index / 5),
             'learner_samples_per_second': 41_000 + 1900 * math.cos(index / 6),
-            'actor_q_action_range': 0.055 + 0.075 * progress,
-            'actor_q_top_margin': 0.003 + 0.004 * progress,
-            'actor_policy_disagreement': uncertainty,
-            'actor_uncertainty_max': uncertainty * 1.7,
-            'shadow_bonus_0p5_changed_action_rate': 0.03 + 0.04 * progress,
-            'shadow_bonus_1_changed_action_rate': 0.07 + 0.07 * progress,
-            'shadow_bonus_2_changed_action_rate': 0.14 + 0.12 * progress,
-            'shadow_bonus_4_changed_action_rate': 0.27 + 0.16 * progress,
-            'shadow_bonus_8_changed_action_rate': 0.43 + 0.20 * progress,
+            'active_selected_rank_correlation': (
+                -0.28 + 0.18 * progress + 0.08 * math.sin(index / 4)
+            ),
         })
     return rows
 
@@ -64,6 +57,22 @@ def _evaluation_rows():
     return rows
 
 
+def _resource_rows():
+    rows = []
+    total_memory = 32_000.0
+    for index in range(181):
+        progress = index / 180.0
+        rows.append({
+            'timestamp': 1_800_000_000.0 + index * 60.0,
+            'gpu_utilization': 86.0 + 7.0 * math.sin(index / 10),
+            'gpu_memory_used_mb': (
+                8_500.0 + 6_000.0 * progress + 450.0 * math.sin(index / 17)
+            ),
+            'gpu_memory_total_mb': total_memory,
+        })
+    return rows
+
+
 def _write_jsonl(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -72,7 +81,7 @@ def _write_jsonl(path, rows):
     )
 
 
-def _render_dashboard_panels(path, metrics, evaluations):
+def _render_dashboard_panels(path, metrics, evaluations, resources):
     import matplotlib
 
     matplotlib.use('Agg', force=True)
@@ -123,37 +132,42 @@ def _render_dashboard_panels(path, metrics, evaluations):
     axes[0, 1].set_ylabel('Created fruits / 1k drops')
     axes[0, 1].legend(frameon=False, fontsize=8, ncol=3)
 
-    for key, label, color in (
-            ('shadow_bonus_0p5_changed_action_rate', 'β=0.5', '#69797e'),
-            ('shadow_bonus_1_changed_action_rate', 'β=1', '#0067c0'),
-            ('shadow_bonus_2_changed_action_rate', 'β=2', '#107c10'),
-            ('shadow_bonus_4_changed_action_rate', 'β=4', '#ca5010'),
-            ('shadow_bonus_8_changed_action_rate', 'β=8', '#d13438')):
-        axes[1, 0].plot(
-            x, [row[key] for row in metrics], label=label, color=color
-        )
+    axes[1, 0].plot(
+        x,
+        [row['active_selected_rank_correlation'] for row in metrics],
+        label='Value rank vs uncertainty rank',
+        color='#0067c0',
+    )
     axes[1, 0].set_title(
-        'Shadow bonus action change rate', loc='left', fontweight='bold'
+        'Selected active-action rank correlation',
+        loc='left', fontweight='bold',
     )
     axes[1, 0].set_xlabel('Million transitions')
-    axes[1, 0].set_ylabel('Changed action rate')
-    axes[1, 0].set_ylim(0, 1)
-    axes[1, 0].legend(frameon=False, fontsize=8, ncol=3)
+    axes[1, 0].set_ylabel('Correlation')
+    axes[1, 0].set_ylim(-1, 1)
+    axes[1, 0].legend(frameon=False, fontsize=8)
 
-    for key, label, color in (
-            ('actor_q_action_range', 'Q action range', '#0067c0'),
-            ('actor_q_top_margin', 'Q top margin', '#107c10'),
-            ('actor_policy_disagreement', 'Mean uncertainty', '#8764b8'),
-            ('actor_uncertainty_max', 'Max uncertainty', '#d13438')):
-        axes[1, 1].plot(
-            x, [row[key] for row in metrics], label=label, color=color
-        )
-    axes[1, 1].set_title(
-        'Decision scale diagnostics', loc='left', fontweight='bold'
+    elapsed = [
+        (row['timestamp'] - resources[0]['timestamp']) / 3600.0
+        for row in resources
+    ]
+    axes[1, 1].plot(
+        elapsed,
+        [row['gpu_utilization'] for row in resources],
+        label='GPU utilization', color='#0067c0',
     )
-    axes[1, 1].set_xlabel('Million transitions')
-    axes[1, 1].set_ylabel('Q / uncertainty')
-    axes[1, 1].set_yscale('log')
+    axes[1, 1].plot(
+        elapsed,
+        [100.0 * row['gpu_memory_used_mb'] / row['gpu_memory_total_mb']
+         for row in resources],
+        label='VRAM utilization', color='#8764b8',
+    )
+    axes[1, 1].set_title(
+        'GPU resource timeline', loc='left', fontweight='bold'
+    )
+    axes[1, 1].set_xlabel('Elapsed hours')
+    axes[1, 1].set_ylabel('%')
+    axes[1, 1].set_ylim(0, 100)
     axes[1, 1].legend(frameon=False, fontsize=8)
 
     for axis in axes.flat:
@@ -170,19 +184,24 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     metrics = _metric_rows()
     evaluations = _evaluation_rows()
+    resources = _resource_rows()
     with tempfile.TemporaryDirectory() as directory:
         run_dir = Path(directory) / 'preview_run'
         _write_jsonl(run_dir / 'metrics.jsonl', metrics)
         _write_jsonl(
             run_dir / 'evaluations' / 'metrics.jsonl', evaluations
         )
+        _write_jsonl(run_dir / 'resources.jsonl', resources)
         render_training_curve_snapshot(run_dir)
         shutil.copy2(
             run_dir / 'plots' / 'training_curves.png',
             output_dir / 'training_curves_preview.png',
         )
     _render_dashboard_panels(
-        output_dir / 'dashboard_panels_preview.png', metrics, evaluations
+        output_dir / 'dashboard_panels_preview.png',
+        metrics,
+        evaluations,
+        resources,
     )
     print(output_dir)
 

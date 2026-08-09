@@ -154,6 +154,8 @@ class ActionSelectionBatch:
     q_values: torch.Tensor
     uncertainty: torch.Tensor | None = None
     active_learning_mask: torch.Tensor | None = None
+    selected_value_ranks: torch.Tensor | None = None
+    selected_uncertainty_ranks: torch.Tensor | None = None
 
     def __post_init__(self):
         if not isinstance(self.q_values, torch.Tensor) or self.q_values.ndim != 2:
@@ -190,6 +192,14 @@ class ActionSelectionBatch:
             )
             if self.active_learning_mask.dtype != torch.bool:
                 raise TypeError('active_learning_mask must use bool dtype')
+        for name in (
+                'selected_value_ranks', 'selected_uncertainty_ranks'):
+            ranks = getattr(self, name)
+            if ranks is None:
+                continue
+            _vector(name, ranks, batch_size, device=self.q_values.device)
+            if ranks.is_floating_point() or ranks.dtype == torch.bool:
+                raise TypeError(f'{name} must use an integer dtype')
 
     @property
     def batch_size(self):

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import gc
 from pathlib import Path
 import signal
 import sys
+
+import torch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from daxigua.rl.config import TrainingConfig
+from daxigua.rl.monitoring import serve_completed_dashboard
 from daxigua.rl.trainer import BaselineTrainer
 
 
@@ -43,6 +47,10 @@ def parse_args():
     parser.add_argument('--disable-compile', action='store_true')
     parser.add_argument('--resume', type=Path)
     parser.add_argument('--skip-final-evaluation', action='store_true')
+    parser.add_argument(
+        '--exit-after-completion', action='store_true',
+        help='训练完成后退出，不继续在原端口提供最终只读面板',
+    )
     parser.add_argument(
         '--smoke', action='store_true',
         help='使用极小 CUDA 配置验证完整训练、面板、评估和保存链路',
@@ -187,7 +195,27 @@ def main():
     result = trainer.run(
         final_evaluation=not args.skip_final_evaluation
     )
-    print(result)
+    print(result, flush=True)
+    if (
+            config.dashboard.enabled
+            and not args.smoke
+            and not args.exit_after_completion):
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        del trainer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print(
+            '训练已结束；最终只读面板继续在线。停止该进程即可关闭面板。',
+            flush=True,
+        )
+        serve_completed_dashboard(
+            config.run_dir,
+            host=config.dashboard.host,
+            port=config.dashboard.port,
+        )
 
 
 if __name__ == '__main__':

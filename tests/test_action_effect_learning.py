@@ -23,7 +23,12 @@ from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
-from daxigua.rl.trainer import BaselineTrainer, shadow_bonus_statistics
+from daxigua.rl.trainer import (
+    BaselineTrainer,
+    active_learning_probability,
+    rank_correlation_from_sums,
+    ranked_active_learning_candidates,
+)
 from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
 
 
@@ -64,9 +69,12 @@ def _training_config(directory, device):
             target_update_interval=1,
             auxiliary_loss_weight=0.2,
             active_learning_enabled=True,
-            active_learning_epsilon_threshold=1.0,
-            active_learning_fraction=1.0,
-            active_learning_shadow_bonuses=(0.5, 1.0, 2.0),
+            epsilon_start=0.0,
+            epsilon_end=0.0,
+            active_learning_start_epsilon=0.5,
+            active_learning_full_epsilon=0.0,
+            active_learning_max_probability=1.0,
+            active_learning_top_k=2,
         ),
         reward=RewardConfig(kind='score_v1'),
         replay=ReplayConfig(
@@ -205,27 +213,29 @@ class ActionEffectLearningTest(unittest.TestCase):
                 'aux_loss_first_contact', 'policy_disagreement'):
             self.assertTrue(bool(torch.isfinite(metrics[name])))
 
-    def test_shadow_bonus_statistics_do_not_change_actor_actions(self):
-        q_values = torch.tensor(((1.0, 0.8), (0.5, 0.49)))
-        uncertainty = torch.tensor(((0.0, 0.3), (0.1, 0.2)))
-        greedy = torch.tensor((0, 0))
-
-        selected, changed, q_cost, uncertainty_gain = (
-            shadow_bonus_statistics(
-                q_values, uncertainty, greedy, (0.25, 1.0)
-            )
+    def test_rank_fusion_orders_candidates_without_value_scaling(self):
+        q_values = torch.tensor(((1.0, 0.8, 0.7, 0.6),))
+        uncertainty = torch.tensor(((0.1, 0.4, 0.3, 0.2),))
+        candidates, value_ranks, uncertainty_ranks = (
+            ranked_active_learning_candidates(q_values, uncertainty, 3)
         )
+        self.assertEqual(value_ranks.tolist(), [[1, 2, 3, 4]])
+        self.assertEqual(uncertainty_ranks.tolist(), [[4, 1, 2, 3]])
+        self.assertEqual(candidates.tolist(), [[1, 2, 0]])
 
-        self.assertEqual(selected.tolist(), [[0, 1], [1, 1]])
-        self.assertEqual(changed.tolist(), [[False, True], [True, True]])
-        self.assertTrue(torch.allclose(
-            q_cost,
-            torch.tensor(((0.0, 0.01), (0.2, 0.01))),
-        ))
-        self.assertTrue(torch.allclose(
-            uncertainty_gain,
-            torch.tensor(((0.0, 0.1), (0.3, 0.1))),
-        ))
+    def test_active_probability_and_rank_correlation_have_clear_semantics(self):
+        config = DqnConfig(
+            active_learning_start_epsilon=0.5,
+            active_learning_full_epsilon=0.05,
+            active_learning_max_probability=0.4,
+        )
+        self.assertEqual(active_learning_probability(config, 0.5), 0.0)
+        self.assertAlmostEqual(active_learning_probability(config, 0.275), 0.2)
+        self.assertEqual(active_learning_probability(config, 0.05), 0.4)
+        self.assertAlmostEqual(
+            rank_correlation_from_sums((3, 6, 12, 14, 56, 28)),
+            1.0,
+        )
 
     def test_trainer_writes_auxiliary_transitions_end_to_end(self):
         with TemporaryDirectory() as directory:
@@ -237,15 +247,24 @@ class ActionEffectLearningTest(unittest.TestCase):
                     encoding='utf-8'
                 ).splitlines()
             ]
+            status = json.loads(
+                (Path(directory) / 'run_status.json').read_text(
+                    encoding='utf-8'
+                )
+            )
         self.assertEqual(result['transitions'], 4)
         self.assertGreaterEqual(result['updates'], 1)
         self.assertTrue(any(
-            'shadow_bonus_1_changed_action_rate' in row for row in rows
+            'active_selected_rank_correlation' in row for row in rows
+        ))
+        self.assertFalse(any(
+            any(key.startswith('shadow_bonus_') for key in row) for row in rows
         ))
         self.assertTrue(any(
             'active_learning_effective_action_fraction' in row
             for row in rows
         ))
+        self.assertEqual(status['phase'], 'completed')
 
     @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is unavailable')
     def test_cuda_trainer_runs_auxiliary_pipeline_end_to_end(self):

@@ -21,6 +21,10 @@ from .curves import (
 from .event_analysis import EVENT_ANALYSIS_FILENAME
 
 
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
 _DASHBOARD_HTML = r'''<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -200,8 +204,8 @@ canvas{background:#fff}.action-summary{margin:0 2px 9px;color:#5a5a5a}
       <fieldset class="small-chart"><legend>性能曲线 / Performance</legend><div class="chart-head"><strong>投放与学习吞吐</strong><span class="chart-legend"><span class="legend-item"><i class="legend-line" style="--line-color:#0067c0"></i>投放</span><span class="legend-item"><i class="legend-line" style="--line-color:#107c10"></i>学习样本</span></span></div><div class="canvas-frame"><canvas id="speed-chart" aria-label="训练吞吐变化曲线"></canvas></div></fieldset>
       <fieldset class="small-chart"><legend>辅助监督 / Auxiliary</legend><div class="chart-head"><strong>动作效果损失分组</strong></div><div class="canvas-frame"><canvas id="aux-loss-chart" aria-label="辅助动作效果损失曲线"></canvas></div></fieldset>
       <fieldset class="small-chart"><legend>评估事件 / Eval Events</legend><div class="chart-head"><strong>高等级生成密度（每千次投放）</strong></div><div class="canvas-frame"><canvas id="merge-density-chart" aria-label="高等级水果生成密度曲线"></canvas></div></fieldset>
-      <fieldset class="small-chart"><legend>Bonus 影子计算 / Shadow</legend><div class="chart-head"><strong>相对贪心动作改变率</strong><span class="chart-legend">β 0.5 / 1 / 2 / 4 / 8</span></div><div class="canvas-frame"><canvas id="bonus-shadow-chart" aria-label="不同不确定性bonus的影子动作改变率"></canvas></div></fieldset>
-      <fieldset class="small-chart"><legend>决策量纲 / Decision Scale</legend><div class="chart-head"><strong>Q范围、Top间隔、不确定性均值/最大值</strong></div><div class="canvas-frame"><canvas id="decision-scale-chart" aria-label="Q值动作差异和不确定性曲线"></canvas></div></fieldset>
+      <fieldset class="small-chart"><legend>主动学习 / Active Learning</legend><div class="chart-head"><strong>被选动作的价值名次与不确定性名次相关性</strong></div><div class="canvas-frame"><canvas id="active-rank-chart" aria-label="主动学习被选动作排名相关性曲线"></canvas></div></fieldset>
+      <fieldset class="small-chart"><legend>GPU 资源 / GPU Resources</legend><div class="chart-head"><strong>GPU 使用率与显存占用率</strong><span class="chart-legend"><span class="legend-item"><i class="legend-line" style="--line-color:#0067c0"></i>GPU</span><span class="legend-item"><i class="legend-line" style="--line-color:#8764b8"></i>显存</span></span></div><div class="canvas-frame"><canvas id="gpu-resource-chart" aria-label="GPU利用率和显存占用率时间曲线"></canvas></div></fieldset>
     </section>
 
     <fieldset class="snapshot-panel"><legend>定期保存曲线 / Saved Curve Snapshot</legend>
@@ -236,7 +240,7 @@ const gib=value=>{const n=finite(value);return n===null?'—':`${decimal(n/1024,
 const duration=value=>{const n=finite(value);if(n===null||n<0)return '—';const s=Math.round(n);const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60),r=s%60;if(d)return `${d}天 ${h}小时 ${m}分`;if(h)return `${h}小时 ${m}分 ${r}秒`;if(m)return `${m}分 ${r}秒`;return `${r}秒`};
 const short=value=>{const n=finite(value);if(n===null)return '—';if(Math.abs(n)>=1e8)return `${decimal(n/1e8,2)}亿`;if(Math.abs(n)>=1e4)return `${decimal(n/1e4,1)}万`;return int(n)};
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-const phaseNames={training:'训练中',evaluation:'评估中',warmup:'Replay 预热',finished:'已完成',failed:'失败'};
+const phaseNames={training:'训练中',evaluation:'评估中',warmup:'Replay 预热',completed:'已正常完成',stopped:'已安全停止',failed:'异常失败'};
 const eventNames={preflight_finished:'预检完成',autotune_finished:'性能标定完成',evaluation_finished:'评估完成',training_started:'训练启动',training_finished:'训练完成',training_failed:'训练失败',warmup_started:'预热开始',warmup_finished:'预热完成',autoscale_trial:'扩容试运行',autoscale_commit:'扩容确认',autoscale_rollback:'扩容回退',checkpoint_saved:'模型已保存'};
 
 const groups={
@@ -272,8 +276,7 @@ const groups={
   ['spatial_reference_loss','无合成参考损失','No-merge Reference',(v)=>decimal(v,5)],
   ['spatial_positive_rate','正空间奖励比例','Positive Rate',(v)=>ratioPercent(v)],
   ['mean_q','平均 Q 值','Mean Q',(v)=>decimal(v,4)],['mean_target','平均 TD 目标','TD Target',(v)=>decimal(v,4)],
-  ['mean_abs_td_error','平均绝对 TD 误差','Abs TD Error',(v)=>decimal(v,4)],['policy_disagreement','策略头分歧','Policy Disagreement',(v)=>decimal(v,5)],['active_learning_action_fraction','主动学习掩码比例','Active Mask',(v)=>ratioPercent(v)],['active_learning_effective_action_fraction','主动学习有效改动作比例','Effective Active',(v)=>ratioPercent(v)],['active_learning_greedy_overlap_rate','主动/贪心重叠率','Active-Greedy Overlap',(v)=>ratioPercent(v)],
-  ['actor_q_action_range','Q动作范围','Q Action Range',(v)=>decimal(v,5)],['actor_q_top_margin','Q前两名间隔','Q Top Margin',(v)=>decimal(v,5)],['actor_policy_disagreement','动作平均不确定性','Actor Uncertainty',(v)=>decimal(v,5)],['actor_uncertainty_max','动作最大不确定性','Max Uncertainty',(v)=>decimal(v,5)],['active_learning_changed_q_cost','主动改动作Q代价','Changed Q Cost',(v)=>decimal(v,5)],['active_learning_changed_uncertainty_gain','主动改动作分歧增益','Uncertainty Gain',(v)=>decimal(v,5)],['grad_norm','梯度范数','Grad Norm',(v)=>decimal(v,3)],
+  ['mean_abs_td_error','平均绝对 TD 误差','Abs TD Error',(v)=>decimal(v,4)],['policy_disagreement','策略头分歧','Policy Disagreement',(v)=>decimal(v,5)],['active_learning_action_fraction','主动学习分支比例','Active Branch',(v)=>ratioPercent(v)],['epsilon_explore_action_fraction','Epsilon 随机分支比例','Epsilon Branch',(v)=>ratioPercent(v)],['active_learning_effective_action_fraction','主动学习有效改动作比例','Effective Active',(v)=>ratioPercent(v)],['active_learning_greedy_overlap_rate','主动/贪心重叠率','Active-Greedy Overlap',(v)=>ratioPercent(v)],['active_selected_rank_correlation','被选动作双排名相关性','Selected Rank Correlation',(v)=>decimal(v,4)],['grad_norm','梯度范数','Grad Norm',(v)=>decimal(v,3)],
   ['training_window_mean_score','窗口局均分','Window Mean Score',(v)=>score(v)],
   ['training_window_max_score','窗口最高分','Window Max Score',(v)=>score(v)],
   ['training_rolling_mean_score','近 4096 局均分','Rolling Mean',(v)=>score(v)],
@@ -287,7 +290,25 @@ function drawChart(id,history,series,formatter){const canvas=$(id),rect=canvas.g
 function renderEvents(events){const rows=(events||[]).slice(-12).reverse();$('events').innerHTML=rows.length?rows.map(event=>`<div class="event"><span class="event-kind">${escapeHtml(eventNames[event.kind]||event.kind||'训练事件')}</span><span>${escapeHtml(event.message||'')}</span><time class="event-time">${new Date((event.monitor_timestamp||0)*1000).toLocaleTimeString('zh-CN',{hour12:false})}</time></div>`).join(''):'<div class="empty">等待训练事件…</div>'}
 function renderCurveSnapshot(plot){const image=$('curve-snapshot'),info=$('curve-snapshot-info');if(!plot){image.hidden=true;info.innerHTML='<strong>等待第一张曲线快照</strong>训练指标开始落盘后，后台会自动生成并刷新图片。';return}if(plot.error){info.innerHTML=`<strong>曲线快照暂不可用</strong><span class="snapshot-error">${escapeHtml(plot.error)}</span>`;return}const version=finite(plot.modified_at)??finite(plot.generated_at)??0,url=`${plot.url||'/plots/training_curves.png'}?v=${encodeURIComponent(version)}`;if(image.dataset.version!==String(version)){image.dataset.version=String(version);image.onload=()=>{image.hidden=false};image.src=url}const generated=finite(plot.generated_at);info.innerHTML=`<strong>已自动保存并同步到面板</strong>更新时间：${generated===null?'—':new Date(generated*1000).toLocaleString('zh-CN',{hour12:false})}<br>覆盖投放：${int(plot.source_last_transition)}<br>训练指标点：${int(plot.source_metric_rows)}<br>评估记录：${int(plot.source_evaluation_rows)}<br>图片大小：${int(plot.size_bytes)} 字节`}
 function renderEventSnapshot(plot){const image=$('event-snapshot'),info=$('event-snapshot-info');if(!plot){image.hidden=true;return}const version=finite(plot.generated_at)??0,url=`${plot.url||'/plots/evaluation_event_analysis.png'}?v=${encodeURIComponent(version)}`;if(image.dataset.version!==String(version)){image.dataset.version=String(version);image.onload=()=>{image.hidden=false};image.src=url}info.innerHTML=`<strong>关键事件统计已归档</strong>30 FPS：${int(plot.episodes_30fps)} 局<br>120 FPS：${int(plot.episodes_120fps)} 局<br>生成 L11：${int(plot.created_l11_episodes_30fps)} 局<br>消除 L11：${int(plot.removed_l11_episodes_30fps)} 局`}
-async function tick(){try{const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);const state=await response.json(),data={...(state.training||{}),...(state.resources||{})},history=(state.history||[]).slice(-900);renderGroup('progress',groups.progress,data);renderGroup('throughput',groups.throughput,data);renderGroup('resources',groups.resources,data);renderGroup('learning',groups.learning,data);renderActions(data.action_distribution);renderEvents(state.events);renderCurveSnapshot((state.plots||{}).training_curves);renderEventSnapshot((state.plots||{}).evaluation_event_analysis);const fraction=Math.max(0,Math.min(1,finite(data.progress_fraction)??((finite(data.transitions)??0)/Math.max(1,finite(data.total_transitions)??1))));$('progress-fill').style.width=`${fraction*100}%`;$('progress-text').textContent=`${decimal(fraction*100,2)}% · ${int(data.transitions)} / ${int(data.total_transitions)}`;const age=Date.now()/1000-(finite(state.timestamp)??0),lamp=$('status-lamp');lamp.className='lamp '+(age<5?'live':age<30?'stale':'error');$('connection').textContent=age<5?'实时连接正常':age<30?'数据更新延迟':'训练数据已失联';$('phase-text').textContent=`阶段：${phaseNames[data.phase]||data.phase||'等待数据'}`;$('updated-at').textContent=`最后更新：${new Date((state.timestamp||0)*1000).toLocaleString('zh-CN',{hour12:false})}`;$('status-message').textContent=`投放 ${rate(data.env_steps_per_second)} · 更新 ${rate(data.updates_per_second)} · 面板队列丢弃 ${int(data.dropped_messages||0)} 条`;$('run-time').textContent=`运行时间：${duration(data.uptime_seconds)}`;drawChart('score-chart',history,[{key:'training_window_mean_score',color:'#0067c0'},{key:'training_window_max_score',color:'#d13438'},{key:'training_rolling_mean_score',color:'#107c10'},{key:'last_fast_eval_score',color:'#0099bc'},{key:'last_accurate_eval_score',color:'#8764b8'}],v=>short(v));drawChart('loss-chart',history,[{key:'loss',color:'#0067c0'},{key:'dqn_loss',color:'#107c10'},{key:'mean_abs_td_error',color:'#d13438'}],v=>decimal(v,3));drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'}],v=>short(v));drawChart('aux-loss-chart',history,[{key:'aux_loss_merge',color:'#0067c0'},{key:'aux_loss_q0_lineage',color:'#107c10'},{key:'aux_loss_first_contact',color:'#ca5010'},{key:'aux_loss_generation',color:'#8764b8'},{key:'aux_loss_outcome',color:'#c239b3'}],v=>decimal(v,3));drawChart('merge-density-chart',history,[{key:'eval_created_l7_per_1000',color:'#69797e'},{key:'eval_created_l8_per_1000',color:'#0099bc'},{key:'eval_created_l9_per_1000',color:'#107c10'},{key:'eval_created_l10_per_1000',color:'#ca5010'},{key:'eval_created_l11_per_1000',color:'#d13438'}],v=>decimal(v,2));drawChart('bonus-shadow-chart',history,[{key:'shadow_bonus_0p5_changed_action_rate',color:'#69797e'},{key:'shadow_bonus_1_changed_action_rate',color:'#0067c0'},{key:'shadow_bonus_2_changed_action_rate',color:'#107c10'},{key:'shadow_bonus_4_changed_action_rate',color:'#ca5010'},{key:'shadow_bonus_8_changed_action_rate',color:'#d13438'}],v=>percent(v*100,0));drawChart('decision-scale-chart',history,[{key:'actor_q_action_range',color:'#0067c0'},{key:'actor_q_top_margin',color:'#107c10'},{key:'actor_policy_disagreement',color:'#8764b8'},{key:'actor_uncertainty_max',color:'#d13438'}],v=>decimal(v,3))}catch(error){$('status-lamp').className='lamp error';$('connection').textContent='无法读取训练状态';$('status-message').textContent=String(error)}finally{setTimeout(tick,1000)}}tick();
+async function tick(){
+ try{
+  const response=await fetch('/api/status',{cache:'no-store'});if(!response.ok)throw new Error('HTTP '+response.status);
+  const state=await response.json(),data={...(state.training||{}),...(state.resources||{})},history=(state.history||[]).slice(-900),resourceHistory=state.resource_history||[];
+  renderGroup('progress',groups.progress,data);renderGroup('throughput',groups.throughput,data);renderGroup('resources',groups.resources,data);renderGroup('learning',groups.learning,data);renderActions(data.action_distribution);renderEvents(state.events);renderCurveSnapshot((state.plots||{}).training_curves);renderEventSnapshot((state.plots||{}).evaluation_event_analysis);
+  const fraction=Math.max(0,Math.min(1,finite(data.progress_fraction)??((finite(data.transitions)??0)/Math.max(1,finite(data.total_transitions)??1))));$('progress-fill').style.width=`${fraction*100}%`;$('progress-text').textContent=`${decimal(fraction*100,2)}% · ${int(data.transitions)} / ${int(data.total_transitions)}`;
+  const age=Date.now()/1000-(finite(state.timestamp)??0),lamp=$('status-lamp'),terminal=['completed','stopped','failed'].includes(data.phase);
+  lamp.className='lamp '+(data.phase==='failed'?'error':terminal?'live':age<5?'live':age<30?'stale':'error');
+  $('connection').textContent=data.phase==='completed'?'训练已正常完成，面板保持在线':data.phase==='stopped'?'训练已安全停止，面板保持在线':data.phase==='failed'?'训练异常结束':age<5?'实时连接正常':age<30?'数据更新延迟':'训练数据已失联';
+  $('phase-text').textContent=`阶段：${phaseNames[data.phase]||data.phase||'等待数据'}`;$('updated-at').textContent=`最后更新：${new Date((state.timestamp||0)*1000).toLocaleString('zh-CN',{hour12:false})}`;$('status-message').textContent=terminal?(data.completion_message||$('connection').textContent):`投放 ${rate(data.env_steps_per_second)} · 更新 ${rate(data.updates_per_second)} · 面板队列丢弃 ${int(data.dropped_messages||0)} 条`;$('run-time').textContent=`运行时间：${duration(data.uptime_seconds)}`;
+  drawChart('score-chart',history,[{key:'training_window_mean_score',color:'#0067c0'},{key:'training_window_max_score',color:'#d13438'},{key:'training_rolling_mean_score',color:'#107c10'},{key:'last_fast_eval_score',color:'#0099bc'},{key:'last_accurate_eval_score',color:'#8764b8'}],v=>short(v));
+  drawChart('loss-chart',history,[{key:'loss',color:'#0067c0'},{key:'dqn_loss',color:'#107c10'},{key:'mean_abs_td_error',color:'#d13438'}],v=>decimal(v,3));
+  drawChart('speed-chart',history,[{key:'env_steps_per_second',color:'#0067c0'},{key:'learner_samples_per_second',color:'#107c10'}],v=>short(v));
+  drawChart('aux-loss-chart',history,[{key:'aux_loss_merge',color:'#0067c0'},{key:'aux_loss_q0_lineage',color:'#107c10'},{key:'aux_loss_first_contact',color:'#ca5010'},{key:'aux_loss_generation',color:'#8764b8'},{key:'aux_loss_outcome',color:'#c239b3'}],v=>decimal(v,3));
+  drawChart('merge-density-chart',history,[{key:'eval_created_l7_per_1000',color:'#69797e'},{key:'eval_created_l8_per_1000',color:'#0099bc'},{key:'eval_created_l9_per_1000',color:'#107c10'},{key:'eval_created_l10_per_1000',color:'#ca5010'},{key:'eval_created_l11_per_1000',color:'#d13438'}],v=>decimal(v,2));
+  drawChart('active-rank-chart',history,[{key:'active_selected_rank_correlation',color:'#0067c0'}],v=>decimal(v,3));
+  drawChart('gpu-resource-chart',resourceHistory,[{key:'gpu_utilization',color:'#0067c0'},{key:'gpu_memory_utilization',color:'#8764b8'}],v=>percent(v,0));
+ }catch(error){$('status-lamp').className='lamp error';$('connection').textContent='无法读取训练状态';$('status-message').textContent=String(error)}finally{setTimeout(tick,1000)}
+}tick();
 </script>
 </body>
 </html>'''
@@ -382,6 +403,7 @@ class _DashboardState:
         self.plots = {}
         self.events = deque(maxlen=100)
         self.history = deque(maxlen=history_size)
+        self.resource_history = deque(maxlen=history_size)
         self.timestamp = time.time()
 
     def update_training(self, payload):
@@ -412,6 +434,11 @@ class _DashboardState:
                     'best_training_score',
                     'last_fast_eval_score',
                     'last_accurate_eval_score',
+                    'epsilon_explore_action_fraction',
+                    'active_learning_action_fraction',
+                    'active_learning_effective_action_fraction',
+                    'active_learning_greedy_overlap_rate',
+                    'active_selected_rank_correlation',
                 )
                 for name in optional_names:
                     if name in payload:
@@ -420,7 +447,29 @@ class _DashboardState:
 
     def update_resources(self, payload):
         with self.lock:
-            self.resources = dict(payload)
+            resource = dict(payload)
+            timestamp = resource.get('timestamp', time.time())
+            used = resource.get('gpu_memory_used_mb')
+            total = resource.get('gpu_memory_total_mb')
+            if used is not None and total:
+                resource['gpu_memory_utilization'] = 100.0 * used / total
+            self.resources = resource
+            if (
+                    'gpu_utilization' in resource
+                    or 'gpu_memory_used_mb' in resource):
+                self.resource_history.append({
+                    'timestamp': timestamp,
+                    **{
+                        name: resource[name]
+                        for name in (
+                            'gpu_utilization',
+                            'gpu_memory_used_mb',
+                            'gpu_memory_total_mb',
+                            'gpu_memory_utilization',
+                        )
+                        if name in resource
+                    },
+                })
 
     def add_event(self, payload):
         with self.lock:
@@ -432,6 +481,15 @@ class _DashboardState:
 
     def snapshot(self):
         with self.lock:
+            resource_history = list(self.resource_history)
+            if len(resource_history) > 900:
+                last = len(resource_history) - 1
+                indices = {
+                    round(index * last / 899) for index in range(900)
+                }
+                resource_history = [
+                    resource_history[index] for index in sorted(indices)
+                ]
             return {
                 'timestamp': self.timestamp,
                 'training': dict(self.training),
@@ -442,6 +500,7 @@ class _DashboardState:
                 },
                 'events': list(self.events),
                 'history': list(self.history),
+                'resource_history': resource_history,
             }
 
 
@@ -514,10 +573,10 @@ def _dashboard_process_main(
         resource_path = run_dir / 'resources.jsonl'
         with resource_path.open('a', encoding='utf-8', buffering=1) as log:
             while not stop_event.wait(resource_interval):
-                payload = sampler.sample()
+                payload = {'timestamp': time.time(), **sampler.sample()}
                 state.update_resources(payload)
                 log.write(json.dumps(
-                    {'timestamp': time.time(), **payload},
+                    payload,
                     ensure_ascii=False,
                 ) + '\n')
 
@@ -591,7 +650,7 @@ def _dashboard_process_main(
     resource_thread.start()
     if curve_snapshot_enabled:
         curve_thread.start()
-    server = ThreadingHTTPServer((host, port), Handler)
+    server = _ReusableThreadingHTTPServer((host, port), Handler)
     server.timeout = 0.5
     try:
         while not stop_event.is_set():
@@ -724,7 +783,7 @@ def _read_jsonl(path):
 
 def _completed_dashboard_snapshot(run_dir):
     run_dir = Path(run_dir)
-    state = _DashboardState(3600)
+    state = _DashboardState(7200)
     for row in _read_jsonl(run_dir / 'monitoring.jsonl'):
         kind = row.get('kind')
         payload = {
@@ -739,8 +798,8 @@ def _completed_dashboard_snapshot(run_dir):
         else:
             state.update_training(payload)
     resources = _read_jsonl(run_dir / 'resources.jsonl')
-    if resources:
-        state.update_resources(resources[-1])
+    for resource in resources:
+        state.update_resources(resource)
     for name, filename in (
             ('training_curves', 'training_curves.json'),
             ('evaluation_event_analysis', EVENT_ANALYSIS_FILENAME.replace(
@@ -752,7 +811,13 @@ def _completed_dashboard_snapshot(run_dir):
         except (OSError, json.JSONDecodeError):
             continue
         state.update_plot(name, metadata)
-    state.update_training({'phase': 'finished'})
+    try:
+        run_status = json.loads(
+            (run_dir / 'run_status.json').read_text(encoding='utf-8')
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        run_status = {'phase': 'completed'}
+    state.update_training(run_status)
     return state
 
 
@@ -806,7 +871,7 @@ def serve_completed_dashboard(run_dir, *, host='127.0.0.1', port=8765):
         def log_message(self, _format, *_args):
             return
 
-    server = ThreadingHTTPServer((host, int(port)), Handler)
+    server = _ReusableThreadingHTTPServer((host, int(port)), Handler)
     try:
         server.serve_forever(poll_interval=0.5)
     finally:

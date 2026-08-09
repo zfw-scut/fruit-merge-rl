@@ -146,6 +146,8 @@ def render_training_curve_snapshot(run_dir):
     metric_rows = _read_jsonl(run_dir / 'metrics.jsonl')
     metrics = _downsample(metric_rows)
     evaluations = _read_jsonl(run_dir / 'evaluations' / 'metrics.jsonl')
+    resource_rows = _read_jsonl(run_dir / 'resources.jsonl')
+    resources = _downsample(resource_rows)
     if not metrics:
         raise RuntimeError('metrics.jsonl 尚无可绘制训练指标')
 
@@ -191,13 +193,13 @@ def render_training_curve_snapshot(run_dir):
             '高等级新水果生成密度 / High-level fruit creation density'
             if has_chinese_font else 'High-level fruit creation density'
         ),
-        'bonus_shadow': (
-            'Bonus影子动作改变率 / Shadow action change rate'
-            if has_chinese_font else 'Bonus shadow action change rate'
+        'active_rank': (
+            '被选动作双排名相关性 / Selected rank correlation'
+            if has_chinese_font else 'Selected rank correlation'
         ),
-        'decision_scale': (
-            '决策量纲 / Decision scale'
-            if has_chinese_font else 'Decision scale'
+        'gpu_resources': (
+            'GPU利用率与显存占用 / GPU and VRAM utilization'
+            if has_chinese_font else 'GPU and VRAM utilization'
         ),
     }
     colors = {
@@ -411,68 +413,70 @@ def render_training_curve_snapshot(run_dir):
                 frameon=False, fontsize=8, loc='best', ncol=3
             )
 
-        bonus_shadow = axes[3, 0]
-        _style_axis(bonus_shadow, has_chinese_font)
-        bonus_shadow.set_title(
-            labels['bonus_shadow'], loc='left', fontweight='bold'
+        active_rank = axes[3, 0]
+        _style_axis(active_rank, has_chinese_font)
+        active_rank.set_title(
+            labels['active_rank'], loc='left', fontweight='bold'
         )
-        bonus_shadow.set_ylabel(
-            bilingual('改变率', 'Changed action rate')
+        active_rank.set_ylabel(bilingual('相关系数', 'Correlation'))
+        xs, ys = _series(
+            metrics,
+            'transitions',
+            'active_selected_rank_correlation',
+            x_scale=1_000_000,
         )
-        shadow_colors = (
-            colors['slate'], colors['blue'], colors['green'],
-            colors['orange'], colors['red'],
+        _plot_or_note(
+            active_rank, xs, ys,
+            label=bilingual('价值名次 vs 不确定性名次', 'Value vs uncertainty rank'),
+            color=colors['blue'], linewidth=1.8,
         )
-        for suffix, label, color in zip(
-                ('0p5', '1', '2', '4', '8'),
-                ('0.5', '1', '2', '4', '8'),
-                shadow_colors,
-                strict=True):
-            xs, ys = _series(
-                metrics,
-                'transitions',
-                f'shadow_bonus_{suffix}_changed_action_rate',
-                x_scale=1_000_000,
-            )
-            if xs:
-                bonus_shadow.plot(
-                    xs, ys, label=f'β={label}', color=color, linewidth=1.5
-                )
-        bonus_shadow.set_ylim(-0.02, 1.02)
-        if not bonus_shadow.lines:
-            bonus_shadow.text(
-                0.5, 0.5, 'Waiting for shadow bonus metrics',
-                transform=bonus_shadow.transAxes, ha='center', va='center',
-                color='#7a8696',
-            )
-        else:
-            bonus_shadow.legend(frameon=False, fontsize=8, loc='best')
+        active_rank.set_ylim(-1.05, 1.05)
 
-        decision_scale = axes[3, 1]
-        _style_axis(decision_scale, has_chinese_font)
-        decision_scale.set_title(
-            labels['decision_scale'], loc='left', fontweight='bold'
+        gpu_resources = axes[3, 1]
+        _style_axis(gpu_resources, has_chinese_font)
+        gpu_resources.set_title(
+            labels['gpu_resources'], loc='left', fontweight='bold'
         )
-        decision_scale.set_ylabel('Q / Uncertainty')
-        for key, series_label, color in (
-                ('actor_q_action_range', bilingual('Q动作范围', 'Q range'), colors['blue']),
-                ('actor_q_top_margin', bilingual('Q前两名间隔', 'Q top margin'), colors['green']),
-                ('actor_policy_disagreement', bilingual('平均不确定性', 'Mean uncertainty'), colors['violet']),
-                ('actor_uncertainty_max', bilingual('最大不确定性', 'Max uncertainty'), colors['red'])):
-            xs, ys = _series(metrics, 'transitions', key, x_scale=1_000_000)
-            if xs:
-                decision_scale.plot(
-                    xs, ys, label=series_label, color=color, linewidth=1.5
-                )
-        if not decision_scale.lines:
-            decision_scale.text(
-                0.5, 0.5, 'Waiting for decision scale metrics',
-                transform=decision_scale.transAxes,
+        gpu_resources.set_xlabel(
+            bilingual('训练经过时间 / 小时', 'Elapsed training hours')
+        )
+        gpu_resources.set_ylabel('%')
+        resource_start = next((
+            _finite(row.get('timestamp')) for row in resources
+            if _finite(row.get('timestamp')) is not None
+        ), None)
+        if resource_start is not None:
+            for key, series_label, color in (
+                    ('gpu_utilization', bilingual('GPU使用率', 'GPU'), colors['blue']),
+                    ('gpu_memory_utilization', bilingual('显存占用率', 'VRAM'), colors['violet'])):
+                xs = []
+                ys = []
+                for row in resources:
+                    timestamp = _finite(row.get('timestamp'))
+                    value = _finite(row.get(key))
+                    if key == 'gpu_memory_utilization' and value is None:
+                        used = _finite(row.get('gpu_memory_used_mb'))
+                        total = _finite(row.get('gpu_memory_total_mb'))
+                        if used is not None and total:
+                            value = 100.0 * used / total
+                    if timestamp is None or value is None:
+                        continue
+                    xs.append((timestamp - resource_start) / 3600.0)
+                    ys.append(value)
+                if xs:
+                    gpu_resources.plot(
+                        xs, ys, label=series_label,
+                        color=color, linewidth=1.5,
+                    )
+        if not gpu_resources.lines:
+            gpu_resources.text(
+                0.5, 0.5, 'Waiting for GPU resource samples',
+                transform=gpu_resources.transAxes,
                 ha='center', va='center', color='#7a8696',
             )
         else:
-            decision_scale.set_yscale('log')
-            decision_scale.legend(frameon=False, fontsize=8, loc='best')
+            gpu_resources.set_ylim(-2.0, 102.0)
+            gpu_resources.legend(frameon=False, fontsize=8, loc='best')
 
         generated_at = time.time()
         latest_transition = max(
@@ -503,6 +507,7 @@ def render_training_curve_snapshot(run_dir):
             'source_metric_rows': len(metric_rows),
             'plotted_metric_rows': len(metrics),
             'source_evaluation_rows': len(evaluations),
+            'source_resource_rows': len(resource_rows),
             'source_last_transition': int(latest_transition),
             'chinese_font_available': has_chinese_font,
         }

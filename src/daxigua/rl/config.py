@@ -71,10 +71,10 @@ class DqnConfig:
     bootstrap_probability: float = 0.8
     auxiliary_loss_weight: float = 0.2
     active_learning_enabled: bool = False
-    active_learning_epsilon_threshold: float = 0.15
-    active_learning_fraction: float = 0.75
-    uncertainty_bonus: float = 1.0
-    active_learning_shadow_bonuses: tuple[float, ...] = ()
+    active_learning_start_epsilon: float = 0.50
+    active_learning_full_epsilon: float = 0.05
+    active_learning_max_probability: float = 0.40
+    active_learning_top_k: int = 4
 
     def __post_init__(self):
         schedule = tuple(
@@ -82,12 +82,6 @@ class DqnConfig:
             for point in self.epsilon_schedule
         )
         object.__setattr__(self, 'epsilon_schedule', schedule)
-        shadow_bonuses = tuple(
-            float(value) for value in self.active_learning_shadow_bonuses
-        )
-        object.__setattr__(
-            self, 'active_learning_shadow_bonuses', shadow_bonuses
-        )
         if not 0.0 <= self.gamma <= 1.0:
             raise ValueError('gamma must be in [0, 1]')
         if self.learning_rate <= 0.0:
@@ -120,23 +114,25 @@ class DqnConfig:
             raise ValueError('bootstrap_probability must be in (0, 1]')
         if self.auxiliary_loss_weight < 0.0:
             raise ValueError('auxiliary_loss_weight cannot be negative')
-        if not 0.0 <= self.active_learning_epsilon_threshold <= 1.0:
+        if not (
+                0.0 <= self.active_learning_full_epsilon
+                <= self.active_learning_start_epsilon <= 1.0):
             raise ValueError(
-                'active_learning_epsilon_threshold must be in [0, 1]'
+                'active learning epsilon thresholds must satisfy '
+                '0 <= full <= start <= 1'
             )
-        if not 0.0 <= self.active_learning_fraction <= 1.0:
-            raise ValueError('active_learning_fraction must be in [0, 1]')
-        if self.uncertainty_bonus < 0.0:
-            raise ValueError('uncertainty_bonus cannot be negative')
-        if any(
-                not math.isfinite(value) or value <= 0.0
-                for value in shadow_bonuses):
+        if not 0.0 <= self.active_learning_max_probability <= 1.0:
             raise ValueError(
-                'active_learning_shadow_bonuses must be finite and positive'
+                'active_learning_max_probability must be in [0, 1]'
             )
-        if len(set(shadow_bonuses)) != len(shadow_bonuses):
+        if self.active_learning_top_k <= 0:
+            raise ValueError('active_learning_top_k must be positive')
+        if max(
+                self.active_learning_start_epsilon,
+                self.active_learning_full_epsilon
+                + self.active_learning_max_probability) > 1.0:
             raise ValueError(
-                'active_learning_shadow_bonuses cannot contain duplicates'
+                'active learning and epsilon branch probabilities exceed 1'
             )
         if self.compile_mode not in ('default', 'reduce-overhead', 'max-autotune'):
             raise ValueError('unsupported torch.compile mode')
@@ -349,16 +345,28 @@ class TrainingConfig:
             raise ValueError('stage_pilot_max_drops must be positive')
         if self.model.max_fruits != 64:
             raise ValueError('the first baseline is frozen at 64 fruit slots')
+        if self.dqn.active_learning_top_k > self.model.action_count:
+            raise ValueError(
+                'active_learning_top_k cannot exceed model.action_count'
+            )
 
     @classmethod
     def from_toml(cls, path):
         with Path(path).open('rb') as handle:
             data = tomllib.load(handle)
         root = dict(data.get('training', {}))
+        dqn_data = dict(data.get('dqn', {}))
+        # 旧实验配置可继续被读取，但 bonus 数值组合已退出训练语义。
+        for legacy_name in (
+                'active_learning_epsilon_threshold',
+                'active_learning_fraction',
+                'uncertainty_bonus',
+                'active_learning_shadow_bonuses'):
+            dqn_data.pop(legacy_name, None)
         return cls(
             **root,
             model=ModelConfig(**data.get('model', {})),
-            dqn=DqnConfig(**data.get('dqn', {})),
+            dqn=DqnConfig(**dqn_data),
             reward=RewardConfig(**data.get('reward', {})),
             replay=ReplayConfig(**data.get('replay', {})),
             evaluation=EvaluationConfig(**data.get('evaluation', {})),

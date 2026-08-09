@@ -78,50 +78,71 @@ def epsilon_at_transition(dqn_config, transition, total_transitions):
     )
 
 
-def _shadow_bonus_suffix(value):
-    return format(float(value), '.8g').replace('-', 'm').replace('.', 'p')
+def active_learning_probability(dqn_config, epsilon):
+    """按 epsilon 所处阶段给出独立的主动学习分支概率。"""
+
+    epsilon = float(epsilon)
+    start = dqn_config.active_learning_start_epsilon
+    full = dqn_config.active_learning_full_epsilon
+    maximum = dqn_config.active_learning_max_probability
+    if epsilon >= start:
+        return 0.0
+    if epsilon <= full or start == full:
+        return maximum
+    return maximum * (start - epsilon) / (start - full)
 
 
-def shadow_bonus_statistics(q_values, uncertainty, greedy_actions, bonuses):
-    """同一次 actor 前向影子比较 bonus；不执行候选动作。"""
+def _descending_ordinal_ranks(values):
+    """逐行生成从 1 开始的降序名次；并列时动作下标小者优先。"""
 
-    bonus_count = len(bonuses)
-    if bonus_count == 0:
-        shape = (0, q_values.shape[0])
-        empty_float = q_values.new_empty(shape, dtype=torch.float32)
-        return (
-            q_values.new_empty(shape, dtype=torch.int64),
-            q_values.new_empty(shape, dtype=torch.bool),
-            empty_float,
-            empty_float,
-        )
-    q_values = q_values.float()
-    uncertainty = uncertainty.float()
-    bonus_values = torch.as_tensor(
-        bonuses, dtype=q_values.dtype, device=q_values.device
+    order = torch.argsort(values, dim=1, descending=True, stable=True)
+    positions = torch.arange(
+        1, values.shape[1] + 1, dtype=torch.int64, device=values.device
+    ).expand_as(order)
+    ranks = torch.empty_like(order)
+    ranks.scatter_(1, order, positions)
+    return ranks
+
+
+def ranked_active_learning_candidates(q_values, uncertainty, top_k):
+    """返回排名融合后的前 K 动作及两种原始名次。"""
+
+    action_count = q_values.shape[1]
+    if not 0 < int(top_k) <= action_count:
+        raise ValueError('top_k must be in [1, action_count]')
+    value_ranks = _descending_ordinal_ranks(q_values.float())
+    uncertainty_ranks = _descending_ordinal_ranks(uncertainty.float())
+    combined = value_ranks + uncertainty_ranks
+    worst_rank = torch.maximum(value_ranks, uncertainty_ranks)
+    action_indices = torch.arange(
+        action_count, dtype=torch.int64, device=q_values.device
+    ).expand_as(value_ranks)
+    base = action_count + 1
+    # 整数进位只负责精确实现约定的字典序，不引入可调权重或量纲。
+    ordering_key = (
+        ((combined * base + worst_rank) * base + value_ranks) * base
+        + action_indices
     )
-    scores = q_values.unsqueeze(0) + (
-        bonus_values[:, None, None] * uncertainty.unsqueeze(0)
+    candidates = torch.argsort(
+        ordering_key, dim=1, descending=False, stable=True
+    )[:, :int(top_k)]
+    return candidates, value_ranks, uncertainty_ranks
+
+
+def rank_correlation_from_sums(values):
+    """从 n,sum(x),sum(y),sum(x²),sum(y²),sum(xy) 计算相关系数。"""
+
+    count, sum_x, sum_y, sum_x2, sum_y2, sum_xy = values
+    if count < 2.0:
+        return None
+    numerator = count * sum_xy - sum_x * sum_y
+    denominator_squared = (
+        (count * sum_x2 - sum_x * sum_x)
+        * (count * sum_y2 - sum_y * sum_y)
     )
-    selected = scores.argmax(dim=2)
-    expanded_q = q_values.unsqueeze(0).expand(bonus_count, -1, -1)
-    expanded_uncertainty = uncertainty.unsqueeze(0).expand_as(expanded_q)
-    greedy = greedy_actions.unsqueeze(0).expand(bonus_count, -1)
-    selected_q = expanded_q.gather(2, selected.unsqueeze(2)).squeeze(2)
-    selected_uncertainty = expanded_uncertainty.gather(
-        2, selected.unsqueeze(2)
-    ).squeeze(2)
-    greedy_q = expanded_q.gather(2, greedy.unsqueeze(2)).squeeze(2)
-    greedy_uncertainty = expanded_uncertainty.gather(
-        2, greedy.unsqueeze(2)
-    ).squeeze(2)
-    changed = selected.ne(greedy)
-    return (
-        selected,
-        changed,
-        (greedy_q - selected_q).clamp_min(0.0),
-        selected_uncertainty - greedy_uncertainty,
-    )
+    if denominator_squared <= 0.0:
+        return None
+    return max(-1.0, min(1.0, numerator / math.sqrt(denominator_squared)))
 
 
 def _git_identity(project_root):
@@ -327,26 +348,19 @@ class BaselineTrainer:
             device=self.device,
         )
         self.actor_metric_sums = torch.zeros(
-            9, dtype=torch.float32, device=self.device
+            3, dtype=torch.float32, device=self.device
         )
-        self.shadow_bonuses = tuple(
-            config.dqn.active_learning_shadow_bonuses
-        )
-        self.shadow_bonus_tensor = torch.tensor(
-            self.shadow_bonuses,
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.actor_shadow_sums = torch.zeros(
-            (len(self.shadow_bonuses), 3),
-            dtype=torch.float32,
-            device=self.device,
+        self.actor_rank_correlation_sums = torch.zeros(
+            6, dtype=torch.float32, device=self.device
         )
         self.actor_metric_decisions = 0
         self.stage_thresholds = (16, 64, 128)
         self.stop_requested = False
         self.stop_reason = None
         self._write_run_identity()
+        self._write_run_status(
+            'initializing', '训练进程已创建，正在初始化'
+        )
 
     def request_stop(self, reason='requested'):
         self.stop_requested = True
@@ -374,6 +388,23 @@ class BaselineTrainer:
             json.dumps(identity, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
+
+    def _write_run_status(self, phase, message, **values):
+        path = self.run_dir / 'run_status.json'
+        temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+        payload = {
+            'phase': str(phase),
+            'completion_message': str(message),
+            'status_timestamp': time.time(),
+            **self._progress(),
+            **values,
+        }
+        temporary.write_text(
+            json.dumps(_json_safe(payload), ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        os.replace(temporary, path)
+        return payload
 
     def _active_rows(self):
         return torch.arange(
@@ -677,31 +708,57 @@ class BaselineTrainer:
             (state.batch_size,),
             device=self.device,
         )
-        explore = torch.rand(state.batch_size, device=self.device) < epsilon
-        active_learning = torch.zeros_like(explore)
-        explore_actions = random_actions
+        active_probability = 0.0
         if (
                 self.config.dqn.active_learning_enabled
-                and self.config.model.policy_head_count > 1
-                and epsilon <= self.config.dqn.active_learning_epsilon_threshold):
-            active_learning = explore & (
-                torch.rand(state.batch_size, device=self.device)
-                < self.config.dqn.active_learning_fraction
+                and self.config.model.policy_head_count > 1):
+            active_probability = active_learning_probability(
+                self.config.dqn, epsilon
             )
-            uncertain_actions = (
-                q_values.float()
-                + self.config.dqn.uncertainty_bonus * uncertainty
-            ).argmax(dim=1)
-            explore_actions = torch.where(
-                active_learning, uncertain_actions, random_actions
+        branch_draw = torch.rand(state.batch_size, device=self.device)
+        active_learning = branch_draw < active_probability
+        explore = (
+            (branch_draw >= active_probability)
+            & (branch_draw < active_probability + epsilon)
+        )
+        selected_value_ranks = torch.zeros(
+            state.batch_size, dtype=torch.int64, device=self.device
+        )
+        selected_uncertainty_ranks = torch.zeros_like(selected_value_ranks)
+        active_actions = greedy
+        if active_probability > 0.0:
+            candidates, value_ranks, uncertainty_ranks = (
+                ranked_active_learning_candidates(
+                    q_values,
+                    uncertainty,
+                    self.config.dqn.active_learning_top_k,
+                )
             )
+            candidate_offsets = torch.randint(
+                candidates.shape[1],
+                (state.batch_size,),
+                device=self.device,
+            )
+            active_actions = candidates.gather(
+                1, candidate_offsets.unsqueeze(1)
+            ).squeeze(1)
+            selected_value_ranks = value_ranks.gather(
+                1, active_actions.unsqueeze(1)
+            ).squeeze(1)
+            selected_uncertainty_ranks = uncertainty_ranks.gather(
+                1, active_actions.unsqueeze(1)
+            ).squeeze(1)
+        actions = torch.where(explore, random_actions, greedy)
+        actions = torch.where(active_learning, active_actions, actions)
         return ActionSelectionBatch(
-            actions=torch.where(explore, explore_actions, greedy),
+            actions=actions,
             greedy_actions=greedy,
             explore_mask=explore,
             q_values=q_values,
             uncertainty=uncertainty,
             active_learning_mask=active_learning,
+            selected_value_ranks=selected_value_ranks,
+            selected_uncertainty_ranks=selected_uncertainty_ranks,
         )
 
     @torch.no_grad()
@@ -712,56 +769,29 @@ class BaselineTrainer:
 
     @torch.no_grad()
     def _accumulate_actor_metrics(self, selection):
-        q_values = selection.q_values.float()
-        uncertainty = selection.uncertainty.float()
-        rows = torch.arange(selection.batch_size, device=self.device)
-        greedy_q = q_values[rows, selection.greedy_actions]
-        greedy_uncertainty = uncertainty[rows, selection.greedy_actions]
-        q_top_two = q_values.topk(2, dim=1).values
         active = selection.active_learning_mask
         active_changed = active & selection.actions.ne(
             selection.greedy_actions
         )
-        selected_q = q_values[rows, selection.actions]
-        selected_uncertainty = uncertainty[rows, selection.actions]
-
         self.actor_metric_sums[0] += active.sum()
         self.actor_metric_sums[1] += selection.explore_mask.sum()
-        self.actor_metric_sums[2] += uncertainty.mean(dim=1).sum()
-        self.actor_metric_sums[3] += (
-            q_values.amax(dim=1) - q_values.amin(dim=1)
-        ).sum()
-        self.actor_metric_sums[4] += (
-            q_top_two[:, 0] - q_top_two[:, 1]
-        ).sum()
-        self.actor_metric_sums[5] += uncertainty.amax(dim=1).sum()
-        self.actor_metric_sums[6] += active_changed.sum()
-        self.actor_metric_sums[7] += torch.where(
-            active_changed,
-            (greedy_q - selected_q).clamp_min(0.0),
-            torch.zeros_like(greedy_q),
-        ).sum()
-        self.actor_metric_sums[8] += torch.where(
-            active_changed,
-            selected_uncertainty - greedy_uncertainty,
-            torch.zeros_like(greedy_uncertainty),
-        ).sum()
-
-        _, changed, q_cost, uncertainty_gain = shadow_bonus_statistics(
-            q_values,
-            uncertainty,
-            selection.greedy_actions,
-            self.shadow_bonus_tensor,
-        )
-        if self.shadow_bonuses:
-            changed_float = changed.to(torch.float32)
-            self.actor_shadow_sums[:, 0] += changed_float.sum(dim=1)
-            self.actor_shadow_sums[:, 1] += (
-                q_cost * changed_float
-            ).sum(dim=1)
-            self.actor_shadow_sums[:, 2] += (
-                uncertainty_gain * changed_float
-            ).sum(dim=1)
+        self.actor_metric_sums[2] += active_changed.sum()
+        if (
+                selection.selected_value_ranks is not None
+                and selection.selected_uncertainty_ranks is not None):
+            mask = active.to(torch.float32)
+            value_rank = selection.selected_value_ranks.to(torch.float32)
+            uncertainty_rank = (
+                selection.selected_uncertainty_ranks.to(torch.float32)
+            )
+            self.actor_rank_correlation_sums += torch.stack((
+                mask,
+                mask * value_rank,
+                mask * uncertainty_rank,
+                mask * value_rank.square(),
+                mask * uncertainty_rank.square(),
+                mask * value_rank * uncertainty_rank,
+            )).sum(dim=1)
         self.actor_metric_decisions += selection.batch_size
 
     def _episode_finished(self, result):
@@ -1051,31 +1081,16 @@ class BaselineTrainer:
         uptime = now - started
         remaining = max(0, self.config.total_transitions - self.transitions)
         speed = window_transitions / window
-        actor_values = self.actor_metric_sums.detach().cpu().tolist()
-        shadow_values = self.actor_shadow_sums.detach().cpu().tolist()
+        actor_values = torch.cat((
+            self.actor_metric_sums,
+            self.actor_rank_correlation_sums,
+        )).detach().cpu().tolist()
         actor_decisions = max(1, self.actor_metric_decisions)
         active_count = actor_values[0]
-        active_changed_count = actor_values[6]
-        changed_denominator = max(1.0, active_changed_count)
-        shadow_metrics = {}
-        for bonus, values in zip(
-                self.shadow_bonuses, shadow_values, strict=True):
-            suffix = _shadow_bonus_suffix(bonus)
-            changed_count, q_cost_sum, uncertainty_gain_sum = values
-            shadow_metrics.update({
-                f'shadow_bonus_{suffix}_greedy_overlap_rate': (
-                    1.0 - changed_count / actor_decisions
-                ),
-                f'shadow_bonus_{suffix}_changed_action_rate': (
-                    changed_count / actor_decisions
-                ),
-                f'shadow_bonus_{suffix}_changed_q_cost': (
-                    q_cost_sum / max(1.0, changed_count)
-                ),
-                f'shadow_bonus_{suffix}_changed_uncertainty_gain': (
-                    uncertainty_gain_sum / max(1.0, changed_count)
-                ),
-            })
+        active_changed_count = actor_values[2]
+        selected_rank_correlation = rank_correlation_from_sums(
+            actor_values[3:]
+        )
         payload = {
             'phase': 'training',
             **self._progress(),
@@ -1125,12 +1140,6 @@ class BaselineTrainer:
             'epsilon_explore_action_fraction': (
                 actor_values[1] / actor_decisions
             ),
-            'actor_policy_disagreement': (
-                actor_values[2] / actor_decisions
-            ),
-            'actor_q_action_range': actor_values[3] / actor_decisions,
-            'actor_q_top_margin': actor_values[4] / actor_decisions,
-            'actor_uncertainty_max': actor_values[5] / actor_decisions,
             'active_learning_effective_action_fraction': (
                 active_changed_count / actor_decisions
             ),
@@ -1139,13 +1148,7 @@ class BaselineTrainer:
                 if active_count <= 0.0
                 else 1.0 - active_changed_count / active_count
             ),
-            'active_learning_changed_q_cost': (
-                actor_values[7] / changed_denominator
-            ),
-            'active_learning_changed_uncertainty_gain': (
-                actor_values[8] / changed_denominator
-            ),
-            **shadow_metrics,
+            'active_selected_rank_correlation': selected_rank_correlation,
             **stage_seconds,
             **self.training_metrics.flush(),
             **self.reward_metrics.flush(),
@@ -1162,7 +1165,7 @@ class BaselineTrainer:
             },
         }
         self.actor_metric_sums.zero_()
-        self.actor_shadow_sums.zero_()
+        self.actor_rank_correlation_sums.zero_()
         self.actor_metric_decisions = 0
         action_counts = self.action_counts.detach().cpu()
         payload['action_counts'] = action_counts.tolist()
@@ -1214,6 +1217,7 @@ class BaselineTrainer:
             reward_kind=self.config.reward.kind,
             dashboard=f'http://{self.config.dashboard.host}:{self.config.dashboard.port}',
         )
+        self._write_run_status('training', '训练正在进行')
         if len(self.replay) < self.config.replay.warmup_transitions:
             self.estimate_stage_thresholds()
             self.stagger_initial_states()
@@ -1455,8 +1459,36 @@ class BaselineTrainer:
             loaded = load_checkpoint(final_path, map_location='cpu')
             if int(loaded['progress']['transitions']) != self.transitions:
                 raise RuntimeError('final checkpoint round-trip validation failed')
+            completed = (
+                self.transitions >= self.config.total_transitions
+                and not self.stop_requested
+            )
+            terminal_phase = 'completed' if completed else 'stopped'
+            terminal_message = (
+                (
+                    '训练、最终评估和产物校验均已正常完成'
+                    if final_evaluation else
+                    '训练和产物校验已正常完成（按参数跳过最终评估）'
+                )
+                if completed
+                else f'训练已安全停止：{self.stop_reason or "达到运行时间预算"}'
+            )
+            manifest_path = self.run_dir / 'artifact_manifest.json'
+            terminal_payload = self._write_run_status(
+                terminal_phase,
+                terminal_message,
+                manifest=str(manifest_path),
+                completed_at=time.time(),
+                stop_reason=self.stop_reason,
+            )
+            self.dashboard.publish(terminal_payload)
+            self.dashboard.event(
+                'training_finished' if completed else 'training_stopped',
+                terminal_message,
+                manifest=str(manifest_path),
+            )
             self.dashboard.snapshot_curves(wait=True, timeout=30.0)
-            manifest = write_artifact_manifest(
+            write_artifact_manifest(
                 self.run_dir,
                 tuple(
                     path
@@ -1465,11 +1497,6 @@ class BaselineTrainer:
                     if '.mplconfig' not in path.parts
                 ),
                 metadata=self._progress(),
-            )
-            self.dashboard.event(
-                'training_finished',
-                '训练、最终评估和产物校验完成',
-                manifest=str(manifest),
             )
             return self._progress()
         except BaseException as error:
@@ -1483,6 +1510,13 @@ class BaselineTrainer:
                 json.dumps(failure, ensure_ascii=False, indent=2),
                 encoding='utf-8',
             )
+            failure_status = self._write_run_status(
+                'failed',
+                f'训练异常结束：{type(error).__name__}: {error}',
+                failed_at=time.time(),
+                error_type=type(error).__name__,
+            )
+            self.dashboard.publish(failure_status)
             try:
                 self.save_checkpoint('failure_last.pt', extra=failure)
             except BaseException:

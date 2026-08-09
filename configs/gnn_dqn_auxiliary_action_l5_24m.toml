@@ -40,8 +40,8 @@ grad_clip_norm = 10.0
 target_update_interval = 1000
 epsilon_start = 1.0
 epsilon_end = 0.05
-epsilon_decay_fraction = 0.75
-epsilon_schedule = [[0, 1.0], [18000000, 0.05], [24000000, 0.05]]
+epsilon_decay_fraction = 0.40
+epsilon_schedule = [[0, 1.0], [6400000, 0.05], [24000000, 0.05]]
 utd_ratio = 1.0
 use_bfloat16 = true
 fused_adam = true
@@ -50,10 +50,10 @@ compile_mode = "reduce-overhead"
 bootstrap_probability = 0.8
 auxiliary_loss_weight = 0.05
 active_learning_enabled = true
-active_learning_epsilon_threshold = 0.08
-active_learning_fraction = 0.75
-uncertainty_bonus = 1.0
-active_learning_shadow_bonuses = [0.5, 1.0, 2.0, 4.0, 8.0]
+active_learning_start_epsilon = 0.50
+active_learning_full_epsilon = 0.05
+active_learning_max_probability = 0.40
+active_learning_top_k = 4
 
 [reward]
 kind = "score_v1"
@@ -93,7 +93,7 @@ host = "127.0.0.1"
 port = 8765
 publish_interval_seconds = 1.0
 resource_interval_seconds = 2.0
-history_size = 3600
+history_size = 7200
 curve_snapshot_enabled = true
 curve_snapshot_interval_seconds = 120.0
 

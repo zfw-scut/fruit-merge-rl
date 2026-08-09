@@ -30,7 +30,11 @@ from daxigua.rl.evaluation import (
 )
 from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
-from daxigua.rl.monitoring import _DASHBOARD_HTML, _DashboardState
+from daxigua.rl.monitoring import (
+    _DASHBOARD_HTML,
+    _DashboardState,
+    _completed_dashboard_snapshot,
+)
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
 from daxigua.rl.trainer import (
@@ -292,14 +296,14 @@ class RewardTrainingConfigTest(unittest.TestCase):
         auxiliary_l5 = TrainingConfig.from_toml(
             project_root / 'configs' / 'gnn_dqn_auxiliary_action_l5_24m.toml'
         )
-        self.assertEqual(auxiliary_l5.dqn.epsilon_decay_fraction, 0.75)
+        self.assertEqual(auxiliary_l5.dqn.epsilon_decay_fraction, 0.40)
         self.assertEqual(
             auxiliary_l5.dqn.epsilon_schedule,
-            ((0, 1.0), (18_000_000, 0.05), (24_000_000, 0.05)),
+            ((0, 1.0), (6_400_000, 0.05), (24_000_000, 0.05)),
         )
+        self.assertEqual(auxiliary_l5.dqn.active_learning_top_k, 4)
         self.assertEqual(
-            auxiliary_l5.dqn.active_learning_shadow_bonuses,
-            (0.5, 1.0, 2.0, 4.0, 8.0),
+            auxiliary_l5.dqn.active_learning_max_probability, 0.40
         )
 
 
@@ -435,7 +439,22 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('概览', _DASHBOARD_HTML)
         self.assertIn('定期保存曲线', _DASHBOARD_HTML)
         self.assertIn('curve-snapshot', _DASHBOARD_HTML)
+        self.assertIn('active-rank-chart', _DASHBOARD_HTML)
+        self.assertIn('gpu-resource-chart', _DASHBOARD_HTML)
+        self.assertIn('训练已正常完成，面板保持在线', _DASHBOARD_HTML)
         self.assertNotIn('文件(F)', _DASHBOARD_HTML)
+
+    def test_dashboard_keeps_lightweight_gpu_resource_history(self):
+        state = _DashboardState(history_size=2)
+        state.update_resources({
+            'timestamp': 10.0,
+            'gpu_utilization': 87.0,
+            'gpu_memory_used_mb': 12.0,
+            'gpu_memory_total_mb': 24.0,
+        })
+        resource = state.snapshot()['resource_history'][0]
+        self.assertEqual(resource['gpu_utilization'], 87.0)
+        self.assertEqual(resource['gpu_memory_utilization'], 50.0)
 
     def test_dashboard_state_exposes_curve_snapshot_metadata(self):
         state = _DashboardState(history_size=4)
@@ -445,6 +464,21 @@ class DashboardTest(unittest.TestCase):
         })
         plot = state.snapshot()['plots']['training_curves']
         self.assertEqual(plot['source_last_transition'], 1234)
+
+    def test_completed_dashboard_reads_persistent_normal_status(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'run_status.json').write_text(json.dumps({
+                'phase': 'completed',
+                'completion_message': '训练已正常完成',
+                'transitions': 24_000_000,
+                'total_transitions': 24_000_000,
+            }), encoding='utf-8')
+            state = _completed_dashboard_snapshot(root).snapshot()
+        self.assertEqual(state['training']['phase'], 'completed')
+        self.assertEqual(
+            state['training']['completion_message'], '训练已正常完成'
+        )
 
     def test_curve_snapshot_interval_must_be_positive(self):
         with self.assertRaisesRegex(
