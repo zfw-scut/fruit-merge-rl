@@ -20,6 +20,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model_evaluations/README.md`：当前模型评估知识库入口、证据标签、阅读顺序和每轮更新要求；
 - `model_evaluations/COMPARISON_MATRIX.md`：3/4/5层分数基线、辅助动作完整配置、Reward V2与V2.1的30/120 FPS效果和原因假设对比；
 - `model_evaluations/model-auxiliary-action-r1.md`：辅助动作完整配置首轮24M训练、4096局双帧率效果、辅助损失和高等级合成诊断；
+- `model_evaluations/model-auxiliary-action-rank-active-r3.md`：排名Top-4主动学习24M与续训34M的双帧率效果、迁移校验和后期净贡献实验建议；
 - `SCENARIO_LAB.md`：鼠标交互式自定义场景、真实21动作物理评估、Reward V2覆盖层和JSON契约；
 - `codex/RULES.md`：较大修改的记录规则；
 - `codex/01_建立accelerated_v1最小基线_2026_08_01.md`：本分支首个结构记录；
