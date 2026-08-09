@@ -5,7 +5,7 @@ seed = 20260809
 max_envs = 1792
 active_envs = 1792
 total_transitions = 24000000
-max_wall_seconds = 12600.0
+max_wall_seconds = 21600.0
 finalization_reserve_seconds = 1800.0
 log_interval_seconds = 10.0
 checkpoint_interval_seconds = 1800.0
@@ -48,14 +48,14 @@ fused_adam = true
 compile_model = true
 compile_mode = "reduce-overhead"
 bootstrap_probability = 0.8
-auxiliary_loss_weight = 0.2
+auxiliary_loss_weight = 0.05
 active_learning_enabled = true
-active_learning_epsilon_threshold = 0.15
+active_learning_epsilon_threshold = 0.08
 active_learning_fraction = 0.75
 uncertainty_bonus = 1.0
 
 [reward]
-kind = "spatial_v2_1"
+kind = "score_v1"
 score_divisor = 66.0
 reward_scale = 1.0
 queue_weights = [0.50, 0.30, 0.20]
@@ -73,7 +73,7 @@ periodic_episodes = 512
 final_episodes = 4096
 parallel_envs = 512
 max_episode_drops = 1000
-seed_base = 52000000
+seed_base = 42000000
 
 [analysis]
 transition_sample_size = 131072
