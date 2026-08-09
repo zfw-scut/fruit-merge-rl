@@ -34,9 +34,14 @@ def _torch_rng_state():
 
 def restore_rng_state(state):
     random.setstate(state['python'])
-    torch.set_rng_state(state['torch_cpu'])
+    # `load_checkpoint(..., map_location='cuda')` 会把 payload 中包括 RNG
+    # sidecar 在内的所有张量映射到 CUDA；PyTorch 的 RNG 恢复接口仍要求
+    # CPU ByteTensor，因此在接口边界显式归一化设备。
+    torch.set_rng_state(state['torch_cpu'].detach().cpu())
     if 'torch_cuda' in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state['torch_cuda'])
+        torch.cuda.set_rng_state_all([
+            item.detach().cpu() for item in state['torch_cuda']
+        ])
 
 
 def save_checkpoint_atomic(

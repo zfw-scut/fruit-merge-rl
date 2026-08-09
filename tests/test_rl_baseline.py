@@ -4,12 +4,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import importlib.util
 import json
+import random
 import unittest
 
 import torch
 
 from daxigua.rl.autoscale import AdaptiveScaleController
-from daxigua.rl.checkpoint import load_checkpoint, save_checkpoint_atomic
+from daxigua.rl.checkpoint import (
+    load_checkpoint,
+    restore_rng_state,
+    save_checkpoint_atomic,
+)
 from daxigua.rl.config import (
     AutoScaleConfig,
     DashboardConfig,
@@ -404,6 +409,26 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
         self.assertFalse(
             loaded['replay_metadata']['replay_saved_in_checkpoint']
         )
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')
+    def test_restore_rng_state_accepts_cuda_mapped_sidecar(self):
+        expected_cpu = torch.get_rng_state().clone()
+        expected_cuda = [item.clone() for item in torch.cuda.get_rng_state_all()]
+        state = {
+            'python': random.getstate(),
+            'torch_cpu': expected_cpu.to('cuda'),
+            'torch_cuda': [item.to('cuda') for item in expected_cuda],
+        }
+
+        torch.manual_seed(1234)
+        torch.cuda.manual_seed_all(5678)
+        restore_rng_state(state)
+
+        self.assertTrue(torch.equal(torch.get_rng_state(), expected_cpu))
+        restored_cuda = torch.cuda.get_rng_state_all()
+        self.assertEqual(len(restored_cuda), len(expected_cuda))
+        for actual, expected in zip(restored_cuda, expected_cuda):
+            self.assertTrue(torch.equal(actual, expected))
 
     def test_viewer_physics_defaults_to_accurate_120_fps(self):
         model_config = _small_model_config()
