@@ -74,6 +74,7 @@ class DqnConfig:
     active_learning_epsilon_threshold: float = 0.15
     active_learning_fraction: float = 0.75
     uncertainty_bonus: float = 1.0
+    active_learning_shadow_bonuses: tuple[float, ...] = ()
 
     def __post_init__(self):
         schedule = tuple(
@@ -81,6 +82,12 @@ class DqnConfig:
             for point in self.epsilon_schedule
         )
         object.__setattr__(self, 'epsilon_schedule', schedule)
+        shadow_bonuses = tuple(
+            float(value) for value in self.active_learning_shadow_bonuses
+        )
+        object.__setattr__(
+            self, 'active_learning_shadow_bonuses', shadow_bonuses
+        )
         if not 0.0 <= self.gamma <= 1.0:
             raise ValueError('gamma must be in [0, 1]')
         if self.learning_rate <= 0.0:
@@ -121,6 +128,16 @@ class DqnConfig:
             raise ValueError('active_learning_fraction must be in [0, 1]')
         if self.uncertainty_bonus < 0.0:
             raise ValueError('uncertainty_bonus cannot be negative')
+        if any(
+                not math.isfinite(value) or value <= 0.0
+                for value in shadow_bonuses):
+            raise ValueError(
+                'active_learning_shadow_bonuses must be finite and positive'
+            )
+        if len(set(shadow_bonuses)) != len(shadow_bonuses):
+            raise ValueError(
+                'active_learning_shadow_bonuses cannot contain duplicates'
+            )
         if self.compile_mode not in ('default', 'reduce-overhead', 'max-autotune'):
             raise ValueError('unsupported torch.compile mode')
 

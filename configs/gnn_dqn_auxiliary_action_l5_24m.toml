@@ -53,6 +53,7 @@ active_learning_enabled = true
 active_learning_epsilon_threshold = 0.08
 active_learning_fraction = 0.75
 uncertainty_bonus = 1.0
+active_learning_shadow_bonuses = [0.5, 1.0, 2.0, 4.0, 8.0]
 
 [reward]
 kind = "score_v1"

@@ -1,5 +1,7 @@
 """辅助动作效果、多策略头与主动学习基础契约测试。"""
 
+import json
+from pathlib import Path
 import unittest
 from tempfile import TemporaryDirectory
 
@@ -21,7 +23,7 @@ from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
-from daxigua.rl.trainer import BaselineTrainer
+from daxigua.rl.trainer import BaselineTrainer, shadow_bonus_statistics
 from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
 
 
@@ -51,6 +53,7 @@ def _training_config(directory, device):
         max_envs=2,
         active_envs=2,
         total_transitions=4,
+        log_interval_seconds=0.01,
         max_episode_drops=4,
         stage_pilot_envs=2,
         stage_pilot_max_drops=2,
@@ -63,6 +66,7 @@ def _training_config(directory, device):
             active_learning_enabled=True,
             active_learning_epsilon_threshold=1.0,
             active_learning_fraction=1.0,
+            active_learning_shadow_bonuses=(0.5, 1.0, 2.0),
         ),
         reward=RewardConfig(kind='score_v1'),
         replay=ReplayConfig(
@@ -201,12 +205,47 @@ class ActionEffectLearningTest(unittest.TestCase):
                 'aux_loss_first_contact', 'policy_disagreement'):
             self.assertTrue(bool(torch.isfinite(metrics[name])))
 
+    def test_shadow_bonus_statistics_do_not_change_actor_actions(self):
+        q_values = torch.tensor(((1.0, 0.8), (0.5, 0.49)))
+        uncertainty = torch.tensor(((0.0, 0.3), (0.1, 0.2)))
+        greedy = torch.tensor((0, 0))
+
+        selected, changed, q_cost, uncertainty_gain = (
+            shadow_bonus_statistics(
+                q_values, uncertainty, greedy, (0.25, 1.0)
+            )
+        )
+
+        self.assertEqual(selected.tolist(), [[0, 1], [1, 1]])
+        self.assertEqual(changed.tolist(), [[False, True], [True, True]])
+        self.assertTrue(torch.allclose(
+            q_cost,
+            torch.tensor(((0.0, 0.01), (0.2, 0.01))),
+        ))
+        self.assertTrue(torch.allclose(
+            uncertainty_gain,
+            torch.tensor(((0.0, 0.1), (0.3, 0.1))),
+        ))
+
     def test_trainer_writes_auxiliary_transitions_end_to_end(self):
         with TemporaryDirectory() as directory:
             trainer = BaselineTrainer(_training_config(directory, 'cpu'))
             result = trainer.run(final_evaluation=False)
+            rows = [
+                json.loads(line)
+                for line in (Path(directory) / 'metrics.jsonl').read_text(
+                    encoding='utf-8'
+                ).splitlines()
+            ]
         self.assertEqual(result['transitions'], 4)
         self.assertGreaterEqual(result['updates'], 1)
+        self.assertTrue(any(
+            'shadow_bonus_1_changed_action_rate' in row for row in rows
+        ))
+        self.assertTrue(any(
+            'active_learning_effective_action_fraction' in row
+            for row in rows
+        ))
 
     @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is unavailable')
     def test_cuda_trainer_runs_auxiliary_pipeline_end_to_end(self):

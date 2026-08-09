@@ -78,6 +78,52 @@ def epsilon_at_transition(dqn_config, transition, total_transitions):
     )
 
 
+def _shadow_bonus_suffix(value):
+    return format(float(value), '.8g').replace('-', 'm').replace('.', 'p')
+
+
+def shadow_bonus_statistics(q_values, uncertainty, greedy_actions, bonuses):
+    """同一次 actor 前向影子比较 bonus；不执行候选动作。"""
+
+    bonus_count = len(bonuses)
+    if bonus_count == 0:
+        shape = (0, q_values.shape[0])
+        empty_float = q_values.new_empty(shape, dtype=torch.float32)
+        return (
+            q_values.new_empty(shape, dtype=torch.int64),
+            q_values.new_empty(shape, dtype=torch.bool),
+            empty_float,
+            empty_float,
+        )
+    q_values = q_values.float()
+    uncertainty = uncertainty.float()
+    bonus_values = torch.as_tensor(
+        bonuses, dtype=q_values.dtype, device=q_values.device
+    )
+    scores = q_values.unsqueeze(0) + (
+        bonus_values[:, None, None] * uncertainty.unsqueeze(0)
+    )
+    selected = scores.argmax(dim=2)
+    expanded_q = q_values.unsqueeze(0).expand(bonus_count, -1, -1)
+    expanded_uncertainty = uncertainty.unsqueeze(0).expand_as(expanded_q)
+    greedy = greedy_actions.unsqueeze(0).expand(bonus_count, -1)
+    selected_q = expanded_q.gather(2, selected.unsqueeze(2)).squeeze(2)
+    selected_uncertainty = expanded_uncertainty.gather(
+        2, selected.unsqueeze(2)
+    ).squeeze(2)
+    greedy_q = expanded_q.gather(2, greedy.unsqueeze(2)).squeeze(2)
+    greedy_uncertainty = expanded_uncertainty.gather(
+        2, greedy.unsqueeze(2)
+    ).squeeze(2)
+    changed = selected.ne(greedy)
+    return (
+        selected,
+        changed,
+        (greedy_q - selected_q).clamp_min(0.0),
+        selected_uncertainty - greedy_uncertainty,
+    )
+
+
 def _git_identity(project_root):
     def run(*arguments):
         try:
@@ -281,9 +327,21 @@ class BaselineTrainer:
             device=self.device,
         )
         self.actor_metric_sums = torch.zeros(
-            3, dtype=torch.float32, device=self.device
+            9, dtype=torch.float32, device=self.device
         )
-        self.actor_metric_batches = 0
+        self.shadow_bonuses = tuple(
+            config.dqn.active_learning_shadow_bonuses
+        )
+        self.shadow_bonus_tensor = torch.tensor(
+            self.shadow_bonuses,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self.actor_shadow_sums = torch.zeros(
+            (len(self.shadow_bonuses), 3),
+            dtype=torch.float32,
+            device=self.device,
+        )
         self.actor_metric_decisions = 0
         self.stage_thresholds = (16, 64, 128)
         self.stop_requested = False
@@ -652,6 +710,60 @@ class BaselineTrainer:
 
         return self._select_action_batch(state, epsilon).actions
 
+    @torch.no_grad()
+    def _accumulate_actor_metrics(self, selection):
+        q_values = selection.q_values.float()
+        uncertainty = selection.uncertainty.float()
+        rows = torch.arange(selection.batch_size, device=self.device)
+        greedy_q = q_values[rows, selection.greedy_actions]
+        greedy_uncertainty = uncertainty[rows, selection.greedy_actions]
+        q_top_two = q_values.topk(2, dim=1).values
+        active = selection.active_learning_mask
+        active_changed = active & selection.actions.ne(
+            selection.greedy_actions
+        )
+        selected_q = q_values[rows, selection.actions]
+        selected_uncertainty = uncertainty[rows, selection.actions]
+
+        self.actor_metric_sums[0] += active.sum()
+        self.actor_metric_sums[1] += selection.explore_mask.sum()
+        self.actor_metric_sums[2] += uncertainty.mean(dim=1).sum()
+        self.actor_metric_sums[3] += (
+            q_values.amax(dim=1) - q_values.amin(dim=1)
+        ).sum()
+        self.actor_metric_sums[4] += (
+            q_top_two[:, 0] - q_top_two[:, 1]
+        ).sum()
+        self.actor_metric_sums[5] += uncertainty.amax(dim=1).sum()
+        self.actor_metric_sums[6] += active_changed.sum()
+        self.actor_metric_sums[7] += torch.where(
+            active_changed,
+            (greedy_q - selected_q).clamp_min(0.0),
+            torch.zeros_like(greedy_q),
+        ).sum()
+        self.actor_metric_sums[8] += torch.where(
+            active_changed,
+            selected_uncertainty - greedy_uncertainty,
+            torch.zeros_like(greedy_uncertainty),
+        ).sum()
+
+        _, changed, q_cost, uncertainty_gain = shadow_bonus_statistics(
+            q_values,
+            uncertainty,
+            selection.greedy_actions,
+            self.shadow_bonus_tensor,
+        )
+        if self.shadow_bonuses:
+            changed_float = changed.to(torch.float32)
+            self.actor_shadow_sums[:, 0] += changed_float.sum(dim=1)
+            self.actor_shadow_sums[:, 1] += (
+                q_cost * changed_float
+            ).sum(dim=1)
+            self.actor_shadow_sums[:, 2] += (
+                uncertainty_gain * changed_float
+            ).sum(dim=1)
+        self.actor_metric_decisions += selection.batch_size
+
     def _episode_finished(self, result):
         return (
             result.physics.done[:self.active_envs]
@@ -939,6 +1051,31 @@ class BaselineTrainer:
         uptime = now - started
         remaining = max(0, self.config.total_transitions - self.transitions)
         speed = window_transitions / window
+        actor_values = self.actor_metric_sums.detach().cpu().tolist()
+        shadow_values = self.actor_shadow_sums.detach().cpu().tolist()
+        actor_decisions = max(1, self.actor_metric_decisions)
+        active_count = actor_values[0]
+        active_changed_count = actor_values[6]
+        changed_denominator = max(1.0, active_changed_count)
+        shadow_metrics = {}
+        for bonus, values in zip(
+                self.shadow_bonuses, shadow_values, strict=True):
+            suffix = _shadow_bonus_suffix(bonus)
+            changed_count, q_cost_sum, uncertainty_gain_sum = values
+            shadow_metrics.update({
+                f'shadow_bonus_{suffix}_greedy_overlap_rate': (
+                    1.0 - changed_count / actor_decisions
+                ),
+                f'shadow_bonus_{suffix}_changed_action_rate': (
+                    changed_count / actor_decisions
+                ),
+                f'shadow_bonus_{suffix}_changed_q_cost': (
+                    q_cost_sum / max(1.0, changed_count)
+                ),
+                f'shadow_bonus_{suffix}_changed_uncertainty_gain': (
+                    uncertainty_gain_sum / max(1.0, changed_count)
+                ),
+            })
         payload = {
             'phase': 'training',
             **self._progress(),
@@ -983,17 +1120,32 @@ class BaselineTrainer:
             'last_fast_eval_score': self.last_fast_eval_score,
             'last_accurate_eval_score': self.last_accurate_eval_score,
             'active_learning_action_fraction': (
-                float(self.actor_metric_sums[0].item())
-                / max(1, self.actor_metric_decisions)
+                active_count / actor_decisions
             ),
             'epsilon_explore_action_fraction': (
-                float(self.actor_metric_sums[1].item())
-                / max(1, self.actor_metric_decisions)
+                actor_values[1] / actor_decisions
             ),
             'actor_policy_disagreement': (
-                float(self.actor_metric_sums[2].item())
-                / max(1, self.actor_metric_batches)
+                actor_values[2] / actor_decisions
             ),
+            'actor_q_action_range': actor_values[3] / actor_decisions,
+            'actor_q_top_margin': actor_values[4] / actor_decisions,
+            'actor_uncertainty_max': actor_values[5] / actor_decisions,
+            'active_learning_effective_action_fraction': (
+                active_changed_count / actor_decisions
+            ),
+            'active_learning_greedy_overlap_rate': (
+                None
+                if active_count <= 0.0
+                else 1.0 - active_changed_count / active_count
+            ),
+            'active_learning_changed_q_cost': (
+                actor_values[7] / changed_denominator
+            ),
+            'active_learning_changed_uncertainty_gain': (
+                actor_values[8] / changed_denominator
+            ),
+            **shadow_metrics,
             **stage_seconds,
             **self.training_metrics.flush(),
             **self.reward_metrics.flush(),
@@ -1010,7 +1162,7 @@ class BaselineTrainer:
             },
         }
         self.actor_metric_sums.zero_()
-        self.actor_metric_batches = 0
+        self.actor_shadow_sums.zero_()
         self.actor_metric_decisions = 0
         action_counts = self.action_counts.detach().cpu()
         payload['action_counts'] = action_counts.tolist()
@@ -1103,13 +1255,7 @@ class BaselineTrainer:
                 action_selection = self._select_action_batch(
                     current, self.epsilon()
                 )
-                self.actor_metric_sums[0] += (
-                    action_selection.active_learning_mask.sum()
-                )
-                self.actor_metric_sums[1] += action_selection.explore_mask.sum()
-                self.actor_metric_sums[2] += action_selection.uncertainty.mean()
-                self.actor_metric_batches += 1
-                self.actor_metric_decisions += self.active_envs
+                self._accumulate_actor_metrics(action_selection)
                 active_actions = action_selection.actions
                 self.action_counts += torch.bincount(
                     active_actions,

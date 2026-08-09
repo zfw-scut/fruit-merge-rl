@@ -297,6 +297,10 @@ class RewardTrainingConfigTest(unittest.TestCase):
             auxiliary_l5.dqn.epsilon_schedule,
             ((0, 1.0), (18_000_000, 0.05), (24_000_000, 0.05)),
         )
+        self.assertEqual(
+            auxiliary_l5.dqn.active_learning_shadow_bonuses,
+            (0.5, 1.0, 2.0, 4.0, 8.0),
+        )
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):

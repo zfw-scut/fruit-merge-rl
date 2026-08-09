@@ -191,6 +191,14 @@ def render_training_curve_snapshot(run_dir):
             '高等级新水果生成密度 / High-level fruit creation density'
             if has_chinese_font else 'High-level fruit creation density'
         ),
+        'bonus_shadow': (
+            'Bonus影子动作改变率 / Shadow action change rate'
+            if has_chinese_font else 'Bonus shadow action change rate'
+        ),
+        'decision_scale': (
+            '决策量纲 / Decision scale'
+            if has_chinese_font else 'Decision scale'
+        ),
     }
     colors = {
         'blue': '#0067c0',
@@ -216,7 +224,7 @@ def render_training_curve_snapshot(run_dir):
     )
     try:
         figure, axes = plt.subplots(
-            3, 2, figsize=(14, 12.4), constrained_layout=True
+            4, 2, figsize=(14, 16.0), constrained_layout=True
         )
         figure.patch.set_facecolor('#f3f6fa')
         figure.suptitle(labels['title'], fontsize=18, fontweight='bold')
@@ -402,6 +410,69 @@ def render_training_curve_snapshot(run_dir):
             merge_density.legend(
                 frameon=False, fontsize=8, loc='best', ncol=3
             )
+
+        bonus_shadow = axes[3, 0]
+        _style_axis(bonus_shadow, has_chinese_font)
+        bonus_shadow.set_title(
+            labels['bonus_shadow'], loc='left', fontweight='bold'
+        )
+        bonus_shadow.set_ylabel(
+            bilingual('改变率', 'Changed action rate')
+        )
+        shadow_colors = (
+            colors['slate'], colors['blue'], colors['green'],
+            colors['orange'], colors['red'],
+        )
+        for suffix, label, color in zip(
+                ('0p5', '1', '2', '4', '8'),
+                ('0.5', '1', '2', '4', '8'),
+                shadow_colors,
+                strict=True):
+            xs, ys = _series(
+                metrics,
+                'transitions',
+                f'shadow_bonus_{suffix}_changed_action_rate',
+                x_scale=1_000_000,
+            )
+            if xs:
+                bonus_shadow.plot(
+                    xs, ys, label=f'β={label}', color=color, linewidth=1.5
+                )
+        bonus_shadow.set_ylim(-0.02, 1.02)
+        if not bonus_shadow.lines:
+            bonus_shadow.text(
+                0.5, 0.5, 'Waiting for shadow bonus metrics',
+                transform=bonus_shadow.transAxes, ha='center', va='center',
+                color='#7a8696',
+            )
+        else:
+            bonus_shadow.legend(frameon=False, fontsize=8, loc='best')
+
+        decision_scale = axes[3, 1]
+        _style_axis(decision_scale, has_chinese_font)
+        decision_scale.set_title(
+            labels['decision_scale'], loc='left', fontweight='bold'
+        )
+        decision_scale.set_ylabel('Q / Uncertainty')
+        for key, series_label, color in (
+                ('actor_q_action_range', bilingual('Q动作范围', 'Q range'), colors['blue']),
+                ('actor_q_top_margin', bilingual('Q前两名间隔', 'Q top margin'), colors['green']),
+                ('actor_policy_disagreement', bilingual('平均不确定性', 'Mean uncertainty'), colors['violet']),
+                ('actor_uncertainty_max', bilingual('最大不确定性', 'Max uncertainty'), colors['red'])):
+            xs, ys = _series(metrics, 'transitions', key, x_scale=1_000_000)
+            if xs:
+                decision_scale.plot(
+                    xs, ys, label=series_label, color=color, linewidth=1.5
+                )
+        if not decision_scale.lines:
+            decision_scale.text(
+                0.5, 0.5, 'Waiting for decision scale metrics',
+                transform=decision_scale.transAxes,
+                ha='center', va='center', color='#7a8696',
+            )
+        else:
+            decision_scale.set_yscale('log')
+            decision_scale.legend(frameon=False, fontsize=8, loc='best')
 
         generated_at = time.time()
         latest_transition = max(
