@@ -298,6 +298,30 @@ class RewardTrainingConfigTest(unittest.TestCase):
             fast_l5.evaluation.seed_base, slow_l5.evaluation.seed_base
         )
 
+        long_fast_l5 = TrainingConfig.from_toml(
+            project_root
+            / 'configs'
+            / 'gnn_dqn_baseline_l5_fast_128m_resume.toml'
+        )
+        self.assertEqual(long_fast_l5.total_transitions, 128_000_000)
+        self.assertEqual(long_fast_l5.max_envs, 1536)
+        self.assertEqual(long_fast_l5.replay.batch_size, 384)
+        self.assertEqual(
+            long_fast_l5.dqn.epsilon_schedule,
+            fast_l5.dqn.epsilon_schedule,
+        )
+        self.assertEqual(long_fast_l5.evaluation.fast_interval_transitions,
+                         8_000_000)
+        self.assertEqual(
+            long_fast_l5.evaluation.accurate_milestones,
+            [48_000_000, 64_000_000, 96_000_000],
+        )
+        self.assertEqual(long_fast_l5.evaluation.seed_base, 42_000_000)
+        self.assertEqual(long_fast_l5.model.policy_head_count, 1)
+        self.assertFalse(long_fast_l5.model.action_effect_enabled)
+        self.assertFalse(long_fast_l5.dqn.active_learning_enabled)
+        self.assertFalse(long_fast_l5.branch_learning.enabled)
+
         auxiliary_l5 = TrainingConfig.from_toml(
             project_root / 'configs' / 'gnn_dqn_auxiliary_action_l5_24m.toml'
         )

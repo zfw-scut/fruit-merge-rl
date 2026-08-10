@@ -1,0 +1,106 @@
+[training]
+run_dir = "runs/cloud_rtx5090_baseline_l5_fast_56c2e3d_seed20260808_24m_to_128m"
+device = "cuda"
+seed = 20260808
+max_envs = 1536
+active_envs = 1536
+total_transitions = 128000000
+max_wall_seconds = 43200.0
+finalization_reserve_seconds = 3600.0
+log_interval_seconds = 10.0
+checkpoint_interval_seconds = 1800.0
+max_episode_drops = 1000
+stage_pilot_envs = 256
+stage_pilot_max_drops = 128
+
+[model]
+max_fruits = 64
+action_count = 21
+queue_length = 4
+hidden_dim = 128
+edge_hidden_dim = 128
+message_layers = 5
+queue_hidden_dim = 64
+queue_layers = 1
+level_embedding_dim = 16
+max_neighbors = 12
+nearest_neighbors = 4
+motion_neighbors = 2
+vertical_neighbors_per_direction = 2
+action_key_fruits = 8
+policy_head_count = 1
+action_effect_enabled = false
+dropout = 0.0
+
+[dqn]
+gamma = 0.99
+learning_rate = 0.0001
+huber_delta = 1.0
+grad_clip_norm = 10.0
+target_update_interval = 1000
+epsilon_start = 1.0
+epsilon_end = 0.05
+epsilon_decay_fraction = 0.40
+epsilon_schedule = [[0, 1.0], [6400000, 0.05], [24000000, 0.05]]
+utd_ratio = 1.0
+use_bfloat16 = true
+fused_adam = true
+compile_model = true
+compile_mode = "reduce-overhead"
+bootstrap_probability = 0.8
+auxiliary_loss_weight = 0.0
+active_learning_enabled = false
+
+[reward]
+kind = "score_v1"
+score_divisor = 66.0
+reward_scale = 1.0
+queue_weights = [0.50, 0.30, 0.20]
+
+[replay]
+capacity = 1048576
+batch_size = 384
+warmup_transitions = 262144
+warmup_stage_ratios = [0.30, 0.30, 0.25, 0.15]
+
+[branch_learning]
+enabled = false
+
+[evaluation]
+fast_interval_transitions = 8000000
+accurate_milestones = [48000000, 64000000, 96000000]
+periodic_episodes = 512
+final_episodes = 4096
+parallel_envs = 512
+max_episode_drops = 1000
+seed_base = 42000000
+
+[analysis]
+transition_sample_size = 131072
+transition_chunk_size = 8192
+trajectory_episodes = 0
+critical_event_episodes = 128
+score_bin_width = 500
+critical_event_min_level = 9
+
+[dashboard]
+enabled = true
+host = "127.0.0.1"
+port = 8765
+publish_interval_seconds = 1.0
+resource_interval_seconds = 2.0
+history_size = 3600
+curve_snapshot_enabled = true
+curve_snapshot_interval_seconds = 120.0
+
+[autoscale]
+enabled = false
+candidate_envs = [1536]
+low_gpu_utilization = 80.0
+low_cpu_utilization = 75.0
+max_memory_utilization = 85.0
+observation_seconds = 120.0
+trial_seconds = 120.0
+cooldown_seconds = 600.0
+minimum_throughput_gain = 0.08
+rollback_loss = 0.05
