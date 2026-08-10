@@ -136,6 +136,7 @@ class BatchActionEffectEvents:
 
     first_contact_type_mask: torch.Tensor
     first_contact_primary_type: torch.Tensor
+    first_contact_target_slot: torch.Tensor
     first_contact_position: torch.Tensor
     first_contact_level_delta: torch.Tensor
     first_contact_normal: torch.Tensor
@@ -160,6 +161,7 @@ class BatchDropResult:
 
     dropped_levels: torch.Tensor
     drop_x: torch.Tensor
+    physics_radius: torch.Tensor
     fruit_ids: torch.Tensor
     queue_before: torch.Tensor
     queue_after: torch.Tensor

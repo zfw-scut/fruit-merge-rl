@@ -96,9 +96,13 @@ checkpoint 内冻结的 `ModelConfig` 重建 GNN-DQN，并返回 A0～A20 的 Q 
 ```powershell
 $env:PYTHONPATH = 'src'
 & $python tools\open_scenario_lab.py --serve --device cuda `
-    --checkpoint runs\cloud_rtx5090_auxiliary_action_feb10ec_seed20260809_24m\checkpoints\final.pt `
+    --checkpoint runs\cloud_rtx5090_auxiliary_action_single_step_branch_bdf04ae_seed20260809_24m\checkpoints\final.pt `
     --model-device cuda --open
 ```
+
+上例固定加载当前最新的24M父轨迹+4M单步旁路模型`bdf04ae`。场景实验室不会按目录
+时间自动猜测checkpoint，启动参数就是本次观察的模型身份；这样不同轮次的预测不会在
+用户不知情时被替换。首轮`feb10ec`仍可显式加载作为24M效果对照，但不再作为默认示例。
 
 无 CUDA 的开发机可使用 `--device cpu --model-device cpu`。不指定 `--checkpoint` 时，
 实时物理和空间奖励仍可使用，但模型倾向按钮会禁用。`--port 0` 会自动选择空闲端口。不传
@@ -108,3 +112,8 @@ $env:PYTHONPATH = 'src'
 旧 checkpoint 仍可加载和查看 Q 值；若其 `action_effect_enabled=false`，辅助动作区域会
 明确显示“当前模型没有辅助动作头”，不会伪造预测数据。位置误差用于单场景直观诊断，
 不能替代固定评估集上的总体准确率、分位数或校准指标。
+
+`bdf04ae`是在结构化首次接触头加入前完成的模型，因此它仍显示旧的“主类型+绝对位置”
+预测。`structured_contact_enabled=true`只影响下一次从新配置开始的训练：模型先在
+“无接触/地面/左右墙/动态水果/64个投放前水果槽位”中选候选，再预测相对候选几何
+先验的位置残差。

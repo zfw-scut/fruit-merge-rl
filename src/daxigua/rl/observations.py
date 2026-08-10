@@ -82,6 +82,21 @@ class TensorState:
             physics_fps=self.physics_fps,
         )
 
+    def batch_slice(self, stop):
+        """返回前 ``stop`` 个环境的零拷贝批视图。"""
+
+        stop = int(stop)
+        if stop < 0 or stop > self.batch_size:
+            raise ValueError('batch slice is outside the state batch')
+        return type(self)(
+            **{
+                name: getattr(self, name)[:stop]
+                for name in self.__dataclass_fields__
+                if name != 'physics_fps'
+            },
+            physics_fps=self.physics_fps,
+        )
+
     @classmethod
     def cat(cls, states):
         states = tuple(states)

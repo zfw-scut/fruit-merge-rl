@@ -63,7 +63,8 @@ def serialize_action_effect_predictions(
         raise ValueError('scenario view expects a single scene batch')
 
     values = type(predictions)(*(
-        value[0].detach().cpu() for value in predictions
+        None if value is None else value[0].detach().cpu()
+        for value in predictions
     ))
     velocity_scale = math.sqrt(2.0 * float(gravity_y) * float(board_height))
     actions = []
@@ -80,6 +81,17 @@ def serialize_action_effect_predictions(
             name: _probability(values.contact_type_logits[action, index])
             for index, name in enumerate(CONTACT_NAMES)
         }
+        contact_target = None
+        if values.contact_target_logits is not None:
+            target_labels = (
+                'none', 'floor', 'left_wall', 'right_wall', 'dynamic_fruit',
+                *(f'fruit_slot_{slot}' for slot in range(
+                    values.contact_target_logits.shape[-1] - 5
+                )),
+            )
+            contact_target = _categorical(
+                values.contact_target_logits[action], target_labels
+            )
         generations = []
         for rank in range(3):
             generations.append({
@@ -138,6 +150,7 @@ def serialize_action_effect_predictions(
             'first_contact': {
                 'types': contact_types,
                 'primary': primary,
+                'target': contact_target,
                 'position': _position(
                     values.contact_position[action], board_width, board_height
                 ),

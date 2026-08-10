@@ -385,6 +385,7 @@ __device__ inline void record_first_contact(
     int wall_width,
     int64_t* first_contact_type_mask,
     int64_t* first_contact_primary_type,
+    int64_t* first_contact_target_slot,
     float* first_contact_position,
     int64_t* first_contact_level_delta,
     float* first_contact_normal,
@@ -411,6 +412,7 @@ __device__ inline void record_first_contact(
   int64_t q0_level = state.levels[q0_index];
   int64_t type_mask = 0;
   int64_t primary_type = 0;
+  int64_t best_target_slot = -1;
   int64_t level_delta = 0;
   float best_speed = -1.0f;
   Vec2 best_position{0.0f, 0.0f};
@@ -418,7 +420,8 @@ __device__ inline void record_first_contact(
 
   auto consider = [&](bool touching_contact, int64_t bit, int64_t type,
                       Vec2 normal, Vec2 contact_position, float speed,
-                      int64_t candidate_level_delta) {
+                      int64_t candidate_level_delta,
+                      int64_t candidate_target_slot) {
     if (!touching_contact) return;
     type_mask |= bit;
     if (speed > best_speed) {
@@ -427,6 +430,7 @@ __device__ inline void record_first_contact(
       best_position = contact_position;
       best_normal = normal;
       level_delta = candidate_level_delta;
+      best_target_slot = candidate_target_slot;
     }
   };
 
@@ -434,17 +438,17 @@ __device__ inline void record_first_contact(
       position.y + radius >= static_cast<float>(board_height - wall_width),
       1, 1, {0.0f, -1.0f},
       {position.x, static_cast<float>(board_height - wall_width)},
-      fmaxf(velocity.y, 0.0f), 0);
+      fmaxf(velocity.y, 0.0f), 0, -1);
   consider(
       position.x - radius <= static_cast<float>(wall_width),
       2, 2, {1.0f, 0.0f},
       {static_cast<float>(wall_width), position.y},
-      fmaxf(-velocity.x, 0.0f), 0);
+      fmaxf(-velocity.x, 0.0f), 0, -1);
   consider(
       position.x + radius >= static_cast<float>(board_width - wall_width),
       4, 3, {-1.0f, 0.0f},
       {static_cast<float>(board_width - wall_width), position.y},
-      fmaxf(velocity.x, 0.0f), 0);
+      fmaxf(velocity.x, 0.0f), 0, -1);
 
   for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
     if (slot == q0_slot) continue;
@@ -464,7 +468,7 @@ __device__ inline void record_first_contact(
     Vec2 relative_velocity = sub(velocity, state.velocity(slot));
     float speed = fmaxf(-dot(relative_velocity, normal), 0.0f);
     consider(true, 8, 4, normal, sub(position, mul(normal, radius)), speed,
-             state.levels[index] - q0_level);
+             state.levels[index] - q0_level, slot);
   }
 
   if (type_mask == 0) return;
@@ -480,6 +484,7 @@ __device__ inline void record_first_contact(
   }
   if (!earlier && best_speed <= first_contact_normal_speed[state.env]) return;
   first_contact_primary_type[state.env] = primary_type;
+  first_contact_target_slot[state.env] = best_target_slot;
   first_contact_position[state.env * 2] = best_position.x;
   first_contact_position[state.env * 2 + 1] = best_position.y;
   first_contact_level_delta[state.env] = level_delta;
@@ -528,6 +533,7 @@ __global__ void vector_step_kernel(
     int64_t* event_new_fruit_ids,
     int64_t* first_contact_type_mask,
     int64_t* first_contact_primary_type,
+    int64_t* first_contact_target_slot,
     float* first_contact_position,
     int64_t* first_contact_level_delta,
     float* first_contact_normal,
@@ -618,6 +624,7 @@ __global__ void vector_step_kernel(
   if (track_action_effects) {
     first_contact_type_mask[env] = 0;
     first_contact_primary_type[env] = 0;
+    first_contact_target_slot[env] = -1;
     first_contact_position[env * 2] = 0.0f;
     first_contact_position[env * 2 + 1] = 0.0f;
     first_contact_level_delta[env] = 0;
@@ -836,6 +843,7 @@ __global__ void vector_step_kernel(
               state, active_slot_upper_bound, drop_id,
               board_width, board_height, wall_width,
               first_contact_type_mask, first_contact_primary_type,
+              first_contact_target_slot,
               first_contact_position, first_contact_level_delta,
               first_contact_normal, first_contact_age_frames,
               first_contact_normal_speed);
@@ -868,6 +876,7 @@ __global__ void vector_step_kernel(
           state, active_slot_upper_bound, drop_id,
           board_width, board_height, wall_width,
           first_contact_type_mask, first_contact_primary_type,
+          first_contact_target_slot,
           first_contact_position, first_contact_level_delta,
           first_contact_normal, first_contact_age_frames,
           first_contact_normal_speed);
@@ -1101,6 +1110,7 @@ void vector_step_cuda(
     torch::Tensor event_new_fruit_ids,
     torch::Tensor first_contact_type_mask,
     torch::Tensor first_contact_primary_type,
+    torch::Tensor first_contact_target_slot,
     torch::Tensor first_contact_position,
     torch::Tensor first_contact_level_delta,
     torch::Tensor first_contact_normal,
@@ -1200,6 +1210,7 @@ void vector_step_cuda(
       event_new_fruit_ids.data_ptr<int64_t>(),
       first_contact_type_mask.data_ptr<int64_t>(),
       first_contact_primary_type.data_ptr<int64_t>(),
+      first_contact_target_slot.data_ptr<int64_t>(),
       first_contact_position.data_ptr<float>(),
       first_contact_level_delta.data_ptr<int64_t>(),
       first_contact_normal.data_ptr<float>(),

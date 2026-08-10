@@ -146,6 +146,9 @@ class ScenarioModelEvaluator:
             'action_effect_available': bool(
                 self.loaded.model_config.action_effect_enabled
             ),
+            'structured_contact_available': bool(
+                self.loaded.model_config.structured_contact_enabled
+            ),
         }
 
     @torch.inference_mode()

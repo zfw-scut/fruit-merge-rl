@@ -9,6 +9,10 @@ import torch
 
 from daxigua.simulator import BatchStepResult
 
+from .contact_geometry import (
+    CONTACT_SPECIAL_CANDIDATE_COUNT,
+    build_contact_candidate_geometry,
+)
 from .observations import TensorState
 
 
@@ -29,7 +33,9 @@ class ActionEffectTargets:
     q0_final_level: torch.Tensor
     contact_type_bits: torch.Tensor
     contact_primary_type: torch.Tensor
+    contact_target: torch.Tensor
     contact_position: torch.Tensor
+    contact_position_residual: torch.Tensor
     contact_level_delta: torch.Tensor
     contact_normal: torch.Tensor
     contact_age: torch.Tensor
@@ -72,6 +78,8 @@ def build_action_effect_targets(
         *,
         board_width=560.0,
         board_height=1120.0,
+        spawn_y=252.0,
+        wall_width=20.0,
         velocity_scale=None,
         gravity_y=1800.0,
         max_physics_frames=600,
@@ -150,6 +158,46 @@ def build_action_effect_targets(
         contact_position[:, 1] / float(board_height) * 2.0 - 1.0
     )
     contact_position *= contact_valid.unsqueeze(1).to(dtype)
+    target_slot = effects.first_contact_target_slot.clamp(
+        0, current.positions.shape[1] - 1
+    )
+    fruit_target_valid = (
+        effects.first_contact_target_slot >= 0
+    ) & _gather_slots(current.active, target_slot)
+    contact_target = torch.where(
+        effects.first_contact_primary_type == 4,
+        torch.where(
+            fruit_target_valid,
+            effects.first_contact_target_slot
+            + CONTACT_SPECIAL_CANDIDATE_COUNT,
+            torch.full_like(
+                effects.first_contact_primary_type,
+                CONTACT_SPECIAL_CANDIDATE_COUNT - 1,
+            ),
+        ),
+        effects.first_contact_primary_type,
+    ).clamp(
+        0,
+        current.positions.shape[1] + CONTACT_SPECIAL_CANDIDATE_COUNT - 1,
+    )
+    contact_geometry = build_contact_candidate_geometry(
+        current,
+        step_result.drop.drop_x.index_select(0, rows).unsqueeze(1),
+        step_result.drop.physics_radius.index_select(0, rows).unsqueeze(1),
+        board_width=board_width,
+        board_height=board_height,
+        spawn_y=spawn_y,
+        wall_width=wall_width,
+        velocity_scale=velocity_scale,
+    )
+    candidate_positions = contact_geometry.positions[:, 0]
+    contact_prior = candidate_positions.gather(
+        1,
+        contact_target[:, None, None].expand(-1, 1, 2),
+    ).squeeze(1)
+    contact_position_residual = (
+        contact_position - contact_prior
+    ) * contact_valid.unsqueeze(1).to(dtype)
     contact_normal = effects.first_contact_normal * (
         contact_valid.unsqueeze(1).to(dtype)
     )
@@ -212,7 +260,9 @@ def build_action_effect_targets(
         q0_final_level=effects.q0_final_level.clamp(0, 11),
         contact_type_bits=contact_type_bits,
         contact_primary_type=effects.first_contact_primary_type.clamp(0, 4),
+        contact_target=contact_target,
         contact_position=contact_position,
+        contact_position_residual=contact_position_residual,
         contact_level_delta=contact_level_delta,
         contact_normal=contact_normal,
         contact_age=contact_age,

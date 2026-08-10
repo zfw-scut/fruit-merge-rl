@@ -127,6 +127,7 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             vertical_neighbors_per_direction=1,
             action_key_fruits=2,
             action_effect_enabled=True,
+            structured_contact_enabled=True,
         )
         model = BaselineGnnDqn(config)
         loaded = LoadedViewerModel(
@@ -151,6 +152,7 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(21, len(payload['action_effect_predictions']))
         prediction = payload['action_effect_predictions'][10]
         self.assertIn('first_contact', prediction)
+        self.assertIsNotNone(prediction['first_contact']['target'])
         self.assertEqual(3, len(prediction['generations']))
         self.assertIn('final', prediction['q0'])
 

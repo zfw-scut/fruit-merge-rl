@@ -49,6 +49,7 @@ def _model_config():
         action_key_fruits=2,
         policy_head_count=3,
         action_effect_enabled=True,
+        structured_contact_enabled=True,
     )
 
 
@@ -170,6 +171,8 @@ class ActionEffectLearningTest(unittest.TestCase):
         self.assertIsNotNone(effects)
         self.assertTrue(bool((effects.first_contact_age_frames >= 0).all()))
         self.assertTrue(bool(targets.contact_type_bits.any(dim=1).all()))
+        self.assertEqual(targets.contact_target.tolist(), [1, 1])
+        self.assertEqual(targets.contact_position_residual.shape, (2, 2))
         self.assertTrue(bool(targets.final_exists.all()))
         self.assertEqual(targets.final_state.shape, (2, 5))
 
@@ -197,12 +200,51 @@ class ActionEffectLearningTest(unittest.TestCase):
         self.assertEqual(targets.generation_level.tolist(), [[4, 7, 9]])
         self.assertFalse(bool(targets.q0_participated[0]))
 
+    def test_fruit_contact_target_preserves_pre_action_slot(self):
+        simulator = self._simulator(1)
+        simulator.reset(fruit_queue=torch.ones((1, 4), dtype=torch.int64))
+        simulator.step(torch.tensor([10]))
+        current = TensorState.from_observation(
+            simulator.observe(), physics_fps=30, clone=True
+        )
+        result = simulator.step(torch.tensor([10]))
+        next_state = TensorState.from_observation(
+            result.observation, physics_fps=30
+        )
+        targets = build_action_effect_targets(current, next_state, result)
+        effects = result.physics.action_effects
+        self.assertEqual(int(effects.first_contact_primary_type[0]), 4)
+        self.assertGreaterEqual(int(effects.first_contact_target_slot[0]), 0)
+        self.assertEqual(
+            int(targets.contact_target[0]),
+            int(effects.first_contact_target_slot[0]) + 5,
+        )
+        dynamic_current = current.clone()
+        dynamic_current.active[
+            0, int(effects.first_contact_target_slot[0])
+        ] = False
+        dynamic_targets = build_action_effect_targets(
+            dynamic_current, next_state, result
+        )
+        self.assertEqual(int(dynamic_targets.contact_target[0]), 4)
+
     def test_bootstrap_ensemble_and_auxiliary_update_run(self):
         current, actions, result, next_state, targets = self._transition(4)
         model = BaselineGnnDqn(_model_config())
         output = model(current, True, True)
         self.assertEqual(output.q_values.shape, (4, 21))
         self.assertEqual(output.head_q_values.shape, (4, 3, 21))
+        self.assertEqual(
+            output.action_effects.contact_target_logits.shape,
+            (4, 21, 69),
+        )
+        self.assertEqual(
+            output.action_effects.contact_position_residual.shape,
+            (4, 21, 69, 2),
+        )
+        self.assertTrue(bool(torch.isfinite(
+            output.action_effects.contact_position
+        ).all()))
         self.assertTrue(torch.allclose(
             output.q_values, output.head_q_values.mean(dim=1)
         ))
@@ -270,6 +312,18 @@ class ActionEffectLearningTest(unittest.TestCase):
         self.assertEqual(value_ranks.tolist(), [[1, 2, 3, 4]])
         self.assertEqual(uncertainty_ranks.tolist(), [[4, 1, 2, 3]])
         self.assertEqual(candidates.tolist(), [[1, 2, 0]])
+
+    def test_legacy_action_effect_checkpoint_shape_remains_loadable(self):
+        config = replace(
+            _model_config(), structured_contact_enabled=False
+        )
+        original = BaselineGnnDqn(config)
+        restored = BaselineGnnDqn(config)
+        restored.load_state_dict(original.state_dict(), strict=True)
+        current, *_rest = self._transition(1)
+        output = restored(current, True, True).action_effects
+        self.assertIsNone(output.contact_target_logits)
+        self.assertIsNone(output.contact_position_residual)
 
     def test_active_probability_and_rank_correlation_have_clear_semantics(self):
         config = DqnConfig(
@@ -393,6 +447,9 @@ class ActionEffectLearningTest(unittest.TestCase):
         torch.cuda.synchronize()
         self.assertTrue(bool(
             (first.physics.action_effects.first_contact_age_frames >= 0).all()
+        ))
+        self.assertTrue(bool(
+            (second.physics.action_effects.first_contact_target_slot >= 0).all()
         ))
         self.assertTrue(bool(
             second.physics.action_effects.q0_participated.all()

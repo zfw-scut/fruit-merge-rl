@@ -267,6 +267,9 @@ def _action_effect_facts(
     primary_index = int(
         effects.first_contact_primary_type[env_index].item()
     )
+    target_slot = int(
+        effects.first_contact_target_slot[env_index].item()
+    )
     final_slot = int(effects.q0_final_slot[env_index].item())
     final_exists = (
         final_slot >= 0
@@ -355,6 +358,7 @@ def _action_effect_facts(
                 if 0 <= primary_index < len(_PRIMARY_CONTACT_NAMES)
                 else 'none'
             ),
+            'target_slot': target_slot if target_slot >= 0 else None,
             'position': (
                 {
                     'x': round(float(position[0]), 3),

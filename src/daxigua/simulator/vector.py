@@ -178,6 +178,7 @@ class TensorVectorSimulator:
         )
         self._first_contact_type_mask = torch.zeros_like(self.score)
         self._first_contact_primary_type = torch.zeros_like(self.score)
+        self._first_contact_target_slot = torch.full_like(self.score, -1)
         self._first_contact_position = torch.zeros(
             (batch, 2), dtype=self.float_dtype, device=self.device
         )
@@ -368,6 +369,7 @@ class TensorVectorSimulator:
         self._event_new_fruit_ids.zero_()
         self._first_contact_type_mask.zero_()
         self._first_contact_primary_type.zero_()
+        self._first_contact_target_slot.fill_(-1)
         self._first_contact_position.zero_()
         self._first_contact_level_delta.zero_()
         self._first_contact_normal.zero_()
@@ -1396,6 +1398,16 @@ class TensorVectorSimulator:
         self._first_contact_primary_type = torch.where(
             replace_primary, primary_type, self._first_contact_primary_type
         )
+        primary_target_slot = torch.where(
+            primary == 3,
+            fruit_slot,
+            torch.full_like(fruit_slot, -1),
+        )
+        self._first_contact_target_slot = torch.where(
+            replace_primary,
+            primary_target_slot,
+            self._first_contact_target_slot,
+        )
         self._first_contact_position = torch.where(
             replace_primary[:, None],
             primary_position,
@@ -1481,6 +1493,7 @@ class TensorVectorSimulator:
         return BatchActionEffectEvents(
             first_contact_type_mask=self._first_contact_type_mask,
             first_contact_primary_type=self._first_contact_primary_type,
+            first_contact_target_slot=self._first_contact_target_slot,
             first_contact_position=self._first_contact_position,
             first_contact_level_delta=self._first_contact_level_delta,
             first_contact_normal=self._first_contact_normal,
@@ -1497,6 +1510,7 @@ class TensorVectorSimulator:
         return BatchDropResult(
             dropped_levels=self._last_drop_level,
             drop_x=self._last_drop_x,
+            physics_radius=self._dropped_radii[self._last_drop_level],
             fruit_ids=self._last_drop_id,
             queue_before=self._last_queue_before,
             queue_after=self._last_queue_after,
@@ -1702,6 +1716,7 @@ class TensorVectorSimulator:
             self._event_new_fruit_ids,
             self._first_contact_type_mask,
             self._first_contact_primary_type,
+            self._first_contact_target_slot,
             self._first_contact_position,
             self._first_contact_level_delta,
             self._first_contact_normal,

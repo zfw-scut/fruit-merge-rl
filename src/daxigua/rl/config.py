@@ -26,6 +26,7 @@ class ModelConfig:
     action_key_fruits: int = 8
     policy_head_count: int = 1
     action_effect_enabled: bool = False
+    structured_contact_enabled: bool = False
     dropout: float = 0.0
 
     def __post_init__(self):
@@ -48,6 +49,10 @@ class ModelConfig:
             raise ValueError('max_neighbors cannot exceed max_fruits')
         if self.action_key_fruits > self.max_fruits:
             raise ValueError('action_key_fruits cannot exceed max_fruits')
+        if self.structured_contact_enabled and not self.action_effect_enabled:
+            raise ValueError(
+                'structured_contact_enabled requires action_effect_enabled'
+            )
         if self.dropout != 0.0:
             raise ValueError('the first baseline keeps dropout disabled')
 

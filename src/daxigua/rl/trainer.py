@@ -504,6 +504,8 @@ class BaselineTrainer:
             result,
             board_width=self.simulator_config.board_width,
             board_height=self.simulator_config.board_height,
+            spawn_y=self.simulator_config.spawn_y,
+            wall_width=self.simulator_config.wall_width,
             gravity_y=self.simulator_config.gravity_y,
             max_physics_frames=self.simulator_config.max_physics_frames,
             current_fruit_count=current_fruit_count,

@@ -17,6 +17,11 @@ from daxigua.core import (
 )
 
 from .config import ModelConfig
+from .contact_geometry import (
+    CONTACT_GEOMETRY_FEATURE_DIM,
+    CONTACT_SPECIAL_CANDIDATE_COUNT,
+    build_contact_candidate_geometry,
+)
 from .observations import TensorState
 
 
@@ -46,6 +51,8 @@ class ActionEffectPredictions(NamedTuple):
     settle_duration: torch.Tensor
     danger_delta: torch.Tensor
     over_danger_line_logit: torch.Tensor
+    contact_target_logits: torch.Tensor | None
+    contact_position_residual: torch.Tensor | None
 
 
 class ModelOutput(NamedTuple):
@@ -271,6 +278,36 @@ class BaselineGnnDqn(nn.Module):
             self.action_effect_binary_head = None
             self.action_effect_categorical_head = None
             self.action_effect_continuous_head = None
+        if self.config.structured_contact_enabled:
+            contact_hidden = max(16, hidden_dim // 4)
+            self.contact_query = nn.Linear(
+                hidden_dim, contact_hidden, bias=False
+            )
+            self.contact_fruit_projection = nn.Linear(
+                hidden_dim, contact_hidden, bias=False
+            )
+            self.contact_geometry_encoder = _mlp(
+                CONTACT_GEOMETRY_FEATURE_DIM,
+                contact_hidden,
+                contact_hidden,
+            )
+            self.contact_special_embeddings = nn.Parameter(torch.empty(
+                CONTACT_SPECIAL_CANDIDATE_COUNT, contact_hidden
+            ))
+            nn.init.normal_(self.contact_special_embeddings, std=0.02)
+            self.contact_special_score = nn.Linear(
+                hidden_dim, CONTACT_SPECIAL_CANDIDATE_COUNT
+            )
+            self.contact_residual_head = nn.Linear(contact_hidden, 2)
+            self.contact_hidden_dim = contact_hidden
+        else:
+            self.contact_query = None
+            self.contact_fruit_projection = None
+            self.contact_geometry_encoder = None
+            self.register_parameter('contact_special_embeddings', None)
+            self.contact_special_score = None
+            self.contact_residual_head = None
+            self.contact_hidden_dim = 0
 
         display_radii = [0.0] + [
             float(fruit_radius(level))
@@ -674,7 +711,77 @@ class BaselineGnnDqn(nn.Module):
         ))
         return self.action_norm(base + light_summary + detail_summary)
 
-    def _predict_action_effects(self, action_hidden):
+    def _structured_contact_predictions(
+            self, state, fruit_hidden, action_hidden):
+        q0_level = state.fruit_queue[:, 0].to(torch.long).clamp(
+            0, MAX_FRUIT_LEVEL
+        )
+        display_radius = self.display_radii[q0_level]
+        drop_radius = self.drop_radii[q0_level]
+        left = self.wall_width + display_radius + 2.0
+        right = self.board_width - self.wall_width - display_radius - 2.0
+        drop_x = left[:, None] + (
+            right - left
+        )[:, None] * self.action_fraction[None, :]
+        geometry = build_contact_candidate_geometry(
+            state,
+            drop_x,
+            drop_radius,
+            board_width=self.board_width,
+            board_height=self.board_height,
+            spawn_y=self.spawn_y,
+            wall_width=self.wall_width,
+            velocity_scale=self.velocity_scale,
+        )
+        query = self.contact_query(action_hidden)
+        fruit_candidates = (
+            self.contact_fruit_projection(fruit_hidden).unsqueeze(1)
+            + self.contact_geometry_encoder(geometry.fruit_features)
+        )
+        special_candidates = self.contact_special_embeddings[
+            None, None
+        ].expand(
+            action_hidden.shape[0], action_hidden.shape[1], -1, -1
+        )
+        scale = math.sqrt(float(self.contact_hidden_dim))
+        special_logits = self.contact_special_score(action_hidden) + (
+            query.unsqueeze(2) * special_candidates
+        ).sum(dim=-1) / scale
+        fruit_logits = (
+            query.unsqueeze(2) * fruit_candidates
+        ).sum(dim=-1) / scale
+        candidate_logits = torch.cat(
+            (special_logits, fruit_logits), dim=2
+        ).masked_fill(~geometry.valid, -1e4)
+        candidates = torch.cat(
+            (special_candidates, fruit_candidates), dim=2
+        )
+        candidate_residual = self.contact_residual_head(
+            F.silu(candidates + query.unsqueeze(2))
+        )
+        selected = candidate_logits.argmax(dim=2)
+        gather_index = selected[..., None, None].expand(-1, -1, 1, 2)
+        selected_prior = geometry.positions.gather(
+            2, gather_index
+        ).squeeze(2)
+        selected_residual = candidate_residual.gather(
+            2, gather_index
+        ).squeeze(2)
+        primary_logits = torch.stack((
+            candidate_logits[..., 0],
+            candidate_logits[..., 1],
+            candidate_logits[..., 2],
+            candidate_logits[..., 3],
+            torch.logsumexp(candidate_logits[..., 4:], dim=-1),
+        ), dim=-1)
+        return (
+            candidate_logits,
+            candidate_residual,
+            selected_prior + selected_residual,
+            primary_logits,
+        )
+
+    def _predict_action_effects(self, state, fruit_hidden, action_hidden):
         if not self.config.action_effect_enabled:
             return None
         hidden = self.action_effect_encoder(action_hidden)
@@ -682,6 +789,19 @@ class BaselineGnnDqn(nn.Module):
         categorical = self.action_effect_categorical_head(hidden)
         continuous = self.action_effect_continuous_head(hidden)
         batch, actions, _ = hidden.shape
+        contact_target_logits = None
+        contact_position_residual = None
+        contact_position = continuous[..., 0:2]
+        contact_primary_type_logits = categorical[..., 29:34]
+        if self.config.structured_contact_enabled:
+            (
+                contact_target_logits,
+                contact_position_residual,
+                contact_position,
+                contact_primary_type_logits,
+            ) = self._structured_contact_predictions(
+                state, fruit_hidden, hidden
+            )
         return ActionEffectPredictions(
             merge_logit=binary[..., 0],
             merge_count_logits=categorical[..., 0:9],
@@ -689,8 +809,8 @@ class BaselineGnnDqn(nn.Module):
             q0_lineage_depth_logits=categorical[..., 9:17],
             q0_final_level_logits=categorical[..., 17:29],
             contact_type_logits=binary[..., 2:6],
-            contact_primary_type_logits=categorical[..., 29:34],
-            contact_position=continuous[..., 0:2],
+            contact_primary_type_logits=contact_primary_type_logits,
+            contact_position=contact_position,
             contact_level_delta_logits=categorical[..., 34:55],
             contact_normal=continuous[..., 2:4],
             contact_age=continuous[..., 4],
@@ -712,6 +832,8 @@ class BaselineGnnDqn(nn.Module):
             settle_duration=continuous[..., 19],
             danger_delta=continuous[..., 20],
             over_danger_line_logit=binary[..., 13],
+            contact_target_logits=contact_target_logits,
+            contact_position_residual=contact_position_residual,
         )
 
     def forward_with_details(
@@ -747,9 +869,12 @@ class BaselineGnnDqn(nn.Module):
             head_q_values=head_q_values,
             action_effects=(
                 self._predict_action_effects(
-                    action_hidden
-                    if action_effect_batch_size is None
-                    else action_hidden[:action_effect_batch_size]
+                    state if action_effect_batch_size is None else
+                    state.batch_slice(action_effect_batch_size),
+                    fruit_hidden if action_effect_batch_size is None else
+                    fruit_hidden[:action_effect_batch_size],
+                    action_hidden if action_effect_batch_size is None else
+                    action_hidden[:action_effect_batch_size],
                 )
                 if predict_action_effects
                 else None

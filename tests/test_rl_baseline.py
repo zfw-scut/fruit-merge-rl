@@ -331,6 +331,7 @@ class RewardTrainingConfigTest(unittest.TestCase):
             ((0, 1.0), (6_400_000, 0.05), (24_000_000, 0.05)),
         )
         self.assertFalse(auxiliary_l5.dqn.active_learning_enabled)
+        self.assertTrue(auxiliary_l5.model.structured_contact_enabled)
         self.assertEqual(auxiliary_l5.replay.batch_size, 256)
         self.assertTrue(auxiliary_l5.branch_learning.enabled)
         self.assertEqual(

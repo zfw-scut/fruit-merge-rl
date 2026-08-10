@@ -101,6 +101,7 @@ def _select_drop(drop, rows):
     return BatchDropResult(
         dropped_levels=drop.dropped_levels.index_select(0, rows),
         drop_x=drop.drop_x.index_select(0, rows),
+        physics_radius=drop.physics_radius.index_select(0, rows),
         fruit_ids=drop.fruit_ids.index_select(0, rows),
         queue_before=drop.queue_before.index_select(0, rows),
         queue_after=drop.queue_after.index_select(0, rows),

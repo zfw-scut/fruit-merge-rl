@@ -33,8 +33,15 @@ def _masked_mean(values, mask):
 
 
 def _chosen_action(values, actions):
+    if values is None:
+        return None
     batch = torch.arange(values.shape[0], device=values.device)
     return values[batch, actions]
+
+
+def _chosen_candidate(values, candidates):
+    batch = torch.arange(values.shape[0], device=values.device)
+    return values[batch, candidates.to(torch.long)]
 
 
 def _binary_loss(logits, targets):
@@ -131,19 +138,35 @@ class DqnLearner:
                 prediction.q0_final_level_logits, targets.q0_final_level
             )
         ) / 3.0
-        contact = (
-            _binary_loss(
-                prediction.contact_type_logits, targets.contact_type_bits
-            )
-            + _categorical_loss(
+        if prediction.contact_target_logits is None:
+            contact_identity = _categorical_loss(
                 prediction.contact_primary_type_logits,
                 targets.contact_primary_type,
             )
-            + _regression_loss(
+            contact_location = _regression_loss(
                 prediction.contact_position,
                 targets.contact_position,
                 contact_valid,
             )
+        else:
+            contact_identity = _categorical_loss(
+                prediction.contact_target_logits,
+                targets.contact_target,
+            )
+            contact_location = _regression_loss(
+                _chosen_candidate(
+                    prediction.contact_position_residual,
+                    targets.contact_target,
+                ),
+                targets.contact_position_residual,
+                contact_valid,
+            )
+        contact = (
+            _binary_loss(
+                prediction.contact_type_logits, targets.contact_type_bits
+            )
+            + contact_identity
+            + contact_location
             + _categorical_loss(
                 prediction.contact_level_delta_logits,
                 targets.contact_level_delta,
@@ -308,7 +331,7 @@ class DqnLearner:
                 None
                 if action_effect_predictions is None
                 else type(action_effect_predictions)(*(
-                    value[:batch_size]
+                    None if value is None else value[:batch_size]
                     for value in action_effect_predictions
                 ))
             )
@@ -331,6 +354,7 @@ class DqnLearner:
                     None
                     if action_effect_predictions is None
                     else type(action_effect_predictions)(*(
+                        None if value is None else
                         value[batch_size:total_batch_size]
                         for value in action_effect_predictions
                     ))

@@ -30,6 +30,7 @@ vertical_neighbors_per_direction = 2
 action_key_fruits = 8
 policy_head_count = 5
 action_effect_enabled = true
+structured_contact_enabled = true
 dropout = 0.0
 
 [dqn]
