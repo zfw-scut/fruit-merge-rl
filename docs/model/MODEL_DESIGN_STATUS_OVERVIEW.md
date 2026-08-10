@@ -146,7 +146,8 @@
 | --- | --- | --- |
 | GNN-DQN 基线 | 128 维、3 层、8 个精细水果、1-step Dueling Double DQN、纯分数奖励 | 已完成首轮RTX 5090训练；保留为3层历史对照，见 `../model_evaluations/model-baseline-r1.md` |
 | Baseline Scale V1 | 128维、4层、8个精细水果、1-step Dueling Double DQN、纯分数奖励 | 已完成16.001M训练；30/120 FPS局均分较历史基线提高14.10%/13.68%，保留为上一代效果基准，见 `../model_evaluations/model-baseline-scale-v1-l4-r1.md` |
-| 辅助动作完整配置 | 5层、5策略头、实际动作效果监督、bootstrap与低epsilon主动探索 | 已完成24.001M训练；30/120 FPS达到4849.65/4476.35，当前效果领先配置；单项因果待复现与消融，见 `../model_evaluations/model-auxiliary-action-r1.md` |
+| 五层Fast 128M续训 | 5层、单策略头、纯分数奖励，从24M checkpoint恢复并重建Replay | 30/120 FPS达到5050.52/4794.81，为当前绝对效果基准；使用5.33倍训练量且中位分仍低于辅助首轮，见 `../model_evaluations/model-baseline-scale-v1-l5-fast-128m-r2.md` |
+| 辅助动作完整配置 | 5层、5策略头、实际动作效果监督、bootstrap与低epsilon主动探索 | 已完成24.001M训练；30/120 FPS达到4849.65/4476.35，为24M预算效果基准；单项因果待复现与消融，见 `../model_evaluations/model-auxiliary-action-r1.md` |
 | Reward V2 训练 | 保持相同模型与训练流程，仅替换为纯空间奖励 | 首轮训练完成；30/120 FPS局均分均明显低于基线，当前版本不替代基线 |
 | 关系与物理技能课程 | Pair Encoder、物理表示和辅助任务 | 部分确认 |
 | 条件化低层策略 | 外部课程目标或潜在计划条件化 FiLM | 部分确认 |

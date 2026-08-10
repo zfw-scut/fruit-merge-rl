@@ -18,7 +18,8 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model/REWARD_V2_ACCESSIBLE_SPACE.md`：纯可投放空间奖励、21列GPU几何、队列对齐、状态相关无合成参考与可视化契约；
 - `model/LOCAL_MODEL_VIEWER.md`：checkpoint 本地加载、120 FPS greedy 游玩、逐帧浏览器页面和 Q 值展示；
 - `model_evaluations/README.md`：当前模型评估知识库入口、证据标签、阅读顺序和每轮更新要求；
-- `model_evaluations/COMPARISON_MATRIX.md`：3/4/5层分数基线、辅助动作完整配置、Reward V2与V2.1的30/120 FPS效果和原因假设对比；
+- `model_evaluations/COMPARISON_MATRIX.md`：3/4/5层与128M分数基线、辅助动作完整配置、Reward V2与V2.1的30/120 FPS效果和原因假设对比；
+- `model_evaluations/model-baseline-scale-v1-l5-fast-128m-r2.md`：五层Fast基线从24M续训至128M的完整迁移、尺度收益、双帧率效果和证据边界；
 - `model_evaluations/model-auxiliary-action-r1.md`：辅助动作完整配置首轮24M训练、4096局双帧率效果、辅助损失和高等级合成诊断；
 - `model_evaluations/model-auxiliary-action-rank-active-r3.md`：排名Top-4主动学习24M与续训34M的双帧率效果、迁移校验和后期净贡献实验建议；
 - `model_evaluations/model-auxiliary-action-single-step-branch-r4.md`：24M正常父轨迹与4M隔离单步旁路样本的完整迁移、双帧率效果和证据边界；
@@ -72,11 +73,13 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/47_启动单步旁路主动学习训练_2026_08_10.md`：记录RTX 5090部署、CUDA门禁、正式run身份、面板和首批稳定训练事实。
 - `codex/48_部署辅助旁路至128M基线自动接力_2026_08_10.md`：冻结五层Fast基线24M至128M续训配置，并部署当前旁路训练完成后的无人值守串行接力。
 - `codex/49_归档单步旁路主动学习训练_2026_08_10.md`：迁回24M父轨迹与4M旁路样本完整产物，核对归档、manifest、checkpoint和最终双帧率评估。
+- `codex/50_归档五层Fast基线128M续训_2026_08_10.md`：迁回五层Fast 128M续训完整产物，核对归档、checkpoint、最终评估与长训效果边界。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的
 实现依据。
 
 当前已实现第一版GNN-DQN基线、正式训练系统、5层传播扩容和第一版辅助动作学习。后续
-战略、计划、反事实和搜索模块继续按专项文档逐项验证，以辅助动作完整配置作为当前效果
-领先配置，以5层Fast `score_v1`模型作为简洁因果对照，同时保留4层模型作为速度与容量对照。
+战略、计划、反事实和搜索模块继续按专项文档逐项验证。五层Fast 128M作为当前绝对效果
+基准，辅助动作首轮作为24M预算效果基准；五层Fast 24M继续作为简洁因果对照，同时保留
+4层模型作为速度与容量对照。

@@ -19,7 +19,8 @@
 | `baseline-r1` | 游戏合成分数 | `0836ffd` | [`model-baseline-r1.md`](model-baseline-r1.md) | 3层历史基线，保留为容量对照 |
 | `baseline-scale-v1-l4-r1` | 游戏合成分数 | `f6edba2` | [`model-baseline-scale-v1-l4-r1.md`](model-baseline-scale-v1-l4-r1.md) | 30/120 FPS局均分提高14.10%/13.68%，保留为上一代效果基准 |
 | `baseline-scale-v1-l5-epsilon-r1` | 游戏合成分数 | `56c2e3d` | [`model-baseline-scale-v1-l5-epsilon-r1.md`](model-baseline-scale-v1-l5-epsilon-r1.md) | Fast在30/120 FPS达到4268.14/3897.29，成为当前效果基准；Slow未证明延长随机探索有效 |
-| `auxiliary-action-r1` | 游戏合成分数 + 实际动作辅助监督 | `feb10ec` | [`model-auxiliary-action-r1.md`](model-auxiliary-action-r1.md) | 完整配置在30/120 FPS达到4849.65/4476.35，成为当前效果领先配置；单模块因果仍待消融 |
+| `baseline-scale-v1-l5-fast-128m-r2` | 游戏合成分数，五层Fast从24M续训至128M | `fd65767` | [`model-baseline-scale-v1-l5-fast-128m-r2.md`](model-baseline-scale-v1-l5-fast-128m-r2.md) | 30/120 FPS达到5050.52/4794.81，成为绝对均分基准；高于辅助首轮但使用5.33倍transition且中位分更低 |
+| `auxiliary-action-r1` | 游戏合成分数 + 实际动作辅助监督 | `feb10ec` | [`model-auxiliary-action-r1.md`](model-auxiliary-action-r1.md) | 30/120 FPS达到4849.65/4476.35，仍是24M预算效果基准；单模块因果仍待消融 |
 | `auxiliary-action-epsilon18m-r2` | 同上，延长epsilon探索 + bonus影子诊断 | `0e9c1da` | [`model-auxiliary-action-epsilon18m-r2.md`](model-auxiliary-action-epsilon18m-r2.md) | 低于首轮5.42%/6.64%，但仍高于5层Fast 7.46%/7.23%；18M日程不升级为默认，下一对照优先bonus=2 |
 | `auxiliary-action-rank-active-r3` | 同上，排名Top-4主动学习；24M后续训至34M | `faa1377` / `c01cedb` | [`model-auxiliary-action-rank-active-r3.md`](model-auxiliary-action-rank-active-r3.md) | 34M相对自身24M提高6.32%/5.93%，但仍低于辅助首轮7.34%/6.54%；证明追加预算有效，不证明排名主动优于旧方案 |
 | `auxiliary-action-single-step-branch-r4` | 同上，24M父轨迹 + 4M隔离单步旁路样本 | `bdf04ae` | [`model-auxiliary-action-single-step-branch-r4.md`](model-auxiliary-action-single-step-branch-r4.md) | 30/120 FPS为4668.89/4347.91；低于辅助首轮3.73%/2.87%，但高于5层Fast 9.39%/11.56%，旁路框架保留但不升级为效果默认 |
@@ -75,5 +76,8 @@
   重建Replay；尚无“排名主动40%对主动关闭0%”的同checkpoint后期消融；
 - 单步旁路24M+4M已完成，但与辅助首轮同时改变父主动选择、环境数、旁路Replay和联合loss；
   尚无同父checkpoint的旁路loss 0%/20%成对消融，不能量化旁路数据的单独贡献；
+- 五层Fast从24M续训至128M后双帧率均分显著提高并超过辅助首轮，但只有一个训练seed，
+  恢复时Replay重新预热；它使用5.33倍transition且中位分仍低于辅助首轮，不能据此宣称
+  简洁基线具有更高样本效率或辅助动作无效；
 - 训练完成事件与最后一次资源采样仍发生在内部产物清单之后，使`monitoring.jsonl`和
   `resources.jsonl`比内部清单多一小段；外层迁移归档哈希已独立核对，不影响迁移完整性。
