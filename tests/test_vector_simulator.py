@@ -306,7 +306,7 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         self.assertEqual(int(active_level[0]), 3)
         self.assertEqual(int(simulator._event_count[0]), 3)
 
-    def test_merge_conserves_linear_and_angular_momentum(self):
+    def test_merge_initializes_zero_linear_and_angular_velocity(self):
         simulator = TensorVectorSimulator(
             1, config=self._config(), device='cpu'
         )
@@ -318,45 +318,16 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         simulator.angular_velocities[0, 0] = 2.0
         simulator.angular_velocities[0, 1] = -1.0
 
-        positions = simulator.positions[0, :2].clone()
-        velocities = simulator.velocities[0, :2].clone()
-        masses = simulator.masses[0, :2].clone()
-        inertias = simulator.inverse_inertias[0, :2].reciprocal()
-        midpoint = positions.mean(dim=0)
-        source_momenta = masses[:, None] * velocities
-        linear_before = source_momenta.sum(dim=0)
-        radii = positions - midpoint
-        angular_before = (
-            inertias * simulator.angular_velocities[0, :2]
-        ).sum() + (
-            radii[:, 0] * source_momenta[:, 1]
-            - radii[:, 1] * source_momenta[:, 0]
-        ).sum()
-
         simulator._resolve_merges(torch.tensor([True]))
 
         target_slot = int(torch.nonzero(
             simulator.active[0], as_tuple=False
         )[0])
-        linear_after = (
-            simulator.masses[0, target_slot]
-            * simulator.velocities[0, target_slot]
-        )
-        target_inertia = simulator.inverse_inertias[
-            0, target_slot
-        ].reciprocal()
-        angular_after = (
-            target_inertia
-            * simulator.angular_velocities[0, target_slot]
-        )
-        self.assertTrue(torch.allclose(
-            linear_after, linear_before, atol=1e-5, rtol=1e-5
+        self.assertTrue(torch.equal(
+            simulator.velocities[0, target_slot], torch.zeros(2)
         ))
-        self.assertTrue(torch.allclose(
-            angular_after, angular_before, atol=1e-4, rtol=1e-5
-        ))
-        self.assertGreater(
-            float(simulator.velocities[0, target_slot].norm()), 0.0
+        self.assertEqual(
+            float(simulator.angular_velocities[0, target_slot]), 0.0
         )
 
     def test_watermelons_score_and_disappear_without_target(self):
@@ -623,7 +594,7 @@ class CudaVectorSimulatorTest(unittest.TestCase):
         self.assertTrue((second.observation.fruit_count == 1).all().item())
         self.assertTrue((second.observation.max_level == 2).all().item())
 
-    def test_cuda_merge_inherits_linear_momentum(self):
+    def test_cuda_merge_initializes_zero_velocity(self):
         config = SimulatorConfig(
             board_width=560,
             board_height=1120,
@@ -647,21 +618,18 @@ class CudaVectorSimulatorTest(unittest.TestCase):
         result = simulator.step(torch.tensor([0], device='cuda'))
         torch.cuda.synchronize()
 
-        integrated_velocity = source_velocity.clone()
-        integrated_velocity[1] += config.gravity_y * config.dt
-        integrated_velocity *= config.damping ** config.dt
-        expected_velocity = integrated_velocity * (
-            2.0 * float(simulator._mass_table[1])
-            / float(simulator._mass_table[2])
-        )
         target_mask = result.observation.active[0] & (
             result.observation.levels[0] == 2
         )
         self.assertEqual(int(target_mask.sum()), 1)
         actual_velocity = result.observation.velocities[0][target_mask][0]
-        self.assertTrue(torch.allclose(
-            actual_velocity, expected_velocity, atol=1e-4, rtol=1e-5
+        actual_angular_velocity = result.observation.angular_velocities[
+            0
+        ][target_mask][0]
+        self.assertTrue(torch.equal(
+            actual_velocity, torch.zeros_like(actual_velocity)
         ))
+        self.assertEqual(float(actual_angular_velocity), 0.0)
 
     def test_cuda_masked_step_leaves_disabled_environments_unchanged(self):
         config = SimulatorConfig(
@@ -1049,7 +1017,7 @@ class PymunkReferenceGameTest(unittest.TestCase):
         self.assertIsNone(result.merge_events[0].new_level)
         self.assertIsNone(result.merge_events[0].new_fruit_id)
 
-    def test_reference_merge_conserves_total_momentum(self):
+    def test_reference_merge_initializes_zero_velocity(self):
         from daxigua.simulator.reference import PymunkReferenceGame
 
         game = PymunkReferenceGame(
@@ -1062,45 +1030,15 @@ class PymunkReferenceGameTest(unittest.TestCase):
         shape_b.body.velocity = -6.0, 10.0
         shape_a.body.angular_velocity = 2.0
         shape_b.body.angular_velocity = -1.0
-        midpoint = (160.0, 220.0)
-        linear_before = (
-            shape_a.body.mass * shape_a.body.velocity
-            + shape_b.body.mass * shape_b.body.velocity
-        )
-        angular_before = (
-            shape_a.body.moment * shape_a.body.angular_velocity
-            + shape_b.body.moment * shape_b.body.angular_velocity
-            + (shape_a.body.position.x - midpoint[0])
-            * shape_a.body.mass * shape_a.body.velocity.y
-            - (shape_a.body.position.y - midpoint[1])
-            * shape_a.body.mass * shape_a.body.velocity.x
-            + (shape_b.body.position.x - midpoint[0])
-            * shape_b.body.mass * shape_b.body.velocity.y
-            - (shape_b.body.position.y - midpoint[1])
-            * shape_b.body.mass * shape_b.body.velocity.x
-        )
-
         game._handle_merge(type('Arbiter', (), {
             'shapes': (shape_a, shape_b)
         })())
 
         self.assertEqual(len(game.balls), 1)
         new_body = game.balls[0].body
-        self.assertAlmostEqual(
-            new_body.mass * new_body.velocity.x,
-            linear_before.x,
-            places=5,
-        )
-        self.assertAlmostEqual(
-            new_body.mass * new_body.velocity.y,
-            linear_before.y,
-            places=5,
-        )
-        self.assertAlmostEqual(
-            new_body.moment * new_body.angular_velocity,
-            angular_before,
-            places=4,
-        )
+        self.assertEqual(float(new_body.velocity.x), 0.0)
+        self.assertEqual(float(new_body.velocity.y), 0.0)
+        self.assertEqual(float(new_body.angular_velocity), 0.0)
 
 
 if __name__ == '__main__':

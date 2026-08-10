@@ -205,40 +205,6 @@ class PymunkReferenceGame:
                 return
             position = merge_position(shape_a.body.position, shape_b.body.position)
             source_ids = (meta_a.fruit_id, meta_b.fruit_id)
-            body_a = shape_a.body
-            body_b = shape_b.body
-            momentum_x = (
-                body_a.mass * body_a.velocity.x
-                + body_b.mass * body_b.velocity.x
-            )
-            momentum_y = (
-                body_a.mass * body_a.velocity.y
-                + body_b.mass * body_b.velocity.y
-            )
-            radius_a = (
-                body_a.position.x - position[0],
-                body_a.position.y - position[1],
-            )
-            radius_b = (
-                body_b.position.x - position[0],
-                body_b.position.y - position[1],
-            )
-            linear_momentum_a = (
-                body_a.mass * body_a.velocity.x,
-                body_a.mass * body_a.velocity.y,
-            )
-            linear_momentum_b = (
-                body_b.mass * body_b.velocity.x,
-                body_b.mass * body_b.velocity.y,
-            )
-            angular_momentum = (
-                body_a.moment * body_a.angular_velocity
-                + body_b.moment * body_b.angular_velocity
-                + radius_a[0] * linear_momentum_a[1]
-                - radius_a[1] * linear_momentum_a[0]
-                + radius_b[0] * linear_momentum_b[1]
-                - radius_b[1] * linear_momentum_b[0]
-            )
             self._remove_ball(shape_a)
             self._remove_ball(shape_b)
             target_level = merge_target_level(source_level)
@@ -249,13 +215,8 @@ class PymunkReferenceGame:
                     target_level,
                     physics_radius=merged_fruit_physics_radius(target_level),
                 )
-                new_ball.body.velocity = (
-                    momentum_x / new_ball.body.mass,
-                    momentum_y / new_ball.body.mass,
-                )
-                new_ball.body.angular_velocity = (
-                    angular_momentum / new_ball.body.moment
-                )
+                new_ball.body.velocity = (0.0, 0.0)
+                new_ball.body.angular_velocity = 0.0
                 new_fruit_id = self._fruit_meta[id(new_ball)].fruit_id
             score_delta = merge_score(source_level)
             self.last_score = self.score

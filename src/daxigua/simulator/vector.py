@@ -913,54 +913,6 @@ class TensorVectorSimulator:
         midpoint = 0.5 * (
             self.positions[:, pair_i] + self.positions[:, pair_j]
         )
-        source_mass_i = self.masses[:, pair_i]
-        source_mass_j = self.masses[:, pair_j]
-        source_velocity_i = self.velocities[:, pair_i]
-        source_velocity_j = self.velocities[:, pair_j]
-        pair_target_radius = torch.where(
-            normal_merge,
-            self._merged_radii[target_level],
-            torch.ones_like(source_mass_i),
-        )
-        pair_target_mass = torch.where(
-            normal_merge,
-            self._mass_table[target_level],
-            torch.ones_like(source_mass_i),
-        ).clamp_min(1e-12)
-        pair_target_inertia = (
-            0.5 * pair_target_mass * pair_target_radius.square()
-        ).clamp_min(1e-12)
-        pair_linear_momentum = (
-            source_mass_i.unsqueeze(-1) * source_velocity_i
-            + source_mass_j.unsqueeze(-1) * source_velocity_j
-        )
-        pair_target_velocity = (
-            pair_linear_momentum / pair_target_mass.unsqueeze(-1)
-        )
-        radius_i = self.positions[:, pair_i] - midpoint
-        radius_j = self.positions[:, pair_j] - midpoint
-        momentum_i = source_mass_i.unsqueeze(-1) * source_velocity_i
-        momentum_j = source_mass_j.unsqueeze(-1) * source_velocity_j
-        orbital_angular_momentum = (
-            radius_i[..., 0] * momentum_i[..., 1]
-            - radius_i[..., 1] * momentum_i[..., 0]
-            + radius_j[..., 0] * momentum_j[..., 1]
-            - radius_j[..., 1] * momentum_j[..., 0]
-        )
-        source_inertia_i = self.inverse_inertias[
-            :, pair_i
-        ].clamp_min(1e-12).reciprocal()
-        source_inertia_j = self.inverse_inertias[
-            :, pair_j
-        ].clamp_min(1e-12).reciprocal()
-        pair_angular_momentum = (
-            source_inertia_i * self.angular_velocities[:, pair_i]
-            + source_inertia_j * self.angular_velocities[:, pair_j]
-            + orbital_angular_momentum
-        )
-        pair_target_angular_velocity = (
-            pair_angular_momentum / pair_target_inertia
-        )
         source_ids = torch.stack(
             (self.fruit_ids[:, pair_i], self.fruit_ids[:, pair_j]),
             dim=-1,
@@ -1062,15 +1014,9 @@ class TensorVectorSimulator:
         slot_position = self._scatter_selected_vectors(
             normal_merge, pair_i, midpoint
         )
-        slot_velocity = self._scatter_selected_vectors(
-            normal_merge, pair_i, pair_target_velocity
-        )
-        slot_angular_velocity = self._scatter_selected_scalars(
-            normal_merge,
-            pair_i,
-            pair_target_angular_velocity,
-            self.float_dtype,
-        )
+        # 规则：合成水果在创建瞬间不继承来源水果的线速度或角速度。
+        slot_velocity = torch.zeros_like(self.velocities)
+        slot_angular_velocity = torch.zeros_like(self.angular_velocities)
 
         self.active &= ~deactivate
         inactive_vector = deactivate.unsqueeze(-1)

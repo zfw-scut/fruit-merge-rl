@@ -889,34 +889,11 @@ __global__ void vector_step_kernel(
         int64_t delta_score = merge_scores[source_level];
         int64_t target_level = source_level < 11 ? source_level + 1 : 0;
         int64_t new_id = target_level > 0 ? next_fruit_id[env]++ : 0;
-        Vec2 inherited_velocity = {0.0f, 0.0f};
-        float inherited_angular_velocity = 0.0f;
         float new_radius = 0.0f;
         float new_mass = 1.0f;
         if (target_level > 0) {
-          Vec2 position_i = state.position(slot_i);
-          Vec2 position_j = state.position(slot_j);
-          Vec2 velocity_i = state.velocity(slot_i);
-          Vec2 velocity_j = state.velocity(slot_j);
-          float mass_i = masses[index_i];
-          float mass_j = masses[index_j];
           new_radius = merged_radii[target_level];
           new_mass = mass_table[target_level];
-          Vec2 momentum_i = mul(velocity_i, mass_i);
-          Vec2 momentum_j = mul(velocity_j, mass_j);
-          inherited_velocity = mul(
-              add(momentum_i, momentum_j), 1.0f / new_mass);
-          float inertia_i =
-              1.0f / fmaxf(inverse_inertias[index_i], 1e-12f);
-          float inertia_j =
-              1.0f / fmaxf(inverse_inertias[index_j], 1e-12f);
-          float angular_momentum =
-              inertia_i * angular_velocities[index_i]
-              + inertia_j * angular_velocities[index_j]
-              + cross(sub(position_i, midpoint), momentum_i)
-              + cross(sub(position_j, midpoint), momentum_j);
-          float new_inertia = 0.5f * new_mass * new_radius * new_radius;
-          inherited_angular_velocity = angular_momentum / new_inertia;
         }
 
         int event_index = event_base + static_cast<int>(event_count[env]);
@@ -961,9 +938,10 @@ __global__ void vector_step_kernel(
           fruit_ids[index_i] = new_id;
           age_frames[index_i] = 0;
           state.set_position(slot_i, midpoint);
-          state.set_velocity(slot_i, inherited_velocity);
+          // Merged fruits start at rest; later substeps may accelerate them.
+          state.set_velocity(slot_i, {0.0f, 0.0f});
           angles[index_i] = 0.0f;
-          angular_velocities[index_i] = inherited_angular_velocity;
+          angular_velocities[index_i] = 0.0f;
           physics_radii[index_i] = new_radius;
           masses[index_i] = new_mass;
           inverse_masses[index_i] = 1.0f / new_mass;
