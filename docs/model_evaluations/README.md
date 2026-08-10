@@ -22,6 +22,7 @@
 | `auxiliary-action-r1` | 游戏合成分数 + 实际动作辅助监督 | `feb10ec` | [`model-auxiliary-action-r1.md`](model-auxiliary-action-r1.md) | 完整配置在30/120 FPS达到4849.65/4476.35，成为当前效果领先配置；单模块因果仍待消融 |
 | `auxiliary-action-epsilon18m-r2` | 同上，延长epsilon探索 + bonus影子诊断 | `0e9c1da` | [`model-auxiliary-action-epsilon18m-r2.md`](model-auxiliary-action-epsilon18m-r2.md) | 低于首轮5.42%/6.64%，但仍高于5层Fast 7.46%/7.23%；18M日程不升级为默认，下一对照优先bonus=2 |
 | `auxiliary-action-rank-active-r3` | 同上，排名Top-4主动学习；24M后续训至34M | `faa1377` / `c01cedb` | [`model-auxiliary-action-rank-active-r3.md`](model-auxiliary-action-rank-active-r3.md) | 34M相对自身24M提高6.32%/5.93%，但仍低于辅助首轮7.34%/6.54%；证明追加预算有效，不证明排名主动优于旧方案 |
+| `auxiliary-action-single-step-branch-r4` | 同上，24M父轨迹 + 4M隔离单步旁路样本 | `bdf04ae` | [`model-auxiliary-action-single-step-branch-r4.md`](model-auxiliary-action-single-step-branch-r4.md) | 30/120 FPS为4668.89/4347.91；低于辅助首轮3.73%/2.87%，但高于5层Fast 9.39%/11.56%，旁路框架保留但不升级为效果默认 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
 | `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线；墙边投放增加属于常见策略，不能单独判为缺陷 |
 
@@ -72,5 +73,7 @@
   当前不采用18M为默认，但仍需第二训练seed判断该差异能否跨训练随机性复现；
 - 排名Top-4主动学习24M结果偏低，续训到34M后双帧率均提高，但只有一个训练seed且续训
   重建Replay；尚无“排名主动40%对主动关闭0%”的同checkpoint后期消融；
+- 单步旁路24M+4M已完成，但与辅助首轮同时改变父主动选择、环境数、旁路Replay和联合loss；
+  尚无同父checkpoint的旁路loss 0%/20%成对消融，不能量化旁路数据的单独贡献；
 - 训练完成事件与最后一次资源采样仍发生在内部产物清单之后，使`monitoring.jsonl`和
   `resources.jsonl`比内部清单多一小段；外层迁移归档哈希已独立核对，不影响迁移完整性。

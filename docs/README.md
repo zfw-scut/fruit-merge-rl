@@ -21,6 +21,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model_evaluations/COMPARISON_MATRIX.md`：3/4/5层分数基线、辅助动作完整配置、Reward V2与V2.1的30/120 FPS效果和原因假设对比；
 - `model_evaluations/model-auxiliary-action-r1.md`：辅助动作完整配置首轮24M训练、4096局双帧率效果、辅助损失和高等级合成诊断；
 - `model_evaluations/model-auxiliary-action-rank-active-r3.md`：排名Top-4主动学习24M与续训34M的双帧率效果、迁移校验和后期净贡献实验建议；
+- `model_evaluations/model-auxiliary-action-single-step-branch-r4.md`：24M正常父轨迹与4M隔离单步旁路样本的完整迁移、双帧率效果和证据边界；
 - `SCENARIO_LAB.md`：鼠标交互式自定义场景、真实21动作物理评估、Reward V2覆盖层和JSON契约；
 - `codex/RULES.md`：较大修改的记录规则；
 - `codex/01_建立accelerated_v1最小基线_2026_08_01.md`：本分支首个结构记录；
@@ -70,6 +71,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/46_实现单步旁路主动学习_2026_08_10.md`：完整保留24M父训练，以GPU单步克隆生成4M隔离主动样本并限制联合训练贡献。
 - `codex/47_启动单步旁路主动学习训练_2026_08_10.md`：记录RTX 5090部署、CUDA门禁、正式run身份、面板和首批稳定训练事实。
 - `codex/48_部署辅助旁路至128M基线自动接力_2026_08_10.md`：冻结五层Fast基线24M至128M续训配置，并部署当前旁路训练完成后的无人值守串行接力。
+- `codex/49_归档单步旁路主动学习训练_2026_08_10.md`：迁回24M父轨迹与4M旁路样本完整产物，核对归档、manifest、checkpoint和最终双帧率评估。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的
