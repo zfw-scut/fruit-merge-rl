@@ -1,6 +1,6 @@
 # 自定义场景实验室
 
-- 状态：持续实时物理、暂停场景编辑、Reward V2.1 奖励可视化、模型单次推理与持续决策已接通
+- 状态：持续实时物理、暂停场景编辑、Reward V2.1 奖励可视化、模型单次推理、辅助动作预测对照与持续决策已接通
 - 用途：像游戏一样连续投放水果，也可暂停构造极端局面，并在任一状态快照上并行比较21个动作
 - 入口：`tools/open_scenario_lab.py`
 
@@ -24,6 +24,9 @@
 - 服务端使用训练同源的物理和 Reward V2.1 公式，浏览器不计算演示奖励。
 - 可加载任一兼容 GNN-DQN checkpoint，对任意手工场景只读输出21个动作的 Q 值、首选投放点与推理耗时；
 - 同一场景执行奖励评估后，会直接显示模型首选动作的真实空间奖励和 Reward V2.1 最优动作，模型推理不会自动投放或修改场景。
+- 带辅助动作头的 checkpoint 会一次返回21个动作的效果预测；切换动作时无需再次推理，可先查看首次接触、前三次新水果和q0最终后代的位置，再执行真实物理进行对照；
+- 真实评估为每个动作返回与训练监督同语义的物理事实，并显示首次接触位置误差、合成次数、新水果数、q0最终等级和得分增量；
+- 顶部主页面只保留模型评估、持续决策、执行验证和动作切换等常用操作；预测/真实图层、误差线、法向量、概率明细等低频选项统一放在齿轮设置页，并保存在浏览器本地设置中；
 - 可从任意手工场景启动模型持续决策：连续稳定后 greedy 推理、真实投放、再次等待稳定并循环；
 - 持续模式会自然推进 q0～q3，允许暂停/恢复；停止后保留当前局面，不自动重置。
 
@@ -56,9 +59,17 @@ Windows 11 Fluent 方向；危险、重叠和后端未连接使用不同层级�
 不进入训练 Replay 或训练热路径。
 
 前端点击“评估模型倾向”时，将同一状态快照提交给 `/api/model/evaluate`。后端根据
-checkpoint 内冻结的 `ModelConfig` 重建 GNN-DQN，并返回 A0～A20 的 Q 值。手工场景
+checkpoint 内冻结的 `ModelConfig` 重建 GNN-DQN，并返回 A0～A20 的 Q 值。若
+`action_effect_enabled=true`，同一次共享编码还会返回全部21个动作的辅助效果预测；
+前端把训练标签使用的归一化坐标、速度、时间和分数恢复为像素与物理单位。手工场景
 没有持续越线帧数，因此模型输入中的 `danger_progress` 固定为0，但仍会根据水果位置提供
 `over_danger_line`。该接口只做一次 greedy 推理，不推进物理，也不改变实时世界。
+
+`/api/evaluate` 的 `format_version=4`。每个动作除原有空间奖励和投放后水果外，还包含
+`action_effect`：实际合成、q0谱系、首次接触、前三次全局新水果和结局事实。该字段直接来自
+已开启 `track_action_effects` 的21环境物理评估，不根据模型预测反推；因此预测与真实可以
+独立显示。画布颜色约定为：蓝色虚线为预测首次接触、绿色为真实首次接触、紫/橙分别为
+预测/真实新水果、青/黄分别为预测/真实q0最终后代，黄色虚线连接位置误差。
 
 “启动模型持续决策”通过 `/api/model/control` 开关独立控制线程。控制器使用实时状态中的
 真实 `danger_progress`，并要求局面按60 Hz发布状态连续稳定8次（等价约0.125秒）后才
@@ -76,7 +87,7 @@ checkpoint 内冻结的 `ModelConfig` 重建 GNN-DQN，并返回 A0～A20 的 Q 
 ```powershell
 $env:PYTHONPATH = 'src'
 & $python tools\open_scenario_lab.py --serve --device cuda `
-    --checkpoint runs\cloud_rtx5090_reward_v2_8235ef9_seed20260805_16m_90m\checkpoints\best.pt `
+    --checkpoint runs\cloud_rtx5090_auxiliary_action_feb10ec_seed20260809_24m\checkpoints\final.pt `
     --model-device cuda --open
 ```
 
@@ -84,3 +95,7 @@ $env:PYTHONPATH = 'src'
 实时物理和空间奖励仍可使用，但模型倾向按钮会禁用。`--port 0` 会自动选择空闲端口。不传
 `--serve` 时只在 `recordings/scenario-lab/index.html` 生成自包含页面，便于编辑、导出
 或归档视觉版本；离线页面不会产生评估结果。
+
+旧 checkpoint 仍可加载和查看 Q 值；若其 `action_effect_enabled=false`，辅助动作区域会
+明确显示“当前模型没有辅助动作头”，不会伪造预测数据。位置误差用于单场景直观诊断，
+不能替代固定评估集上的总体准确率、分位数或校准指标。

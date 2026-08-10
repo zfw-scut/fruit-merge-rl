@@ -135,6 +135,7 @@ def _simulator_config(fps, *, device):
         'action_count': 21,
         'queue_length': 4,
         'use_cuda_extension': torch.device(device).type == 'cuda',
+        'track_action_effects': True,
     }
     if fps == 30:
         return SimulatorConfig.training_fast(**common)
@@ -237,6 +238,176 @@ def _result_fruits(observation, env_index):
     return fruits
 
 
+_CONTACT_NAMES = ('floor', 'left_wall', 'right_wall', 'fruit')
+_PRIMARY_CONTACT_NAMES = ('none', *_CONTACT_NAMES)
+
+
+def _action_effect_facts(
+        scene,
+        observation,
+        effects,
+        merge_events,
+        env_index,
+        *,
+        score_delta,
+        stable,
+        settle_timeout,
+        done,
+        truncated,
+        frames_simulated):
+    """把真实物理事件整理为与模型预测相同的展示语义。"""
+
+    contact_age_frames = int(
+        effects.first_contact_age_frames[env_index].item()
+    )
+    contact_valid = contact_age_frames >= 0
+    contact_mask = int(
+        effects.first_contact_type_mask[env_index].item()
+    )
+    primary_index = int(
+        effects.first_contact_primary_type[env_index].item()
+    )
+    final_slot = int(effects.q0_final_slot[env_index].item())
+    final_exists = (
+        final_slot >= 0
+        and bool(observation.active[env_index, final_slot].item())
+    )
+    final = None
+    if final_exists:
+        final = {
+            'x': round(float(
+                observation.positions[env_index, final_slot, 0]
+            ), 3),
+            'y': round(float(
+                observation.positions[env_index, final_slot, 1]
+            ), 3),
+            'vx': round(float(
+                observation.velocities[env_index, final_slot, 0]
+            ), 3),
+            'vy': round(float(
+                observation.velocities[env_index, final_slot, 1]
+            ), 3),
+            'angular_velocity': round(float(
+                observation.angular_velocities[env_index, final_slot]
+            ), 3),
+        }
+
+    event_count = int(merge_events.count[env_index].item())
+    generations = []
+    for event_index in range(event_count):
+        level = int(
+            merge_events.new_levels[env_index, event_index].item()
+        )
+        if level <= 0:
+            continue
+        generations.append({
+            'rank': len(generations) + 1,
+            'exists': True,
+            'position': {
+                'x': round(float(
+                    merge_events.positions[env_index, event_index, 0]
+                ), 3),
+                'y': round(float(
+                    merge_events.positions[env_index, event_index, 1]
+                ), 3),
+            },
+            'level': level,
+        })
+        if len(generations) == 3:
+            break
+    while len(generations) < 3:
+        generations.append({
+            'rank': len(generations) + 1,
+            'exists': False,
+            'position': None,
+            'level': 0,
+        })
+
+    position = effects.first_contact_position[env_index]
+    normal = effects.first_contact_normal[env_index]
+    result_count = int(observation.active[env_index].sum().item())
+    return {
+        'merge': {
+            'happened': event_count > 0,
+            'count': min(event_count, 8),
+        },
+        'q0': {
+            'participated': bool(
+                effects.q0_participated[env_index].item()
+            ),
+            'lineage_depth': int(
+                effects.q0_lineage_depth[env_index].item()
+            ),
+            'final_level': int(
+                effects.q0_final_level[env_index].item()
+            ),
+            'final_exists': final_exists,
+            'final': final,
+        },
+        'first_contact': {
+            'valid': contact_valid,
+            'types': {
+                name: bool(contact_mask & (1 << index))
+                for index, name in enumerate(_CONTACT_NAMES)
+            },
+            'primary': (
+                _PRIMARY_CONTACT_NAMES[primary_index]
+                if 0 <= primary_index < len(_PRIMARY_CONTACT_NAMES)
+                else 'none'
+            ),
+            'position': (
+                {
+                    'x': round(float(position[0]), 3),
+                    'y': round(float(position[1]), 3),
+                }
+                if contact_valid else None
+            ),
+            'level_delta': (
+                int(effects.first_contact_level_delta[env_index].item())
+                if contact_valid and primary_index == 4 else None
+            ),
+            'normal': (
+                {
+                    'x': round(float(normal[0]), 4),
+                    'y': round(float(normal[1]), 4),
+                }
+                if contact_valid else None
+            ),
+            'age_seconds': (
+                round(contact_age_frames / max(float(scene['fps']), 1.0), 4)
+                if contact_valid else None
+            ),
+            'normal_speed': (
+                round(float(
+                    effects.first_contact_normal_speed[env_index]
+                ), 3)
+                if contact_valid else None
+            ),
+        },
+        'generations': generations,
+        'outcome': {
+            'score_delta': int(score_delta[env_index].item()),
+            'fruit_count_delta': result_count - len(scene['fruits']),
+            'stable': bool(stable[env_index].item()),
+            'settle_timeout': bool(
+                settle_timeout[env_index].item()
+            ),
+            'terminal': bool(
+                done[env_index].item() or truncated[env_index].item()
+            ),
+            'settle_duration_seconds': round(
+                int(frames_simulated[env_index].item())
+                / max(float(scene['fps']), 1.0),
+                4,
+            ),
+            'danger_delta': None,
+            'over_danger_line': bool(
+                observation.over_danger_line[env_index].item()
+            ),
+        },
+    }
+
+
 class ScenarioLabEvaluator:
     """复用21环境模拟器，串行处理浏览器场景评估请求。"""
 
@@ -314,6 +485,20 @@ class ScenarioLabEvaluator:
         stable = result.physics.stable.detach().cpu()
         settle_timeout = result.physics.settle_timeout.detach().cpu()
         frames_simulated = result.physics.frames_simulated.detach().cpu()
+        done = result.physics.done.detach().cpu()
+        truncated = result.physics.truncated.detach().cpu()
+        effects = result.physics.action_effects
+        if effects is None:
+            raise RuntimeError('scenario action-effect tracking is disabled')
+        effects_cpu = type(effects)(**{
+            field_name: getattr(effects, field_name).detach().cpu()
+            for field_name in effects.__dataclass_fields__
+        })
+        merge_events = result.physics.merge_events
+        merge_events_cpu = type(merge_events)(**{
+            field_name: getattr(merge_events, field_name).detach().cpu()
+            for field_name in merge_events.__dataclass_fields__
+        })
         observation = result.observation
         observation_cpu = type(observation)(**{
             field_name: getattr(observation, field_name).detach().cpu()
@@ -387,6 +572,19 @@ class ScenarioLabEvaluator:
                 'stable': bool(stable[action_index]),
                 'settle_timeout': bool(settle_timeout[action_index]),
                 'frames_simulated': int(frames_simulated[action_index]),
+                'action_effect': _action_effect_facts(
+                    scene,
+                    observation_cpu,
+                    effects_cpu,
+                    merge_events_cpu,
+                    action_index,
+                    score_delta=score_delta,
+                    stable=stable,
+                    settle_timeout=settle_timeout,
+                    done=done,
+                    truncated=truncated,
+                    frames_simulated=frames_simulated,
+                ),
                 'space_slots': slots,
                 'result_fruits': _result_fruits(observation_cpu, action_index),
             })
@@ -397,7 +595,7 @@ class ScenarioLabEvaluator:
             scene['probe_action'] if mode == 'probe' else best_action
         )
         return {
-            'format_version': 3,
+            'format_version': 4,
             'reward_version': 'spatial_v2_1',
             'reward_scale': self.reward_config.reward_scale,
             'physics_fps': scene['fps'],

@@ -12,6 +12,7 @@ from daxigua.core import fruit_radius
 from daxigua.simulator.config import SimulatorConfig
 from daxigua.simulator.scenario_lab_service import validate_scenario
 
+from .action_effect_view import serialize_action_effect_predictions
 from .observations import TensorState
 from .viewer import LoadedViewerModel
 
@@ -142,6 +143,9 @@ class ScenarioModelEvaluator:
             'checkpoint_sha256': self.loaded.checkpoint_sha256[:12],
             'device': str(self.loaded.device),
             'training_transitions': transitions,
+            'action_effect_available': bool(
+                self.loaded.model_config.action_effect_enabled
+            ),
         }
 
     @torch.inference_mode()
@@ -166,7 +170,14 @@ class ScenarioModelEvaluator:
             if self.device.type == 'cuda':
                 torch.cuda.synchronize(self.device)
             started = time.perf_counter()
-            q_values = self.loaded.model(state)[0].float()
+            output = self.loaded.model(
+                state,
+                return_details=True,
+                predict_action_effects=bool(
+                    self.loaded.model_config.action_effect_enabled
+                ),
+            )
+            q_values = output.q_values[0].float()
             if self.device.type == 'cuda':
                 torch.cuda.synchronize(self.device)
             inference_ms = (time.perf_counter() - started) * 1000.0
@@ -177,8 +188,21 @@ class ScenarioModelEvaluator:
         action = int(q_cpu.argmax().item())
         queue = list(scene['queue'])
         values = [round(float(value), 6) for value in q_cpu.tolist()]
+        geometry = (
+            SimulatorConfig.training_fast()
+            if scene['fps'] == 30
+            else SimulatorConfig.high_fidelity_fast()
+        )
+        action_effect_predictions = serialize_action_effect_predictions(
+            output.action_effects,
+            board_width=geometry.board_width,
+            board_height=geometry.board_height,
+            gravity_y=geometry.gravity_y,
+            max_physics_frames=geometry.max_physics_frames,
+            physics_fps=scene['fps'],
+        )
         return {
-            'format_version': 1,
+            'format_version': 2,
             'policy': 'greedy',
             'action': action,
             'drop_x': round(_drop_x(
@@ -192,6 +216,7 @@ class ScenarioModelEvaluator:
             'over_danger_line': bool(state.over_danger_line[0].item()),
             'danger_progress': round(danger_progress, 6),
             'q_values': values,
+            'action_effect_predictions': action_effect_predictions,
             'selected_q': round(float(q_cpu[action]), 6),
             'q_min': round(float(q_cpu.min()), 6),
             'q_mean': round(float(q_cpu.mean()), 6),

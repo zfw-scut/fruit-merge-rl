@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.request import Request, urlopen
 
+import torch
+
 from daxigua.simulator.scenario_lab import fruit_specs, write_scenario_lab_html
 from daxigua.simulator.scenario_lab_service import (
     ScenarioLabEvaluator,
@@ -15,6 +17,10 @@ from daxigua.simulator.scenario_lab_web import render_scenario_lab_document
 from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
 from daxigua.simulator.scenario_lab_server import ScenarioLabServer
 from daxigua.rl.scenario_model_controller import ScenarioModelController
+from daxigua.rl.config import ModelConfig
+from daxigua.rl.model import BaselineGnnDqn
+from daxigua.rl.scenario_model_evaluator import ScenarioModelEvaluator
+from daxigua.rl.viewer import LoadedViewerModel
 
 
 class ScenarioLabFrontendTests(unittest.TestCase):
@@ -38,6 +44,12 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('评估当前场景的模型倾向', html)
         self.assertIn('启动模型持续决策', html)
         self.assertIn('model-action-results', html)
+        self.assertIn('id="settings-page"', html)
+        self.assertIn('data-view-setting="showPrediction"', html)
+        self.assertIn('data-effect-view="both"', html)
+        self.assertIn('drawActionEffectOverlay', html)
+        self.assertIn('renderEffectComparison', html)
+        self.assertIn('执行并验证 21 个动作', html)
         self.assertIn('new EventSource', html)
         self.assertIn('dropPreviews', html)
         self.assertIn('interpolateLiveFruits', html)
@@ -90,6 +102,47 @@ class ScenarioLabFrontendTests(unittest.TestCase):
 
 
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_model_evaluator_returns_all_action_effect_predictions(self):
+        config = ModelConfig(
+            hidden_dim=32,
+            edge_hidden_dim=32,
+            message_layers=1,
+            queue_hidden_dim=16,
+            queue_layers=1,
+            level_embedding_dim=8,
+            max_neighbors=4,
+            nearest_neighbors=2,
+            motion_neighbors=1,
+            vertical_neighbors_per_direction=1,
+            action_key_fruits=2,
+            action_effect_enabled=True,
+        )
+        model = BaselineGnnDqn(config)
+        loaded = LoadedViewerModel(
+            checkpoint_path=Path('synthetic.pt'),
+            checkpoint_sha256='a' * 64,
+            model=model.eval(),
+            model_config=config,
+            progress={'transitions': 123},
+            device=torch.device('cpu'),
+        )
+
+        payload = ScenarioModelEvaluator(loaded).evaluate({
+            'name': '辅助预测契约',
+            'fps': 120,
+            'queue': [1, 2, 3, 4],
+            'probe_action': 10,
+            'fruits': [],
+        })
+
+        self.assertEqual(2, payload['format_version'])
+        self.assertTrue(payload['model']['action_effect_available'])
+        self.assertEqual(21, len(payload['action_effect_predictions']))
+        prediction = payload['action_effect_predictions'][10]
+        self.assertIn('first_contact', prediction)
+        self.assertEqual(3, len(prediction['generations']))
+        self.assertIn('final', prediction['q0'])
+
     def test_model_http_api_exposes_read_only_policy_evaluation(self):
         class FakeModelEvaluator:
             identity = {
@@ -371,7 +424,7 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             'fruits': [],
         }, mode='probe')
 
-        self.assertEqual(3, payload['format_version'])
+        self.assertEqual(4, payload['format_version'])
         self.assertEqual('spatial_v2_1', payload['reward_version'])
         self.assertEqual(21, len(payload['actions']))
         self.assertEqual(6, payload['selected_action'])
@@ -383,6 +436,13 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             max(action['reward'] for action in payload['actions']), 1e-6
         )
         self.assertTrue(payload['actions'][6]['result_fruits'])
+        effect = payload['actions'][6]['action_effect']
+        self.assertEqual('floor', effect['first_contact']['primary'])
+        self.assertTrue(effect['first_contact']['valid'])
+        self.assertIn('q0', effect)
+        self.assertIn('generations', effect)
+        self.assertEqual(3, len(effect['generations']))
+        self.assertIn('settle_duration_seconds', effect['outcome'])
 
 
 if __name__ == '__main__':
