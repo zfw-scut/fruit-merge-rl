@@ -34,21 +34,28 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('场景实验室', html)
         self.assertIn('Reward V2', html)
         self.assertIn('id="board"', html)
-        self.assertIn('评估 21 个动作', html)
+        self.assertIn('执行并验证 21 个动作', html)
         self.assertIn('daxigua:scenario-request', html)
         self.assertIn('/api/evaluate', html)
         self.assertIn('/api/live/command', html)
         self.assertIn('/api/live/events', html)
         self.assertIn('/api/model/evaluate', html)
         self.assertIn('/api/model/control', html)
-        self.assertIn('评估当前场景的模型倾向', html)
+        self.assertIn('刷新当前场景预测', html)
         self.assertIn('启动模型持续决策', html)
         self.assertIn('model-action-results', html)
         self.assertIn('id="settings-page"', html)
         self.assertIn('data-view-setting="showPrediction"', html)
+        self.assertIn('data-view-setting="realtimePrediction"', html)
+        self.assertIn('data-view-setting="showSpaceEvaluation"', html)
+        self.assertIn('data-view-setting="showAnchors"', html)
         self.assertIn('data-effect-view="both"', html)
         self.assertIn('drawActionEffectOverlay', html)
         self.assertIn('renderEffectComparison', html)
+        self.assertIn('scheduleRealtimePrediction', html)
+        self.assertIn('selectModelAction:false', html)
+        self.assertIn('const requestedAction=Number(evaluationScene.probe_action)', html)
+        self.assertIn('id="space-summary-section" class="section" hidden', html)
         self.assertIn('执行并验证 21 个动作', html)
         self.assertIn('new EventSource', html)
         self.assertIn('dropPreviews', html)
@@ -72,13 +79,17 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertIn('evaluationViewFruits', html)
         self.assertIn('result_fruits', html)
         self.assertIn('applyEvaluation(payload,detail.scene)', html)
-        self.assertIn("if(activeSideTab!=='result')return", html)
+        self.assertIn(
+            "if(!viewSettings.showSpaceEvaluation||activeSideTab!=='result')return",
+            html,
+        )
         self.assertNotIn(
             "if(backendConnected&&!state.livePaused)return;const action=activeResult()",
             html,
         )
         self.assertNotIn('回放轨迹', html)
         self.assertNotIn('文件(F)', html)
+        self.assertNotIn('id="show-anchors"', html)
 
     def test_fruit_specs_follow_all_stable_levels(self):
         specs = fruit_specs()
