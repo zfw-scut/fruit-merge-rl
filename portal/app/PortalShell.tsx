@@ -10,12 +10,12 @@ import {
   BookOpenText,
   CheckCircle2,
   ChevronRight,
-  CircleGauge,
   Command,
   Cpu,
   Database,
   ExternalLink,
   FileText,
+  FlaskConical,
   Gauge,
   Layers3,
   LayoutDashboard,
@@ -27,7 +27,6 @@ import {
   Settings2,
   Sparkles,
   Square,
-  Timer,
   Wrench,
   X,
   type LucideIcon,
@@ -38,10 +37,17 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { EChart } from "./EChart";
 import { CURRENT_TRAINING, MODELS, type ModelRecord } from "./model-data";
+import { ScenarioWorkspace } from "./ScenarioWorkspace";
+import { TrainingWorkspace, type DashboardStatus } from "./TrainingWorkspace";
 
-const API = "http://127.0.0.1:4312";
+const API = (() => {
+  if (typeof window === "undefined") return "http://127.0.0.1:4312";
+  const requestedPort = Number(new URLSearchParams(window.location.search).get("api"));
+  const port = Number.isInteger(requestedPort) && requestedPort >= 1024 && requestedPort <= 65535 ? requestedPort : 4312;
+  return `http://127.0.0.1:${port}`;
+})();
 
-type ViewId = "overview" | "models" | "documents" | "tools" | "live";
+type ViewId = "overview" | "models" | "documents" | "tools" | "live" | "lab";
 type MetricId = "score120" | "parameters" | "transitions" | "trainingHours";
 
 type DocumentRecord = {
@@ -102,22 +108,16 @@ type ToolChoices = {
   configs: Array<{ label: string; value: string }>;
 };
 
-type DashboardStatus = {
-  available: boolean;
-  payload?: {
-    training?: Record<string, number | string | null>;
-    resources?: Record<string, number | string | null>;
-    events?: Array<Record<string, unknown>>;
-  } | null;
-};
-
 const NAVIGATION: Array<{ id: ViewId; label: string; hint: string; icon: LucideIcon }> = [
   { id: "overview", label: "总览", hint: "Overview", icon: LayoutDashboard },
   { id: "models", label: "模型图谱", hint: "Evidence", icon: BarChart3 },
   { id: "documents", label: "文档知识库", hint: "Knowledge", icon: BookOpenText },
   { id: "tools", label: "工具中心", hint: "Launchpad", icon: Wrench },
   { id: "live", label: "实时训练", hint: "Telemetry", icon: Activity },
+  { id: "lab", label: "场景实验室", hint: "Physics Lab", icon: FlaskConical },
 ];
+
+const VIEW_IDS = new Set<ViewId>(NAVIGATION.map((item) => item.id));
 
 const METRICS: Record<MetricId, { label: string; unit: string; title: string; subtitle: string }> = {
   score120: {
@@ -268,6 +268,16 @@ export function PortalShell() {
       window.clearInterval(documentTimer);
     };
   }, [loadDashboard, loadDocuments, loadTools, refreshDocumentsWhenChanged]);
+
+  useEffect(() => {
+    const syncRoute = () => {
+      const route = window.location.hash.replace(/^#\/?/, "") as ViewId;
+      if (VIEW_IDS.has(route)) setActiveView(route);
+    };
+    syncRoute();
+    window.addEventListener("hashchange", syncRoute);
+    return () => window.removeEventListener("hashchange", syncRoute);
+  }, []);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -423,6 +433,13 @@ export function PortalShell() {
     if (doc) openDocument(doc);
   }, [documents, openDocument]);
 
+  const navigate = (id: ViewId) => {
+    setActiveView(id);
+    setSidebarOpen(false);
+    window.history.replaceState(null, "", `#${id}`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   const openToolSettings = (tool: ToolDefinition) => {
     setSelectedTool(tool);
     setToolError(null);
@@ -446,7 +463,10 @@ export function PortalShell() {
       const payload = (await response.json()) as { process?: ProcessSnapshot; error?: string };
       if (!response.ok || !payload.process) throw new Error(payload.error ?? "启动失败");
       updateToolProcess(selectedTool.id, payload.process);
+      const startedToolId = selectedTool.id;
       setSelectedTool(null);
+      if (startedToolId === "scenario_lab") navigate("lab");
+      if (startedToolId === "training_dashboard") navigate("live");
     } catch (error) {
       setToolError(error instanceof Error ? error.message : "启动失败");
     }
@@ -463,14 +483,7 @@ export function PortalShell() {
     }
   };
 
-  const navigate = (id: ViewId) => {
-    setActiveView(id);
-    setSidebarOpen(false);
-    window.scrollTo({ top: 0, behavior: "smooth" });
-  };
-
   const training = dashboard.payload?.training ?? {};
-  const resources = dashboard.payload?.resources ?? {};
 
   return (
     <div className="portal-shell">
@@ -734,7 +747,13 @@ export function PortalShell() {
                       <div className="tool-actions">
                         {running ? (
                           <>
-                            {tool.process?.url && <button className="primary-button compact" onClick={() => window.open(tool.process?.url ?? '', '_blank')}>打开 <ExternalLink size={15} /></button>}
+                            {tool.process?.url && (
+                              <button className="primary-button compact" onClick={() => {
+                                if (tool.id === "scenario_lab") navigate("lab");
+                                else if (tool.id === "training_dashboard") navigate("live");
+                                else window.open(tool.process?.url ?? "", "_blank");
+                              }}>打开 {tool.id === "scenario_lab" || tool.id === "training_dashboard" ? <ChevronRight size={15} /> : <ExternalLink size={15} />}</button>
+                            )}
                             <button className="danger-button" onClick={() => void stopTool(tool)}><Square size={14} /> 停止</button>
                           </>
                         ) : <button className="primary-button compact" onClick={() => openToolSettings(tool)}><Play size={15} /> {tool.primary_action}</button>}
@@ -754,23 +773,19 @@ export function PortalShell() {
 
           {activeView === "live" && (
             <motion.section key="live" className="page live-page" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-              <PageHeader eyebrow="LIVE TRAINING TELEMETRY" title="训练发生时，证据也在生长。" description="轻量读取现有面板，不进入actor或learner热路径。面板断开时保留状态边界，不把失联误写成训练失败。" />
-              <div className="telemetry-grid">
-                <Telemetry label="训练进度" value={dashboard.available ? `${(Number(training.progress_fraction ?? 0) * 100).toFixed(2)}%` : "离线"} icon={CircleGauge} />
-                <Telemetry label="累计投放" value={dashboard.available ? number(Number(training.transitions ?? 0)) : "—"} icon={Database} />
-                <Telemetry label="实时吞吐" value={dashboard.available ? `${number(Number(training.env_steps_per_second ?? 0), 0)}/s` : "—"} icon={Activity} />
-                <Telemetry label="预计剩余" value={dashboard.available ? duration(Number(training.eta_seconds ?? 0)) : "—"} icon={Timer} />
-                <Telemetry label="GPU利用率" value={dashboard.available ? `${number(Number(resources.gpu_utilization ?? 0), 0)}%` : "—"} icon={Cpu} />
-              </div>
-              <section className="panel embedded-dashboard">
-                <div className="embedded-head">
-                  <span><i className={dashboard.available ? "on" : ""} />{dashboard.available ? "本机8765面板已连接" : "训练面板当前不可达"}</span>
-                  <button onClick={() => void loadDashboard()}><RefreshCw size={15} />重新检测</button>
-                </div>
-                {dashboard.available ? <iframe src="http://127.0.0.1:8765/" title="实时训练面板" /> : (
-                  <div className="dashboard-offline"><Server size={42} /><h3>等待SSH转发或本地只读面板</h3><p>连接恢复后页面会自动嵌入完整GPU、损失、吞吐和评估曲线。</p><button className="ghost-button" onClick={() => navigate("tools")}>前往工具中心</button></div>
-                )}
-              </section>
+              <PageHeader eyebrow="LIVE TRAINING TELEMETRY" title="训练发生时，证据也在生长。" description="云端遥测、训练队列、资源曲线和细分损失已经原生进入项目门户；所有高密度信息按诊断语义折叠。" />
+              <TrainingWorkspace dashboard={dashboard} onRefresh={() => void loadDashboard()} onOpenTools={() => navigate("tools")} />
+            </motion.section>
+          )}
+
+          {activeView === "lab" && (
+            <motion.section key="lab" className="page lab-page" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              <PageHeader eyebrow="INTERACTIVE PHYSICS LAB" title="让预测直接落在物理场景里。" description="实时场景编辑、21动作预测、辅助效果对照与可视化图层共用一套门户布局；低频设置集中在右侧抽屉。" />
+              <ScenarioWorkspace tool={tools.find((tool) => tool.id === "scenario_lab")} onConfigure={() => {
+                const tool = tools.find((item) => item.id === "scenario_lab");
+                if (tool) openToolSettings(tool);
+                else navigate("tools");
+              }} />
             </motion.section>
           )}
         </AnimatePresence>
@@ -803,10 +818,6 @@ function StatCard({ icon: Icon, label, value, note, tone }: { icon: LucideIcon; 
 
 function PageHeader({ eyebrow, title, description }: { eyebrow: string; title: string; description: string }) {
   return <header className="page-header"><span className="panel-kicker">{eyebrow}</span><h1>{title}</h1><p>{description}</p></header>;
-}
-
-function Telemetry({ label, value, icon: Icon }: { label: string; value: string; icon: LucideIcon }) {
-  return <article className="telemetry-card"><span><Icon size={18} /></span><small>{label}</small><strong>{value}</strong></article>;
 }
 
 function ToolIcon({ id }: { id: string }) {

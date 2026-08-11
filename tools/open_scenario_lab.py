@@ -1,32 +1,18 @@
-"""生成离线场景页面，或启动真实物理与Reward V2.1场景实验室。"""
+"""启动供 Xigua Atlas 门户使用的场景实验室 API。"""
 
 from __future__ import annotations
 
 import argparse
-import webbrowser
-from pathlib import Path
-
-from daxigua.simulator.scenario_lab import write_scenario_lab_html
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description='生成鼠标交互式自定义场景实验室前端。',
-    )
-    parser.add_argument(
-        '--output',
-        default='recordings/scenario-lab/index.html',
-        help='输出 HTML，默认 recordings/scenario-lab/index.html。',
-    )
-    parser.add_argument(
-        '--open',
-        action='store_true',
-        help='生成或启动后使用系统默认浏览器打开。',
+        description='启动场景实验室物理、评估与模型推理 API。',
     )
     parser.add_argument(
         '--serve',
         action='store_true',
-        help='启动真实物理与Reward V2.1后端；不指定时只生成离线前端。',
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--host',
@@ -64,68 +50,59 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
-    if args.serve:
-        from daxigua.simulator.scenario_lab_server import ScenarioLabServer
-        from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
-        from daxigua.simulator.scenario_lab_service import ScenarioLabEvaluator
+    from daxigua.simulator.scenario_lab_server import ScenarioLabServer
+    from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
+    from daxigua.simulator.scenario_lab_service import ScenarioLabEvaluator
 
-        evaluator = ScenarioLabEvaluator(
-            device=args.device,
-            reward_scale=args.reward_scale,
+    evaluator = ScenarioLabEvaluator(
+        device=args.device,
+        reward_scale=args.reward_scale,
+    )
+    model_evaluator = None
+    model_controller = None
+    live_session = ScenarioLabLiveSession()
+    if args.checkpoint:
+        from daxigua.rl.scenario_model_controller import (
+            ScenarioModelController,
         )
-        model_evaluator = None
-        model_controller = None
-        live_session = ScenarioLabLiveSession()
-        if args.checkpoint:
-            from daxigua.rl.scenario_model_controller import (
-                ScenarioModelController,
-            )
-            from daxigua.rl.scenario_model_evaluator import (
-                ScenarioModelEvaluator,
-            )
-            from daxigua.rl.viewer import load_viewer_model
+        from daxigua.rl.scenario_model_evaluator import (
+            ScenarioModelEvaluator,
+        )
+        from daxigua.rl.viewer import load_viewer_model
 
-            loaded = load_viewer_model(
-                args.checkpoint, device=args.model_device
-            )
-            model_evaluator = ScenarioModelEvaluator(loaded)
-            model_controller = ScenarioModelController(
-                live_session, model_evaluator
-            )
-        server = ScenarioLabServer(
-            evaluator,
-            model_evaluator=model_evaluator,
-            model_controller=model_controller,
-            live_session=live_session,
-            host=args.host,
-            port=args.port,
+        loaded = load_viewer_model(
+            args.checkpoint, device=args.model_device
         )
+        model_evaluator = ScenarioModelEvaluator(loaded)
+        model_controller = ScenarioModelController(
+            live_session, model_evaluator
+        )
+    server = ScenarioLabServer(
+        evaluator,
+        model_evaluator=model_evaluator,
+        model_controller=model_controller,
+        live_session=live_session,
+        host=args.host,
+        port=args.port,
+    )
+    print(
+        f'场景实验室 API：{server.url} '
+        f'（{evaluator.device}，Reward V2.1 × {args.reward_scale:g}）',
+        flush=True,
+    )
+    if model_evaluator is not None:
+        identity = model_evaluator.identity
         print(
-            f'场景实验室服务：{server.url} '
-            f'（{evaluator.device}，Reward V2.1 × {args.reward_scale:g}）',
+            f"模型评估：{identity['checkpoint']} "
+            f"（{identity['checkpoint_sha256']}，{identity['device']}）",
             flush=True,
         )
-        if model_evaluator is not None:
-            identity = model_evaluator.identity
-            print(
-                f"模型评估：{identity['checkpoint']} "
-                f"（{identity['checkpoint_sha256']}，{identity['device']}）",
-                flush=True,
-            )
-        if args.open:
-            webbrowser.open(server.url)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            print('正在关闭场景实验室服务……', flush=True)
-        finally:
-            server.close()
-        return
-
-    output_path = write_scenario_lab_html(Path(args.output).resolve())
-    print(f'场景实验室离线前端：{output_path}', flush=True)
-    if args.open:
-        webbrowser.open(output_path.as_uri())
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print('正在关闭场景实验室服务……', flush=True)
+    finally:
+        server.close()
 
 
 if __name__ == '__main__':

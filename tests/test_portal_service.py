@@ -47,7 +47,7 @@ class PortalServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            command[1:4], ['tools/open_scenario_lab.py', '--serve', '--host']
+            command[1:3], ['tools/open_scenario_lab.py', '--host']
         )
         self.assertEqual(command[command.index('--host') + 1], '127.0.0.1')
         self.assertEqual(command[command.index('--device') + 1], 'cuda')

@@ -37,9 +37,12 @@ from daxigua.rl.evaluation import (
 from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.monitoring import (
-    _DASHBOARD_HTML,
     _DashboardState,
     _completed_dashboard_snapshot,
+)
+from daxigua.rl.training_queue import (
+    load_training_queue,
+    write_training_queue,
 )
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
@@ -671,7 +674,7 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
 
 
 class DashboardTest(unittest.TestCase):
-    def test_dashboard_keeps_score_curves_and_uses_chinese_labels(self):
+    def test_dashboard_keeps_score_curves_for_native_portal(self):
         state = _DashboardState(history_size=4)
         state.update_training({
             'transitions': 1000,
@@ -690,17 +693,47 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(history[0]['branch_steps_per_second'], 40.0)
         self.assertEqual(history[0]['branch_aux_loss_total'], 0.75)
         self.assertEqual(history[0]['branch_sample_fraction'], 0.20)
-        self.assertIn('训练效果曲线', _DASHBOARD_HTML)
-        self.assertIn('窗口局均分', _DASHBOARD_HTML)
-        self.assertIn('score-chart', _DASHBOARD_HTML)
-        self.assertIn('Windows 11 Fluent', _DASHBOARD_HTML)
-        self.assertIn('概览', _DASHBOARD_HTML)
-        self.assertIn('定期保存曲线', _DASHBOARD_HTML)
-        self.assertIn('curve-snapshot', _DASHBOARD_HTML)
-        self.assertIn('active-rank-chart', _DASHBOARD_HTML)
-        self.assertIn('gpu-resource-chart', _DASHBOARD_HTML)
-        self.assertIn('训练已正常完成，面板保持在线', _DASHBOARD_HTML)
-        self.assertNotIn('文件(F)', _DASHBOARD_HTML)
+
+    def test_training_queue_merges_current_run_and_future_plans(self):
+        with TemporaryDirectory() as directory:
+            runs_root = Path(directory)
+            run_dir = runs_root / 'current-run'
+            run_dir.mkdir()
+            (run_dir / 'run_identity.json').write_text(json.dumps({
+                'config_path': 'configs/current.yaml',
+                'training_config': {'training_physics_fps': 30},
+            }), encoding='utf-8')
+            write_training_queue(runs_root / 'training_queue.json', [
+                {
+                    'id': 'current-run',
+                    'name': '当前训练',
+                    'status': 'running',
+                    'position': 0,
+                    'run_dir': str(run_dir),
+                },
+                {
+                    'id': 'transfer-120fps',
+                    'name': '120 FPS迁移适应',
+                    'status': 'queued',
+                    'position': 1,
+                    'planned_transitions': 12_000_000,
+                    'depends_on': 'current-run',
+                },
+            ])
+            queue = load_training_queue(run_dir, training={
+                'phase': 'running',
+                'transitions': 3_000_000,
+                'total_transitions': 24_000_000,
+                'progress_fraction': 0.125,
+            })
+
+        self.assertEqual(2, len(queue['items']))
+        current, queued = queue['items']
+        self.assertEqual('当前训练', current['name'])
+        self.assertEqual(3_000_000, current['transitions'])
+        self.assertEqual(0.125, current['progress_fraction'])
+        self.assertEqual('120 FPS迁移适应', queued['name'])
+        self.assertEqual(12_000_000, queued['planned_transitions'])
 
     def test_dashboard_keeps_lightweight_gpu_resource_history(self):
         state = _DashboardState(history_size=2)

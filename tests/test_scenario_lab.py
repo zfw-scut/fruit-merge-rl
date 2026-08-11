@@ -1,19 +1,18 @@
 import json
-import tempfile
 import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import torch
 
-from daxigua.simulator.scenario_lab import fruit_specs, write_scenario_lab_html
+from daxigua.simulator.scenario_lab import fruit_specs
 from daxigua.simulator.scenario_lab_service import (
     ScenarioLabEvaluator,
     validate_scenario,
 )
-from daxigua.simulator.scenario_lab_web import render_scenario_lab_document
 from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
 from daxigua.simulator.scenario_lab_server import ScenarioLabServer
 from daxigua.rl.scenario_model_controller import ScenarioModelController
@@ -24,73 +23,6 @@ from daxigua.rl.viewer import LoadedViewerModel
 
 
 class ScenarioLabFrontendTests(unittest.TestCase):
-    def test_render_contains_editor_and_reward_backend_contract(self):
-        html = render_scenario_lab_document(
-            title='场景测试',
-            fruit_specs_json='[]',
-            textures_json='[null]',
-        )
-
-        self.assertIn('场景实验室', html)
-        self.assertIn('Reward V2', html)
-        self.assertIn('id="board"', html)
-        self.assertIn('执行并验证 21 个动作', html)
-        self.assertIn('daxigua:scenario-request', html)
-        self.assertIn('/api/evaluate', html)
-        self.assertIn('/api/live/command', html)
-        self.assertIn('/api/live/events', html)
-        self.assertIn('/api/model/evaluate', html)
-        self.assertIn('/api/model/control', html)
-        self.assertIn('刷新当前场景预测', html)
-        self.assertIn('启动模型持续决策', html)
-        self.assertIn('model-action-results', html)
-        self.assertIn('id="settings-page"', html)
-        self.assertIn('data-view-setting="showPrediction"', html)
-        self.assertIn('data-view-setting="realtimePrediction"', html)
-        self.assertIn('data-view-setting="showSpaceEvaluation"', html)
-        self.assertIn('data-view-setting="showAnchors"', html)
-        self.assertIn('data-effect-view="both"', html)
-        self.assertIn('drawActionEffectOverlay', html)
-        self.assertIn('renderEffectComparison', html)
-        self.assertIn('scheduleRealtimePrediction', html)
-        self.assertIn('selectModelAction:false', html)
-        self.assertIn('const requestedAction=Number(evaluationScene.probe_action)', html)
-        self.assertIn('id="space-summary-section" class="section" hidden', html)
-        self.assertIn('执行并验证 21 个动作', html)
-        self.assertIn('new EventSource', html)
-        self.assertIn('dropPreviews', html)
-        self.assertIn('interpolateLiveFruits', html)
-        self.assertIn('requestAnimationFrame(renderLiveFrame)', html)
-        self.assertIn("{type:'remove',fruit_id:fruitId}", html)
-        self.assertIn('beginTransientEdit', html)
-        self.assertIn('finishTransientEdit', html)
-        self.assertIn('按住编辑 · 松手恢复', html)
-        self.assertIn("await pushLiveScene(true);await sendLiveCommand({type:'resume'})", html)
-        self.assertIn(
-            "button.disabled=busy||viewLocked||(!editable&&button.dataset.tool==='erase')",
-            html,
-        )
-        self.assertIn('物理 ${state.physicsFps||120} FPS · 显示同步', html)
-        self.assertIn('暂停并进入编辑', html)
-        self.assertIn('effective_normalized_area', html)
-        self.assertIn('data-evaluation-phase="before"', html)
-        self.assertIn('data-evaluation-phase="after"', html)
-        self.assertIn('evaluationScene', html)
-        self.assertIn('evaluationViewFruits', html)
-        self.assertIn('result_fruits', html)
-        self.assertIn('applyEvaluation(payload,detail.scene)', html)
-        self.assertIn(
-            "if(!viewSettings.showSpaceEvaluation||activeSideTab!=='result')return",
-            html,
-        )
-        self.assertNotIn(
-            "if(backendConnected&&!state.livePaused)return;const action=activeResult()",
-            html,
-        )
-        self.assertNotIn('回放轨迹', html)
-        self.assertNotIn('文件(F)', html)
-        self.assertNotIn('id="show-anchors"', html)
-
     def test_fruit_specs_follow_all_stable_levels(self):
         specs = fruit_specs()
 
@@ -102,17 +34,35 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertGreater(specs[0]['dropped_physics_radius'], 0)
         self.assertGreater(specs[0]['merged_physics_radius'], 0)
 
-    def test_writer_embeds_all_textures_and_is_self_contained(self):
-        with tempfile.TemporaryDirectory() as directory:
-            output = write_scenario_lab_html(Path(directory) / 'lab.html')
-            html = output.read_text(encoding='utf-8')
-
-        self.assertIn('data:image/png;base64,', html)
-        self.assertNotIn('<script src=', html)
-        self.assertNotIn('<link rel=', html)
-
-
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_http_service_is_api_only_and_exposes_portal_config(self):
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'), host='127.0.0.1', port=0
+        ).start()
+        try:
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(server.url, timeout=2.0)
+            error_payload = json.loads(raised.exception.read())
+            config_request = Request(
+                server.url + 'api/config',
+                headers={'Origin': 'http://127.0.0.1:3000'},
+            )
+            with urlopen(config_request, timeout=2.0) as response:
+                config = json.loads(response.read())
+                allow_origin = response.headers.get(
+                    'Access-Control-Allow-Origin'
+                )
+        finally:
+            server.close()
+
+        self.assertEqual(410, raised.exception.code)
+        self.assertEqual('standalone_scenario_lab_removed', error_payload['error'])
+        self.assertEqual('http://127.0.0.1:3000/#lab', error_payload['portal'])
+        self.assertEqual(11, len(config['fruit_specs']))
+        self.assertTrue(config['textures'][1].startswith('data:image/png;base64,'))
+        self.assertEqual(21, config['geometry']['action_count'])
+        self.assertEqual('http://127.0.0.1:3000', allow_origin)
+
     def test_model_evaluator_returns_all_action_effect_predictions(self):
         config = ModelConfig(
             hidden_dim=32,

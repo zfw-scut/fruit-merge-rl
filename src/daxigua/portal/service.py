@@ -1,4 +1,4 @@
-"""只绑定回环地址的文档索引、工具白名单和训练面板代理。"""
+"""只绑定回环地址的文档索引、工具白名单和训练遥测代理。"""
 
 from __future__ import annotations
 
@@ -48,12 +48,12 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
     },
     'training_dashboard': {
         'id': 'training_dashboard',
-        'name': '历史训练面板',
+        'name': '历史训练数据源',
         'eyebrow': 'RUN MONITOR',
-        'description': '重新打开已经完成或迁回本地的训练run，查看曲线、评估和GPU资源。',
+        'description': '读取已经完成或迁回本地的训练run，并在门户中展示曲线、队列和GPU资源。',
         'accent': 'violet',
         'kind': 'service',
-        'primary_action': '启动只读面板',
+        'primary_action': '连接只读数据',
         'parameters': [
             {'id': 'run_dir', 'label': '训练 Run', 'type': 'run', 'default': ''},
             {'id': 'port', 'label': '服务端口', 'type': 'number', 'default': 8765,
@@ -203,7 +203,7 @@ def build_tool_command(tool_id: str, params: dict[str, Any]) -> tuple[list[str],
         device = _choice(params, 'device', ('cuda', 'cpu'))
         model_device = _choice(params, 'model_device', ('auto', 'cuda', 'cpu'))
         reward_scale = _float_value(params, 'reward_scale', 0.1, 2.0)
-        command = [python, 'tools/open_scenario_lab.py', '--serve', '--host',
+        command = [python, 'tools/open_scenario_lab.py', '--host',
                    '127.0.0.1', '--port', str(port), '--device', device,
                    '--model-device', model_device, '--reward-scale', str(reward_scale)]
         checkpoint = str(params.get('checkpoint') or '').strip()
@@ -452,7 +452,18 @@ class PortalServer:
                         self._send(200, {'tools': tools, 'choices': _choices()})
                     elif path == '/api/dashboard/status':
                         try:
-                            with urlopen('http://127.0.0.1:8765/api/status', timeout=1.5) as response:
+                            dashboard = registry.snapshots().get(
+                                'training_dashboard'
+                            )
+                            dashboard_url = (
+                                str(dashboard.get('url')).rstrip('/')
+                                if dashboard and dashboard.get('running')
+                                and dashboard.get('url')
+                                else 'http://127.0.0.1:8765'
+                            )
+                            with urlopen(
+                                    dashboard_url + '/api/status',
+                                    timeout=1.5) as response:
                                 payload = json.loads(response.read().decode('utf-8'))
                             self._send(200, {'available': True, 'payload': payload})
                         except (OSError, URLError, TimeoutError, json.JSONDecodeError):

@@ -1116,6 +1116,8 @@ class BaselineTrainer:
     def _progress(self):
         branch_budget = self.config.branch_learning.transition_budget
         return {
+            'run_name': self.run_dir.name,
+            'training_physics_fps': self.simulator_config.physics_fps,
             'transitions': self.transitions,
             'total_transitions': self.config.total_transitions,
             'progress_fraction': min(

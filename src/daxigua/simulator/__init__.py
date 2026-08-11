@@ -28,11 +28,7 @@ from .replay import (
     write_replay_html,
     write_replay_payload_html,
 )
-from .scenario_lab import (
-    fruit_specs,
-    render_scenario_lab_html,
-    write_scenario_lab_html,
-)
+from .scenario_lab import fruit_specs
 from .scenario_lab_server import ScenarioLabServer
 from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import ScenarioLabEvaluator, validate_scenario
@@ -78,7 +74,6 @@ __all__ = [
     'diagnose_spatial_reward',
     'fruit_specs',
     'save_trace_archive',
-    'render_scenario_lab_html',
     'TensorVectorSimulator',
     'trace_to_payload',
     'VectorEnv',
@@ -86,7 +81,6 @@ __all__ = [
     'write_replay_html',
     'write_replay_payload_html',
     'write_replay_catalog',
-    'write_scenario_lab_html',
     'validate_scenario',
     'ZeroReward',
 ]

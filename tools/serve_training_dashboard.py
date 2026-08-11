@@ -1,4 +1,4 @@
-"""在训练进程退出后继续提供只读训练面板。"""
+"""在训练进程退出后继续提供只读训练遥测API。"""
 
 from __future__ import annotations
 

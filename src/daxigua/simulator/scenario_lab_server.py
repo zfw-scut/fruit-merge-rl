@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import re
 from threading import Event, Thread
 
-from .scenario_lab import render_scenario_lab_html
+from .replay import load_fruit_texture_data_urls
+from .scenario_lab import fruit_specs
 from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import validate_scenario
 
@@ -26,13 +28,42 @@ class ScenarioLabServer:
         self.model_evaluator = model_evaluator
         self.model_controller = model_controller
         self.live_session = live_session or ScenarioLabLiveSession()
-        self.html = render_scenario_lab_html(title=title).encode('utf-8')
+        geometry = self.live_session.config
+        self.ui_config = {
+            'format_version': 1,
+            'title': title,
+            'fruit_specs': fruit_specs(),
+            'textures': load_fruit_texture_data_urls(),
+            'geometry': {
+                'board_width': geometry.board_width,
+                'board_height': geometry.board_height,
+                'wall_width': geometry.wall_width,
+                'spawn_y': geometry.spawn_y,
+                'action_count': geometry.action_count,
+                'queue_length': geometry.queue_length,
+                'max_fruits': geometry.max_fruits,
+            },
+        }
         self._closing = Event()
         owner = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, _format, *_arguments):
                 return
+
+            def _origin(self):
+                origin = self.headers.get('Origin')
+                if origin is None:
+                    return None
+                return origin if re.fullmatch(
+                    r'http://(?:localhost|127\.0\.0\.1):\d{1,5}', origin
+                ) else None
+
+            def _cors(self):
+                origin = self._origin()
+                if origin:
+                    self.send_header('Access-Control-Allow-Origin', origin)
+                    self.send_header('Vary', 'Origin')
 
             def _json(self, status, payload):
                 body = json.dumps(
@@ -42,17 +73,29 @@ class ScenarioLabServer:
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
                 self.send_header('Content-Length', str(len(body)))
                 self.send_header('Cache-Control', 'no-store')
+                self._cors()
                 self.end_headers()
                 self.wfile.write(body)
 
+            def do_OPTIONS(self):
+                self.send_response(204)
+                self._cors()
+                self.send_header(
+                    'Access-Control-Allow-Methods', 'GET, POST, OPTIONS'
+                )
+                self.send_header(
+                    'Access-Control-Allow-Headers', 'Content-Type'
+                )
+                self.end_headers()
+
             def do_GET(self):
                 if self.path in ('/', '/index.html'):
-                    self.send_response(200)
-                    self.send_header('Content-Type', 'text/html; charset=utf-8')
-                    self.send_header('Content-Length', str(len(owner.html)))
-                    self.send_header('Cache-Control', 'no-store')
-                    self.end_headers()
-                    self.wfile.write(owner.html)
+                    self._json(410, {
+                        'error': 'standalone_scenario_lab_removed',
+                        'message': '场景实验室界面已迁入 Xigua Atlas 项目门户',
+                        'portal': 'http://127.0.0.1:3000/#lab',
+                        'health': '/api/health',
+                    })
                     return
                 if self.path == '/api/health':
                     model_identity = (
@@ -71,6 +114,9 @@ class ScenarioLabServer:
                         ),
                     })
                     return
+                if self.path == '/api/config':
+                    self._json(200, owner.ui_config)
+                    return
                 if self.path == '/api/live/state':
                     self._json(200, owner._live_payload(
                         owner.live_session.snapshot()
@@ -81,6 +127,7 @@ class ScenarioLabServer:
                     self.send_header('Content-Type', 'text/event-stream')
                     self.send_header('Cache-Control', 'no-store')
                     self.send_header('Connection', 'keep-alive')
+                    self._cors()
                     self.end_headers()
                     sequence = -1
                     try:
