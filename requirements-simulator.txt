@@ -1,6 +1,3 @@
 # CUDA/CPU Tensor 物理内核和延迟编译
 torch>=2.4
 ninja>=1.11
-
-# 只用于 Python 行为参考环境和差分测试
-pymunk>=6.6

@@ -45,7 +45,7 @@ conda run -n python-torch python tools/open_project_portal.py
 | 门户页面 | `http://127.0.0.1:3000` | 自动打开浏览器 |
 | 本地控制API | `http://127.0.0.1:4312` | 仅允许回环地址 |
 | 训练数据API | `http://127.0.0.1:8765/api/status` | 已有本地数据源或SSH转发 |
-| 场景实验室API | `http://127.0.0.1:8769/api/health` | 从工具中心按需启动 |
+| 场景实验室API | `http://127.0.0.1:8769/api/health` | 从工具中心按需启动；实时物理使用Tensor/CUDA |
 
 常用选项：
 
@@ -132,6 +132,10 @@ CUDA训练门禁会占用GPU并写入`runs/preflight`，启动前有显式确认
 
 训练时长图属于近似投入视图：短训由稳定吞吐估算，128M基线使用冻结墙钟预算。它适合
 观察数量级，不是云服务精确计费记录。
+
+场景实验室的正常A0~A20投放与训练共享`TensorVectorSimulator`和CUDA碰撞Kernel。实时
+会话使用同一Kernel的单帧增量入口，关闭自由下落快进以保留可见下落动画；页面身份区会
+显示`Tensor / CUDA`和“训练物理同源”。旧Pymunk运行后端及其依赖已经从当前代码删除。
 
 ## 7. 开发与验证
 

@@ -27,7 +27,9 @@ class ScenarioLabServer:
         self.evaluator = evaluator
         self.model_evaluator = model_evaluator
         self.model_controller = model_controller
-        self.live_session = live_session or ScenarioLabLiveSession()
+        self.live_session = live_session or ScenarioLabLiveSession(
+            device=evaluator.device
+        )
         geometry = self.live_session.config
         self.ui_config = {
             'format_version': 1,
@@ -107,6 +109,9 @@ class ScenarioLabServer:
                         'reward_version': 'spatial_v2_1',
                         'device': str(owner.evaluator.device),
                         'live_physics': True,
+                        'live_physics_backend': owner.live_session.backend,
+                        'live_physics_device': str(owner.live_session.device),
+                        'training_physics_equivalent': True,
                         'model_available': model_identity is not None,
                         'model': model_identity,
                         'model_continuous_available': (

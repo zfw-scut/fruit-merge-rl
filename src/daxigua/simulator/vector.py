@@ -112,6 +112,12 @@ class TensorVectorSimulator:
         )
         self.velocities = torch.zeros_like(self.positions)
         self._frame_start_positions = torch.empty_like(self.positions)
+        self._incremental_quiet_frames = torch.zeros(
+            (batch, capacity), dtype=torch.uint8, device=self.device
+        )
+        self._incremental_stable_count = torch.zeros(
+            batch, dtype=torch.int64, device=self.device
+        )
         self.angles = torch.zeros(
             (batch, capacity), dtype=self.float_dtype, device=self.device
         )
@@ -327,7 +333,9 @@ class TensorVectorSimulator:
                 self._last_drop_x,
                 self._last_drop_id,
                 self._last_queue_before,
-                self._last_queue_after):
+                self._last_queue_after,
+                self._incremental_quiet_frames,
+                self._incremental_stable_count):
             self._reset_rows(tensor, mask)
         self.next_fruit_id[mask] = 1
         self.terminated[mask] = False
@@ -435,7 +443,8 @@ class TensorVectorSimulator:
 
         slots = inactive.to(torch.int8).argmax(dim=1)
         env_ids = self._env_indices
-        level = self.fruit_queue[:, 0]
+        # 队列稍后会原地左移；必须先复制 q0，避免投放元数据被改写成原 q1。
+        level = self.fruit_queue[:, 0].clone()
         positions = self.action_positions()
         drop_x = positions.gather(1, actions[:, None]).squeeze(1)
         radius = self._dropped_radii[level]
@@ -1608,7 +1617,9 @@ class TensorVectorSimulator:
             *,
             enabled_mask=None,
             trace_env_indices=None,
-            trace_frame_stride=1):
+            trace_frame_stride=1,
+            perform_drop=True,
+            physics_frame_budget=None):
         """使用单 Kernel 完成整个批量投放和物理稳定过程。"""
 
         from .cuda_backend import MAX_CUDA_FRUITS, load_cuda_extension
@@ -1620,8 +1631,16 @@ class TensorVectorSimulator:
         enabled_mask = (
             self._all_enabled if enabled_mask is None else enabled_mask
         )
+        physics_frame_budget = (
+            self.config.max_physics_frames
+            if physics_frame_budget is None
+            else int(physics_frame_budget)
+        )
+        if physics_frame_budget < 0:
+            raise ValueError('physics_frame_budget must be non-negative')
         inactive = ~self.active
-        if bool(((~inactive.any(dim=1)) & enabled_mask).any().item()):
+        if perform_drop and bool(
+                ((~inactive.any(dim=1)) & enabled_mask).any().item()):
             raise RuntimeError(
                 'max_fruits capacity exhausted; increase SimulatorConfig.max_fruits'
             )
@@ -1679,9 +1698,12 @@ class TensorVectorSimulator:
         extension.vector_step(
             actions.contiguous(),
             enabled_mask.contiguous(),
+            bool(perform_drop),
             self.positions,
             self.velocities,
             self._frame_start_positions,
+            self._incremental_quiet_frames,
+            self._incremental_stable_count,
             self.angles,
             self.angular_velocities,
             self.levels,
@@ -1762,7 +1784,7 @@ class TensorVectorSimulator:
             self.config.max_fruits,
             self.config.queue_length,
             self.config.physics_fps,
-            self.config.max_physics_frames,
+            physics_frame_budget,
             self.config.stable_frames,
             self.config.solver_iterations,
             self.config.track_action_effects,
@@ -1788,7 +1810,9 @@ class TensorVectorSimulator:
             self.config.cuda_threads_per_block,
         )
         settle_timeout_result = (
-            enabled_mask
+            bool(perform_drop)
+            & (physics_frame_budget == self.config.max_physics_frames)
+            & enabled_mask
             & (frames_simulated == self.config.max_physics_frames)
             & ~stable_result
             & ~done_result
@@ -1842,6 +1866,120 @@ class TensorVectorSimulator:
             frame_stride=trace_stride,
         )
         return result, simulation_trace
+
+    @torch.no_grad()
+    def reset_incremental_progress(self, mask=None, *, stable=False):
+        """重置实时逐帧推进状态，不修改任何游戏状态。"""
+
+        mask = self._normalize_mask(mask)
+        self._incremental_quiet_frames[mask] = 0
+        self._incremental_stable_count[mask] = (
+            self.config.stable_frames if stable else 0
+        )
+
+    @torch.no_grad()
+    def begin_incremental_action(self, actions):
+        """只执行投放，不推进物理帧，供训练同源实时会话使用。"""
+
+        actions = self._validate_actions(actions)
+        if self.device.type == 'cuda' and self.config.use_cuda_extension:
+            result = self._step_cuda_extension(
+                actions,
+                perform_drop=True,
+                physics_frame_budget=0,
+            )
+            return result.drop
+        self._clear_event_buffers()
+        self.reset_incremental_progress()
+        self._drop(actions)
+        self._last_batch_result = None
+        return self._drop_result_view()
+
+    @torch.no_grad()
+    def advance_incremental_frame(self):
+        """使用训练物理推进一个语义帧，并保留跨帧稳定状态。"""
+
+        running = ~self.needs_reset
+        score_before = self.score.clone()
+        if self.device.type == 'cuda' and self.config.use_cuda_extension:
+            actions = torch.zeros(
+                self.num_envs, dtype=torch.int64, device=self.device
+            )
+            return self._step_cuda_extension(
+                actions,
+                enabled_mask=running,
+                perform_drop=False,
+                physics_frame_budget=1,
+            ).physics
+
+        self._clear_event_buffers()
+        frames_simulated = running.to(torch.int64)
+        collision_substeps = torch.zeros_like(self.score)
+        stable_result = torch.zeros_like(running)
+        done_result = torch.zeros_like(running)
+        if bool(running.any().item()):
+            frame_start_positions = self.positions.clone()
+            substep_counts = self._advance_collision_substeps(running)
+            collision_substeps = torch.where(
+                running, substep_counts, collision_substeps
+            )
+            self._correct_kinematic_rest_velocity(
+                running,
+                frame_start_positions,
+                self._incremental_quiet_frames,
+            )
+            self.physics_frame += running.to(torch.int64)
+            newly_done = self._update_termination(running)
+            done_result |= newly_done
+            self.terminated |= newly_done
+            self.needs_reset |= newly_done
+
+            merged = self._event_count > 0
+            stable_now = (
+                self._stable_environments() & running & ~merged & ~newly_done
+            )
+            self._incremental_stable_count.copy_(torch.where(
+                stable_now,
+                torch.minimum(
+                    self._incremental_stable_count + 1,
+                    torch.full_like(
+                        self._incremental_stable_count,
+                        self.config.stable_frames,
+                    ),
+                ),
+                torch.zeros_like(self._incremental_stable_count),
+            ))
+            stable_result = (
+                self._incremental_stable_count >= self.config.stable_frames
+            ) & ~self.needs_reset
+
+        physics = BatchPhysicsResult(
+            frames_simulated=frames_simulated,
+            stable=stable_result,
+            done=done_result,
+            truncated=torch.zeros_like(running),
+            settle_timeout=torch.zeros_like(running),
+            fast_forwarded_frames=torch.zeros_like(self.score),
+            collision_substeps=collision_substeps,
+            score_delta=self.score - score_before,
+            merge_events=self._merge_event_view(),
+            action_effects=self._action_effect_view(),
+        )
+        self._last_batch_result = BatchStepResult(
+            observation=self.observe(),
+            drop=self._drop_result_view(),
+            physics=physics,
+        )
+        return physics
+
+    def incremental_stable(self):
+        """返回实时逐帧会话是否已满足训练的连续稳定窗口。"""
+
+        empty = ~self.active.any(dim=1)
+        return empty | (
+            (self._incremental_stable_count >= self.config.stable_frames)
+            & ~self.needs_reset
+        )
 
     @torch.no_grad()
     def step(self, actions):

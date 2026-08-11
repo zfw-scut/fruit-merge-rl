@@ -215,7 +215,10 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             server.close()
 
         self.assertTrue(health['live_physics'])
+        self.assertEqual('tensor_cpu', health['live_physics_backend'])
+        self.assertTrue(health['training_physics_equivalent'])
         self.assertTrue(accepted['accepted'])
+        self.assertEqual('tensor_cpu', state['physics_backend'])
         self.assertEqual(1, state['step_count'])
         self.assertEqual(1, len(state['fruits']))
 
@@ -320,6 +323,44 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertTrue(removed['accepted'])
         self.assertEqual(dropped['fruit_id'], removed['fruit_id'])
         self.assertEqual([], snapshot['fruits'])
+
+    def test_removed_support_releases_incremental_rest_state(self):
+        session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
+        session.start()
+        try:
+            scene = validate_scenario({
+                'fps': 120,
+                'queue': [1, 2, 3, 4],
+                'fruits': [
+                    {'id': 1, 'level': 3, 'x': 280.0, 'y': 1060.0},
+                    {'id': 2, 'level': 4, 'x': 280.0, 'y': 971.0},
+                ],
+            })
+            session.execute({
+                'type': 'load_scene', 'scene': scene, 'paused': True,
+            })
+            session.simulator._incremental_quiet_frames.fill_(255)
+            removed = session.execute({'type': 'remove', 'fruit_id': 1})
+            before = next(
+                fruit for fruit in session.snapshot()['fruits']
+                if fruit['id'] == 2
+            )
+            session.execute({'type': 'resume'})
+            deadline = time.monotonic() + 0.3
+            after = before
+            while after['y'] <= before['y'] and time.monotonic() < deadline:
+                snapshot = session.wait_for_snapshot(
+                    session.snapshot()['sequence'], timeout=0.05
+                )
+                after = next(
+                    fruit for fruit in snapshot['fruits']
+                    if fruit['id'] == 2
+                )
+        finally:
+            session.close()
+
+        self.assertTrue(removed['accepted'])
+        self.assertGreater(after['y'], before['y'])
 
     def test_live_session_pause_stops_physics_but_keeps_commands(self):
         session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)

@@ -496,9 +496,12 @@ __device__ inline void record_first_contact(
 __global__ void vector_step_kernel(
     const int64_t* actions,
     const bool* enabled,
+    bool perform_drop,
     float* positions,
     float* velocities,
     float* frame_start_positions,
+    unsigned char* incremental_quiet_frames,
+    int64_t* incremental_stable_count,
     float* angles,
     float* angular_velocities,
     int64_t* levels,
@@ -613,8 +616,11 @@ __global__ void vector_step_kernel(
 
   unsigned char claimed[kMaxFruits];
   unsigned char kinematic_quiet_frames[kMaxFruits];
+  int quiet_base = env * max_fruits;
   for (int slot = 0; slot < max_fruits; ++slot) {
-    kinematic_quiet_frames[slot] = 0;
+    kinematic_quiet_frames[slot] = perform_drop
+        ? 0
+        : incremental_quiet_frames[quiet_base + slot];
   }
   int trace_row = -1;
   int queue_base = env * queue_length;
@@ -646,18 +652,19 @@ __global__ void vector_step_kernel(
   truncated_result[env] = false;
 
   int free_slot = -1;
-  bool fast_forward_eligible = drop_fast_forward;
+  bool fast_forward_eligible = perform_drop && drop_fast_forward;
   int active_slot_upper_bound = 0;
   for (int slot = 0; slot < max_fruits; ++slot) {
     int index = state.slot_index(slot);
     if (!active[index]) {
-      if (free_slot < 0) {
+      if (perform_drop && free_slot < 0) {
         free_slot = slot;
         if (!drop_fast_forward) break;
       }
       continue;
     }
-    if (drop_fast_forward) {
+    active_slot_upper_bound = slot + 1;
+    if (perform_drop && drop_fast_forward) {
       Vec2 velocity = state.velocity(slot);
       if (dot(velocity, velocity)
               > stable_velocity_epsilon * stable_velocity_epsilon
@@ -668,36 +675,41 @@ __global__ void vector_step_kernel(
       }
     }
   }
-  if (free_slot < 0) {
+  if (perform_drop && free_slot < 0) {
     truncated_result[env] = true;
     needs_reset[env] = true;
     return;
   }
 
+  int64_t level = 0;
+  float drop_x = 0.0f;
+  float drop_radius = 0.0f;
+  int64_t drop_id = last_drop_id[env];
+  if (perform_drop) {
   for (int queue_index = 0; queue_index < queue_length; ++queue_index) {
     last_queue_before[queue_base + queue_index] =
         fruit_queue[queue_base + queue_index];
   }
-  int64_t level = fruit_queue[queue_base];
+  level = fruit_queue[queue_base];
   float display_radius = display_radii[level];
   float left = wall_width + display_radius + 2.0f;
   float right = board_width - wall_width - display_radius - 2.0f;
   float normalized = static_cast<float>(actions[env]) /
       static_cast<float>(action_count - 1);
-  float drop_x = left + (right - left) * normalized;
+  drop_x = left + (right - left) * normalized;
   int drop_index = state.slot_index(free_slot);
   state.set_position(free_slot, {drop_x, static_cast<float>(spawn_y)});
   state.set_velocity(free_slot, {0.0f, 80.0f});
   angles[drop_index] = 0.0f;
   angular_velocities[drop_index] = 0.0f;
   levels[drop_index] = level;
-  float drop_radius = dropped_radii[level];
+  drop_radius = dropped_radii[level];
   physics_radii[drop_index] = drop_radius;
   float mass = mass_table[level];
   masses[drop_index] = mass;
   inverse_masses[drop_index] = 1.0f / mass;
   inverse_inertias[drop_index] = 1.0f / (0.5f * mass * drop_radius * drop_radius);
-  int64_t drop_id = next_fruit_id[env]++;
+  drop_id = next_fruit_id[env]++;
   fruit_ids[drop_index] = drop_id;
   age_frames[drop_index] = 0;
   active[drop_index] = true;
@@ -728,8 +740,11 @@ __global__ void vector_step_kernel(
   for (int slot = free_slot + 1; slot < max_fruits; ++slot) {
     if (active[state.slot_index(slot)]) active_slot_upper_bound = slot + 1;
   }
+  }
 
-  if (trace_count > 0) trace_row = static_cast<int>(trace_rows[env]);
+  if (perform_drop && trace_count > 0) {
+    trace_row = static_cast<int>(trace_rows[env]);
+  }
   if (trace_row >= 0 && trace_row < trace_count) {
     record_trace_frame(
         state, trace_row, 0, 0, trace_capacity,
@@ -743,9 +758,11 @@ __global__ void vector_step_kernel(
   const float frame_damping = powf(damping, dt);
   const float stable_velocity_squared =
       stable_velocity_epsilon * stable_velocity_epsilon;
-  int consecutive_stable = 0;
+  int consecutive_stable = perform_drop
+      ? 0
+      : static_cast<int>(incremental_stable_count[env]);
   int skipped_frames = 0;
-  if (fast_forward_eligible) {
+  if (perform_drop && fast_forward_eligible) {
     float contact_y = static_cast<float>(board_height - wall_width)
         - drop_radius;
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
@@ -1038,7 +1055,9 @@ __global__ void vector_step_kernel(
         break;
       }
     }
-    consecutive_stable = all_stable ? consecutive_stable + 1 : 0;
+    consecutive_stable = all_stable
+        ? min(consecutive_stable + 1, stable_frames)
+        : 0;
     if (consecutive_stable >= stable_frames) {
       stable_result[env] = true;
       running = false;
@@ -1063,6 +1082,11 @@ __global__ void vector_step_kernel(
 
   // max_physics_frames is only the wait budget between decisions. Preserve
   // motion so the next drop can continue; only technical boundaries truncate.
+  for (int slot = 0; slot < max_fruits; ++slot) {
+    incremental_quiet_frames[quiet_base + slot] =
+        kinematic_quiet_frames[slot];
+  }
+  incremental_stable_count[env] = consecutive_stable;
   terminated[env] = done_result[env];
   needs_reset[env] = done_result[env] || truncated_result[env];
   (void)score_before;
@@ -1073,9 +1097,12 @@ __global__ void vector_step_kernel(
 void vector_step_cuda(
     torch::Tensor actions,
     torch::Tensor enabled,
+    bool perform_drop,
     torch::Tensor positions,
     torch::Tensor velocities,
     torch::Tensor frame_start_positions,
+    torch::Tensor incremental_quiet_frames,
+    torch::Tensor incremental_stable_count,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
     torch::Tensor levels,
@@ -1186,9 +1213,11 @@ void vector_step_cuda(
   int blocks = (num_envs + threads - 1) / threads;
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   vector_step_kernel<<<blocks, threads, 0, stream>>>(
-      actions.data_ptr<int64_t>(), enabled.data_ptr<bool>(),
+      actions.data_ptr<int64_t>(), enabled.data_ptr<bool>(), perform_drop,
       positions.data_ptr<float>(),
       velocities.data_ptr<float>(), frame_start_positions.data_ptr<float>(),
+      incremental_quiet_frames.data_ptr<unsigned char>(),
+      incremental_stable_count.data_ptr<int64_t>(),
       angles.data_ptr<float>(),
       angular_velocities.data_ptr<float>(), levels.data_ptr<int64_t>(),
       physics_radii.data_ptr<float>(), masses.data_ptr<float>(),

@@ -1,6 +1,5 @@
 """批量 Tensor/CUDA 物理模拟器契约测试。"""
 
-import importlib.util
 import unittest
 
 
@@ -11,7 +10,6 @@ except ImportError:  # 核心规则仍可在无 PyTorch 环境中独立测试。
 
 
 if torch is not None:
-    from daxigua.core import merged_fruit_physics_radius
     from daxigua.simulator import (
         GameScoreReward,
         SimulatorConfig,
@@ -865,180 +863,48 @@ class CudaVectorSimulatorTest(unittest.TestCase):
         )
         self.assertEqual(int(continued.observation.step_count[0]), 2)
 
-    @unittest.skipUnless(
-        importlib.util.find_spec('pymunk') is not None,
-        'Pymunk is not installed',
-    )
-    def test_cuda_and_pymunk_agree_on_discrete_two_drop_trace(self):
-        from daxigua.simulator.reference import PymunkReferenceGame
-
-        config = SimulatorConfig(
-            board_width=320,
-            board_height=420,
-            spawn_y=80,
-            action_count=7,
-            max_fruits=8,
-            physics_fps=60,
-            max_physics_frames=180,
-            stable_frames=4,
-            solver_iterations=2,
+    def test_cuda_incremental_frames_match_full_training_step(self):
+        config = SimulatorConfig.high_fidelity_fast(
+            max_fruits=64,
+            use_cuda_extension=True,
+            drop_fast_forward=False,
         )
-        reference = PymunkReferenceGame(config, seed=1)
-        reference.reset(seed=1, fruit_queue=[1, 1, 1, 1])
-        simulator = TensorVectorSimulator(1, config=config, device='cuda')
-        simulator.reset(seeds=1, fruit_queue=[1, 1, 1, 1])
+        full = TensorVectorSimulator(1, config=config, device='cuda')
+        incremental = TensorVectorSimulator(1, config=config, device='cuda')
+        queue = [1, 1, 4, 5]
+        full.reset(seeds=7, fruit_queue=queue)
+        incremental.reset(seeds=7, fruit_queue=queue)
+        action = torch.tensor([10], dtype=torch.int64, device='cuda')
 
-        for expected_score_delta in (0, 1):
-            reference_state, _drop, reference_physics = reference.step(3)
-            cuda_result = simulator.step(
-                torch.tensor([3], dtype=torch.int64, device='cuda')
-            )
+        for _ in range(2):
+            expected = full.step(action)
+            incremental.begin_incremental_action(action)
+            frames = 0
+            stable = False
+            done = False
+            while (
+                    frames < config.max_physics_frames
+                    and not stable
+                    and not done):
+                physics = incremental.advance_incremental_frame()
+                frames += 1
+                stable = bool(physics.stable[0].item())
+                done = bool(physics.done[0].item())
             torch.cuda.synchronize()
-            cuda_state = simulator.state_at(0)
+
             self.assertEqual(
-                int(cuda_result.physics.score_delta[0]),
-                expected_score_delta,
+                int(expected.physics.frames_simulated[0].item()), frames
             )
-            self.assertEqual(
-                reference_physics.score_delta, expected_score_delta
-            )
-            self.assertEqual(
-                cuda_state.fruit_count, reference_state.fruit_count
-            )
-            self.assertEqual(cuda_state.max_level, reference_state.max_level)
-            self.assertEqual(
-                bool(cuda_result.physics.stable[0]),
-                reference_physics.stable,
-            )
-            self.assertEqual(
-                bool(cuda_result.physics.truncated[0]),
-                reference_physics.truncated,
-            )
-            self.assertEqual(
-                bool(cuda_result.physics.settle_timeout[0]),
-                reference_physics.settle_timeout,
-            )
-            self.assertAlmostEqual(
-                cuda_state.board_fruits[0].x,
-                reference_state.board_fruits[0].x,
-                delta=1e-4,
-            )
-            self.assertAlmostEqual(
-                cuda_state.board_fruits[0].y,
-                reference_state.board_fruits[0].y,
-                delta=6.0,
-            )
-
-
-@unittest.skipUnless(
-    torch is not None and importlib.util.find_spec('pymunk') is not None,
-    'Pymunk is not installed',
-)
-class PymunkReferenceGameTest(unittest.TestCase):
-    def test_reference_can_spawn_again_while_fruits_are_moving(self):
-        from daxigua.simulator.reference import PymunkReferenceGame
-
-        game = PymunkReferenceGame(
-            SimulatorConfig(max_fruits=8, use_cuda_extension=False),
-            seed=1,
-        )
-
-        first_id = game.spawn_fruit(1, 180)
-        game.advance_frame()
-        second_id = game.spawn_fruit(2, 380)
-        before = game.get_state()
-        game.advance_frame()
-        after = game.get_state()
-
-        self.assertEqual((1, 2), (first_id, second_id))
-        self.assertEqual(2, before.fruit_count)
-        self.assertEqual(2, after.fruit_count)
-        self.assertEqual(2, after.step_count)
-        self.assertGreater(after.physics_frame, before.physics_frame)
-        self.assertTrue(any(fruit.vy > 80.0 for fruit in after.board_fruits))
-
-    def test_reference_can_remove_fruit_by_stable_id(self):
-        from daxigua.simulator.reference import PymunkReferenceGame
-        game = PymunkReferenceGame(
-            SimulatorConfig(max_fruits=8, use_cuda_extension=False),
-            seed=5,
-        )
-        kept_id = game.spawn_fruit(1, 150.0)
-        removed_id = game.spawn_fruit(2, 410.0)
-
-        removed = game.remove_fruit(removed_id)
-        state = game.get_state()
-
-        self.assertTrue(removed)
-        self.assertFalse(game.remove_fruit(removed_id))
-        self.assertEqual(
-            [kept_id], [fruit.fruit_id for fruit in state.board_fruits]
-        )
-
-    def test_reference_uses_current_merge_score_and_midpoint(self):
-        from daxigua.simulator.reference import PymunkReferenceGame
-
-        config = SimulatorConfig(
-            max_fruits=8,
-            max_physics_frames=20,
-            stable_frames=2,
-            use_cuda_extension=False,
-        )
-        game = PymunkReferenceGame(config, seed=1)
-        game._create_ball(265, 900, 1)
-        game._create_ball(295, 900, 1)
-        result = game.advance_physics()
-        self.assertEqual(result.score_delta, 1)
-        self.assertEqual(len(result.merge_events), 1)
-        event = result.merge_events[0]
-        self.assertEqual(event.new_level, 2)
-        self.assertAlmostEqual(event.x, 280.0, places=4)
-        self.assertAlmostEqual(event.y, 900.0, places=4)
-        self.assertEqual(
-            game.get_state().board_fruits[0].physics_radius,
-            merged_fruit_physics_radius(2),
-        )
-
-    def test_reference_watermelons_disappear(self):
-        from daxigua.simulator.reference import PymunkReferenceGame
-
-        config = SimulatorConfig(
-            max_fruits=8,
-            max_physics_frames=20,
-            stable_frames=2,
-            use_cuda_extension=False,
-        )
-        game = PymunkReferenceGame(config, seed=1)
-        game._create_ball(280, 800, 11)
-        game._create_ball(280, 800, 11)
-        result = game.advance_physics()
-        self.assertEqual(result.score_delta, 66)
-        self.assertEqual(game.get_state().fruit_count, 0)
-        self.assertIsNone(result.merge_events[0].new_level)
-        self.assertIsNone(result.merge_events[0].new_fruit_id)
-
-    def test_reference_merge_initializes_zero_velocity(self):
-        from daxigua.simulator.reference import PymunkReferenceGame
-
-        game = PymunkReferenceGame(
-            SimulatorConfig(max_fruits=8, use_cuda_extension=False),
-            seed=1,
-        )
-        shape_a = game._create_ball(140, 220, 1)
-        shape_b = game._create_ball(180, 220, 1)
-        shape_a.body.velocity = 30.0, 4.0
-        shape_b.body.velocity = -6.0, 10.0
-        shape_a.body.angular_velocity = 2.0
-        shape_b.body.angular_velocity = -1.0
-        game._handle_merge(type('Arbiter', (), {
-            'shapes': (shape_a, shape_b)
-        })())
-
-        self.assertEqual(len(game.balls), 1)
-        new_body = game.balls[0].body
-        self.assertEqual(float(new_body.velocity.x), 0.0)
-        self.assertEqual(float(new_body.velocity.y), 0.0)
-        self.assertEqual(float(new_body.angular_velocity), 0.0)
+            for name in (
+                    'positions', 'velocities', 'angles', 'angular_velocities',
+                    'levels', 'physics_radii', 'fruit_ids', 'age_frames',
+                    'active', 'fruit_queue', 'score', 'step_count',
+                    'physics_frame', 'fail_frames', 'next_fruit_id', 'rng_state'):
+                self.assertTrue(
+                    torch.equal(getattr(full, name), getattr(incremental, name)),
+                    name,
+                )
+        self.assertEqual(1, int(full.score[0].item()))
 
 
 if __name__ == '__main__':

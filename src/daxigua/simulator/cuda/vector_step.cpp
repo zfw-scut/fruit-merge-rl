@@ -3,9 +3,12 @@
 void vector_step_cuda(
     torch::Tensor actions,
     torch::Tensor enabled,
+    bool perform_drop,
     torch::Tensor positions,
     torch::Tensor velocities,
     torch::Tensor frame_start_positions,
+    torch::Tensor incremental_quiet_frames,
+    torch::Tensor incremental_stable_count,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
     torch::Tensor levels,
@@ -117,9 +120,12 @@ void vector_step_cuda(
 void vector_step(
     torch::Tensor actions,
     torch::Tensor enabled,
+    bool perform_drop,
     torch::Tensor positions,
     torch::Tensor velocities,
     torch::Tensor frame_start_positions,
+    torch::Tensor incremental_quiet_frames,
+    torch::Tensor incremental_stable_count,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
     torch::Tensor levels,
@@ -228,10 +234,18 @@ void vector_step(
   CHECK_CONTIGUOUS(actions);
   CHECK_CUDA(enabled);
   CHECK_CONTIGUOUS(enabled);
+  CHECK_CUDA(incremental_quiet_frames);
+  CHECK_CONTIGUOUS(incremental_quiet_frames);
+  CHECK_CUDA(incremental_stable_count);
+  CHECK_CONTIGUOUS(incremental_stable_count);
   CHECK_CONTIGUOUS(positions);
   CHECK_CONTIGUOUS(frame_start_positions);
   TORCH_CHECK(actions.scalar_type() == torch::kInt64, "actions must be int64");
   TORCH_CHECK(enabled.scalar_type() == torch::kBool, "enabled must be bool");
+  TORCH_CHECK(incremental_quiet_frames.scalar_type() == torch::kUInt8,
+              "incremental_quiet_frames must be uint8");
+  TORCH_CHECK(incremental_stable_count.scalar_type() == torch::kInt64,
+              "incremental_stable_count must be int64");
   TORCH_CHECK(enabled.numel() == actions.numel(),
               "enabled must have one entry per environment");
   TORCH_CHECK(positions.scalar_type() == torch::kFloat32, "state floats must be float32");
@@ -247,7 +261,9 @@ void vector_step(
                 "trace_record_counts must have one entry per trace");
   }
   vector_step_cuda(
-      actions, enabled, positions, velocities, frame_start_positions,
+      actions, enabled, perform_drop,
+      positions, velocities, frame_start_positions,
+      incremental_quiet_frames, incremental_stable_count,
       angles, angular_velocities, levels,
       physics_radii, masses, inverse_masses, inverse_inertias, fruit_ids,
       age_frames, active, fruit_queue, score, last_score, step_count,

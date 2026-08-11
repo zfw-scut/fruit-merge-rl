@@ -7,9 +7,9 @@ from dataclasses import dataclass
 class SimulatorConfig:
     """会影响批量游戏演化的全部配置。
 
-    默认几何和时间参数对齐历史 Pymunk 环境。求解器本身是并行
-    Jacobi 冲量法，因此 ``solver_iterations`` 不与 Pymunk 的顺序迭代次数
-    直接等价，需要通过行为和分布对照校准。
+    默认几何和时间参数定义当前训练、评估和场景实验室共同使用的物理身份。
+    求解器采用并行 Jacobi 冲量法，``solver_iterations`` 表示每个碰撞子步的
+    固定约束迭代次数。
     """
 
     board_width: int = 560

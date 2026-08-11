@@ -10,7 +10,7 @@
 场景实验室与项目门户共用浅色Soft UI、导航、状态和设置语言，不再打开独立窗口：
 
 - 左侧是11级水果选择、q0～q3和少量场景预设；
-- 中央是实时Pymunk画布、动作锚点、动作滑杆和常用执行按钮；
+- 中央是训练同源Tensor/CUDA实时画布、动作锚点、动作滑杆和常用执行按钮；
 - 右侧按折叠区展示辅助动作预测、真实结果、Q值和模型身份；
 - 低频可视化统一进入“显示设置”抽屉，可独立开启网格、危险线、动作锚点、速度、
   预测位置、真实位置和首次接触法向量。
@@ -68,15 +68,25 @@
 地址，旧的`scenario_lab_web.py`、自包含HTML写出接口和`window.daxiguaScenarioLab`契约均已
 删除。物理、奖励和模型计算仍在Python/PyTorch侧，浏览器只负责交互与可视化。
 
-服务内保留一个持久化Pymunk世界，以120 FPS固定步长推进，并默认以120 FPS发布SSE状态
-包。浏览器最终可见帧率仍受显示器刷新率、JSON解析和React/SVG渲染成本限制。
+服务内保留一个单环境`TensorVectorSimulator`世界。CUDA模式下，正常训练仍使用一次投放
+到稳定的批量单Kernel入口；实时场景实验室通过同一个CUDA Kernel的增量入口每次推进一个
+语义物理帧，并跨调用保留连续稳定计数和逐水果低速状态。两次确定性投放（第二次触发合成）
+的增量路径与完整训练`step()`在172/135物理帧后逐位得到相同位置、速度、等级、ID、队列、
+得分、RNG和物理计数。
+
+实时画面关闭自由下落快进，以便显示完整落下过程；训练的快进只跳过可证明无碰撞的自由
+下落段，不改变后续碰撞求解。浏览器最终可见帧率仍受显示器刷新率、JSON解析和React/SVG
+渲染成本限制。API的`physics_backend`、`physics_device`和
+`training_physics_equivalent`字段明确报告当前身份，界面不再用模糊的CUDA标签代替实时
+物理后端名称。
 `/api/evaluate`与`/api/model/evaluate`都读取请求时的场景快照；前者执行真实物理，
 后者只做模型推理，二者都不会隐式推进实时世界。
 
-2026-08-11在本机Windows环境对默认120/120配置进行3秒运行抽样：物理帧增量折合
-`120.4 FPS`，发布序列增量折合`64.7 FPS`。这证明配置目标已经改为120，但当前线程等待
-与单循环单次发布机制尚未实际提供120次/秒快照；该抽样只用于判断显示管线瓶颈，不代表
-其它机器的固定性能结果。
+2026-08-12本机RTX GPU微基准中，单环境增量CUDA入口连续推进300帧耗时约0.363秒，约
+825物理帧/秒；这只证明物理Kernel有足够的120 FPS余量，不代表浏览器一定显示120张不同
+画面。实时线程还需要在启动物理时钟前预热CUDA扩展，并避开Windows上约15.6ms粒度的
+`Event.wait`；完成这两项后，同一服务5秒内实测物理帧与状态发布均为600帧，约120 FPS。
+前端最终可见刷新率仍受SSE消费、JSON解析、React/SVG渲染和显示器刷新率限制。
 
 ## 启动
 
@@ -93,7 +103,7 @@ conda run -n python-torch python tools/open_scenario_lab.py `
 conda run -n python-torch python tools/open_project_portal.py
 ```
 
-无CUDA的开发机可使用`--device cpu --model-device cpu`。不指定`--checkpoint`时仍可编辑
+无CUDA的开发机可使用同一Tensor算法的`--device cpu --model-device cpu`回退路径。不指定`--checkpoint`时仍可编辑
 实时物理场景和运行真实21动作评估，但模型预测与持续决策按钮会禁用。`--port 0`可自动
 选择空闲端口；门户工具中心使用返回的实际URL连接服务。
 
@@ -102,3 +112,7 @@ conda run -n python-torch python tools/open_project_portal.py
 画布上的单场景位置误差用于直观诊断，不替代固定评估集上的准确率、分位数和校准统计。
 旧checkpoint可以查看Q值；只有`action_effect_enabled=true`的模型才会返回辅助预测。
 结构化首次接触头还要求checkpoint的冻结`ModelConfig`中启用对应能力。
+
+手工拖动、删除和任意等级放置可以构造训练轨迹中未自然出现的状态；它们使用同一物理推进，
+但不因此自动成为训练分布内样本。需要验证模型实际决策时，应使用q0~q3和A0~A20正常投放
+入口。

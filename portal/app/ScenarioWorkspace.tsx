@@ -86,6 +86,9 @@ type Fruit = {
 
 type LiveState = {
   sequence: number;
+  physics_backend?: string;
+  physics_device?: string;
+  training_physics_equivalent?: boolean;
   physics_fps: number;
   paused: boolean;
   stable: boolean;
@@ -103,6 +106,9 @@ type Health = {
   ready: boolean;
   reward_version: string;
   device: string;
+  live_physics_backend?: string;
+  live_physics_device?: string;
+  training_physics_equivalent?: boolean;
   model_available: boolean;
   model_continuous_available: boolean;
   model?: Record<string, unknown> | null;
@@ -867,7 +873,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
             <div><span>得分增量</span><b>{number(prediction?.outcome?.score_delta)} / {actual?.outcome?.score_delta ?? "—"}</b></div>
           </div>
           <details className="lab-collapsible" open><summary><ChevronDown size={14} /> 模型动作偏好</summary>{model ? <><div className="lab-model-head"><span>推荐 A{model.action}</span><b>Q {number(model.selected_q, 5)}</b><small>{number(model.inference_ms, 2)} ms</small></div><EChart option={qChart} className="lab-q-chart" /></> : <p className="lab-muted">加载带模型的服务后，稳定场景会自动预测全部21个动作。</p>}</details>
-          <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景与模型身份</summary><div className="lab-identity"><span>物理帧率<b>{live?.physics_fps ?? "—"} FPS</b></span><span>场上水果<b>{live?.fruits.length ?? 0} / {geometry.max_fruits}</b></span><span>模型checkpoint<b>{String(health?.model?.checkpoint ?? "未加载")}</b></span><span>模型训练量<b>{number(health?.model?.training_transitions, 0)}</b></span></div></details>
+          <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景与模型身份</summary><div className="lab-identity"><span>实时物理<b>{live?.physics_backend === "tensor_cuda" ? "Tensor / CUDA" : live?.physics_backend === "tensor_cpu" ? "Tensor / CPU" : "—"}</b></span><span>物理帧率<b>{live?.physics_fps ?? "—"} FPS</b></span><span>训练物理同源<b>{live?.training_physics_equivalent ? "是" : "—"}</b></span><span>场上水果<b>{live?.fruits.length ?? 0} / {geometry.max_fruits}</b></span><span>模型checkpoint<b>{String(health?.model?.checkpoint ?? "未加载")}</b></span><span>模型训练量<b>{number(health?.model?.training_transitions, 0)}</b></span></div></details>
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景文件与编辑</summary><div className="lab-file-actions"><button onClick={exportScene}><Download size={14} />导出JSON</button><label><Import size={14} />导入JSON<input type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importScene(file); }} /></label><button disabled={selectedFruit === null} onClick={() => void removeSelected()}><Trash2 size={14} />删除选中水果</button></div><p className="lab-muted">从水果栏拖到画布，松开即放置；场上水果可拖动，右键删除，滚轮切级。暂停后支持擦除、撤销与重做；触摸端可拖动或长按删除。</p></details>
         </aside>
       </div>

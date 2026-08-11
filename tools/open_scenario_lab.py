@@ -60,7 +60,7 @@ def main(argv=None):
     )
     model_evaluator = None
     model_controller = None
-    live_session = ScenarioLabLiveSession()
+    live_session = ScenarioLabLiveSession(device=args.device)
     if args.checkpoint:
         from daxigua.rl.scenario_model_controller import (
             ScenarioModelController,
@@ -87,7 +87,8 @@ def main(argv=None):
     )
     print(
         f'场景实验室 API：{server.url} '
-        f'（{evaluator.device}，Reward V2.1 × {args.reward_scale:g}）',
+        f'（实时物理 {live_session.backend} / {live_session.device}，'
+        f'Reward V2.1 × {args.reward_scale:g}）',
         flush=True,
     )
     if model_evaluator is not None:

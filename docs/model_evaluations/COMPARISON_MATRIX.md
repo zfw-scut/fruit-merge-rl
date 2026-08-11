@@ -198,6 +198,36 @@ L11生成约98%，L11消除为64.04%/59.52%，高分尾部强（P95约11690）�
 [`model-auxiliary-action-structured-branch-128m-r5.md`](model-auxiliary-action-structured-branch-128m-r5.md)和
 [`model-structured-128m-to-120fps-transfer-r1.md`](model-structured-128m-to-120fps-transfer-r1.md)。
 
+`【场景实验室对齐前边界】` 同一迁移`best.pt`取正式评估前32个相同数值seed ID运行时，正式Tensor后端
+均分/中位分为7725.19/7769.50，场景实验室Pymunk后端为5513.53/4149.50；低于5000分
+比例由31.25%升至65.63%。两个独立32局样本的均分差为-2211.66，近似95%区间
+[-3718.92,-704.39]。Tensor使用自定义LCG、Pymunk使用Python RNG，相同数值seed不会产生
+相同水果队列，因此这不是逐局配对物理实验。该批量脚本还使用Pymunk的720帧
+`advance_physics()`，不复刻浏览器持续等待稳定的控制线程。场景实验室得分必须作为独立
+后端结果登记，当前不得与4096局Tensor基准直接混用；原始证据见迁移run的
+`analysis/scenario_lab_pymunk_eval_32.json`。
+
+`【对齐前基础契约】` 关闭自由下落快进后，3个确定性单步场景的计分、合成等级和最终水果
+等级完全一致；但空场落地的最终y已相差6.469像素，稳定帧数为166/124，墙边合成位置也有
+1~2.5像素差。第一次投放后补入q3即因LCG/Python RNG不同而分叉。证据见迁移run的
+`analysis/tensor_pymunk_contract_microcheck_3.json`。
+
+`【历史基础契约】` Pymunk曾改用Tensor/CUDA同一LCG，并安全对齐有效弹性/摩擦和墙地边界
+夹紧。原3个单步场景复核后，补入q3、得分、最终等级和最终x/y一致，此前6.469像素地面
+侵入归零；Pymunk稳定时仍可保留约-2.29~12.71 px/s的小速度，并有3~10物理帧、
+age_frames和约0.6~2.5像素的合成事件位置差异。逐水果复用Tensor的4帧低位移回正曾造成
+支撑消失后的水果悬浮，现已撤回并由“第一帧获得向下速度、第二帧位置下降”的回归测试
+覆盖。当前安全结果见迁移run的
+`analysis/tensor_pymunk_contract_microcheck_3_aligned_safe.json`；对齐前32局分数不得作为
+当前代码的效果结论。
+
+`【当前场景实验室契约】` 实时Pymunk后端及其依赖已经删除，场景实验室直接使用单环境
+`TensorVectorSimulator`和训练CUDA Kernel的逐帧增量入口。相同空场、seed、队列连续执行
+两次中央投放时，完整训练step与增量step分别在172/172、135/135帧稳定；第二次均完成L1
+合成并得1分，两次动作后的连续状态、离散状态、队列、得分、计数和RNG全部逐位一致。
+实时模式只关闭可证明无碰撞的自由下落快进，以保留画面；历史Pymunk 32局与微对照JSON
+继续保留为迁移证据，不代表当前场景实验室表现。
+
 ## 2. 最终真实游戏效果
 
 | 指标 | `baseline-r1` | `reward-v2-r1` | `reward-v2.1-r1` | V2.1相对V2 | V2.1相对基线 |
