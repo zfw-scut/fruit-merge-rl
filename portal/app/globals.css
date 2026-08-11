@@ -1962,8 +1962,9 @@ body {
 .lab-section-title > span { color: #3478e5; font-family: var(--mono); font-size: 7px; letter-spacing: .13em; }
 .lab-section-title h3 { margin: 5px 0 0; color: #34445d; font-size: 15px; }
 .lab-fruit-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 7px; }
-.lab-fruit-grid button { display: grid; min-width: 0; grid-template-columns: 31px 1fr; align-items: center; gap: 1px 7px; border: 1px solid rgba(255,255,255,.65); border-radius: 11px; background: #e8edf4; padding: 7px; color: #758398; text-align: left; box-shadow: 3px 3px 8px rgba(166,176,192,.24), -3px -3px 8px rgba(255,255,255,.64); }
+.lab-fruit-grid button { display: grid; min-width: 0; grid-template-columns: 31px 1fr; align-items: center; gap: 1px 7px; border: 1px solid rgba(255,255,255,.65); border-radius: 11px; background: #e8edf4; padding: 7px; color: #758398; text-align: left; box-shadow: 3px 3px 8px rgba(166,176,192,.24), -3px -3px 8px rgba(255,255,255,.64); cursor: grab; touch-action: none; user-select: none; }
 .lab-fruit-grid button.active { border-color: rgba(52,120,229,.2); background: #e1e9f5; color: #3478e5; box-shadow: var(--soft-inset); }
+.lab-fruit-grid button.dragging { border-color: rgba(52,120,229,.42); background: #dce8f8; color: #2f6fd2; box-shadow: var(--soft-inset); cursor: grabbing; transform: translateY(1px); }
 .lab-fruit-grid img { width: 31px; height: 31px; grid-row: 1 / 3; object-fit: contain; }
 .lab-fruit-grid span { overflow: hidden; font-size: 9px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .lab-fruit-grid small { font-family: var(--mono); font-size: 7px; }
@@ -1986,8 +1987,19 @@ body {
 .lab-canvas-toolbar > div { display: flex; gap: 6px; }
 .lab-canvas-toolbar button.active { background: #dfe9f7; color: #3478e5; box-shadow: var(--soft-inset); }
 .lab-canvas-toolbar > span { color: #8794a7; font-family: var(--mono); font-size: 8px; }
+.lab-edit-toolbar { display: flex; align-items: center; gap: 6px; overflow-x: auto; padding: 2px; scrollbar-width: none; }
+.lab-edit-toolbar::-webkit-scrollbar { display: none; }
+.lab-edit-toolbar button { display: inline-flex; min-width: max-content; align-items: center; gap: 6px; border: 1px solid rgba(255,255,255,.7); border-radius: 9px; background: #e8edf4; padding: 8px 10px; color: #718096; font-size: 8px; box-shadow: 2px 2px 6px rgba(166,176,192,.22), -2px -2px 6px rgba(255,255,255,.66); }
+.lab-edit-toolbar button:hover:not(:disabled) { color: #3478e5; transform: translateY(-1px); }
+.lab-edit-toolbar button.active { border-color: rgba(52,120,229,.18); background: #dfe9f7; color: #3478e5; box-shadow: var(--soft-inset); }
+.lab-edit-toolbar button:disabled { cursor: not-allowed; opacity: .4; }
+.lab-edit-toolbar > i { width: 1px; height: 22px; flex: 0 0 auto; background: rgba(83,101,128,.12); }
 .lab-board-wrap { display: grid; max-height: 685px; overflow: hidden; place-items: center; border: 1px solid rgba(57,74,99,.08); border-radius: 15px; background: #dce4ee; padding: 12px; box-shadow: var(--soft-inset); }
-.lab-board { display: block; width: auto; max-width: 100%; height: min(63vh, 650px); min-height: 440px; border-radius: 8px; touch-action: none; }
+.lab-board { display: block; width: auto; max-width: 100%; height: min(63vh, 650px); min-height: 440px; border-radius: 8px; touch-action: none; user-select: none; }
+.lab-board.is-select { cursor: default; }
+.lab-board.is-place { cursor: crosshair; }
+.lab-board.is-erase { cursor: not-allowed; }
+.lab-board.is-dragging { cursor: grabbing; }
 .lab-board-bg { fill: #f4f6fa; }
 .lab-grid-line { stroke: #d7dfe9; stroke-width: .8; stroke-dasharray: 3 4; }
 .lab-danger-line { stroke: #d96c77; stroke-width: 1.5; stroke-dasharray: 7 5; }
@@ -1998,7 +2010,11 @@ body {
 .lab-anchor.is-selected line { stroke: #3478e5; stroke-width: 2; opacity: .95; }
 .lab-anchor.is-selected text { fill: #3478e5; opacity: 1; }
 .lab-probe-line { stroke: #3478e5; stroke-width: 1.3; stroke-dasharray: 5 4; opacity: .65; }
-.lab-fruit { cursor: pointer; }
+.lab-fruit { cursor: grab; }
+.lab-board.is-erase .lab-fruit { cursor: not-allowed; }
+.lab-fruit.is-dragging { cursor: grabbing; filter: drop-shadow(0 8px 10px rgba(42,72,112,.24)); }
+.lab-fruit.is-ghost { pointer-events: none; opacity: .52; filter: drop-shadow(0 8px 9px rgba(42,72,112,.22)); }
+.lab-fruit.is-ghost > circle { fill: rgba(52,120,229,.13); stroke: rgba(52,120,229,.55); stroke-dasharray: 7 5; }
 .lab-fruit > circle { fill: rgba(52,120,229,.03); stroke: transparent; stroke-width: 2; }
 .lab-fruit.is-selected > circle { stroke: #3478e5; fill: rgba(52,120,229,.08); }
 .lab-fruit > text { fill: white; text-anchor: middle; paint-order: stroke; stroke: rgba(34,49,72,.6); stroke-width: 3; pointer-events: none; }
@@ -2014,6 +2030,19 @@ body {
 .lab-overlay.actual text { fill: #24966d; }
 .lab-overlay.generation circle { fill: rgba(135,94,194,.12); stroke: #865fbd; }
 .lab-overlay.generation text { fill: #865fbd; }
+.lab-overlay,
+.lab-grid-line,
+.lab-danger-line,
+.lab-anchor,
+.lab-probe-line,
+.lab-wall,
+.lab-coordinate-readout { pointer-events: none; }
+.lab-coordinate-readout rect { fill: rgba(43,57,78,.86); stroke: rgba(255,255,255,.22); stroke-width: 1; }
+.lab-coordinate-readout text { fill: #f6f9fc; font-size: 9px; }
+.lab-interaction-hint { display: flex; min-width: 0; align-items: center; gap: 7px; border: 1px solid rgba(255,255,255,.65); border-radius: 10px; background: #e8edf4; padding: 8px 10px; color: #7a879a; font-size: 8px; line-height: 1.45; box-shadow: var(--soft-inset); }
+.lab-interaction-hint > svg { flex: 0 0 auto; color: #3478e5; }
+.lab-interaction-hint > span { min-width: 0; flex: 1; }
+.lab-interaction-hint kbd { display: grid; min-width: 20px; height: 20px; place-items: center; border: 1px solid rgba(77,94,120,.12); border-radius: 5px; background: #edf1f7; color: #64748b; font-family: var(--mono); font-size: 7px; box-shadow: 1px 1px 3px rgba(166,176,192,.28); }
 .lab-action-strip { display: grid; grid-template-columns: 34px 1fr 70px; align-items: center; gap: 10px; color: #63748b; font-family: var(--mono); font-size: 9px; }
 .lab-action-strip > span { color: #3478e5; font-weight: 700; }
 .lab-action-strip input { width: 100%; accent-color: #3478e5; }
