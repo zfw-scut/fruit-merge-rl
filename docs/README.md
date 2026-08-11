@@ -4,6 +4,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 
 - `GIT_WORKFLOW.md`：分支、提交语言和提交前检查规则；
 - `LEGACY_PROJECT_EXPERIENCE_INDEX.md`：旧分支关键提交、证据、经验和禁止照搬边界；
+- `PROJECT_PORTAL.md`：Xigua Atlas本地知识、模型图表、工具中心和实时训练面板的启动与安全边界；
 - `model/STRATEGIC_VIEW_CONNECTIVITY.md`：新模型战略视角、水果可联通性、多时间尺度直接合成机会和 pair survival 算法设计；
 - `model/STRATEGIC_LEVEL_AGGREGATION.md`：水果个体与等级节点、数量敏感聚合、理论进位、合并机会和合并债务算法设计；
 - `model/STRATEGIC_REGION_ANCHORS.md`：7 个固定横向战略锚点、软归属、垂直区域摘要和高层计划位置语义；
@@ -79,6 +80,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/53_合成水果初速度归零_2026_08_11.md`：统一Tensor、CUDA和Pymunk合成创建语义，新水果线速度与角速度均从0开始。
 - `codex/54_实现结构化首次接触预测_2026_08_11.md`：新增首次接触水果槽位事实、69候选识别、共享几何先验与位置残差监督。
 - `codex/55_启动128M结构化辅助旁路训练_2026_08_11.md`：冻结128M父轨迹、12M隔离单步旁路和约11.1%训练贡献，并记录RTX 5090门禁、启动身份与首批稳定事实。
+- `codex/56_实现HTML模型知识与工具门户_2026_08_11.md`：建立可搜索Markdown、模型证据图表、白名单工具中心和训练遥测集成的本地门户。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的

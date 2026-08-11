@@ -9,7 +9,7 @@
 - 不依赖 pygame、pymunk 或 PyTorch 的状态数据契约；
 - PyTorch Tensor CPU 回退后端和单 Kernel CUDA 高吞吐后端；
 - 批量重置、批量动作、独立 RNG、碰撞、滚动、合成、连锁、稳定和终止；
-- 合成水果继承两颗来源水果的总线动量和关于合成中点的总角动量；
+- 合成产生的新水果线速度与角速度初始化为零；
 - 零拷贝 Tensor 状态读取、Python 单环境适配器和可插拔奖励接口；
 - 指定 CUDA 环境的逐物理帧抽样录制、纹理化离线播放器和多局回放目录；
 - 按当前规则重新实现的 Pymunk 行为参考环境，只用于对照和回退。
@@ -25,6 +25,18 @@
 `daxigua.core` 仍只依赖 Python 标准库。模拟器的独立依赖见
 `requirements-simulator.txt`；正式训练的附加依赖见
 `requirements-training.txt`。
+
+## 本地项目门户
+
+Xigua Atlas把全部Markdown、代表模型对比图、常用工具入口和现有训练面板整合到一个
+本地页面。首次使用在`portal`目录执行`npm install`，之后从仓库根目录启动：
+
+```powershell
+conda run -n python-torch python tools/open_project_portal.py
+```
+
+默认打开`http://127.0.0.1:3000`。门户只绑定本机，工具页不接受任意shell命令；完整说明
+见`docs/PROJECT_PORTAL.md`。
 
 ## 当前明确不包含
 
