@@ -8,6 +8,7 @@
 | --- | --- |
 | 门户、场景实验室 | `PROJECT_PORTAL.md`、`SCENARIO_LAB.md` |
 | 模型或训练设计 | `model/AGENTS.md` 后选一份专项文档 |
+| 模型命名或短称 | `model_naming/NAMING_CONVENTION.md`、`model_naming/MODEL_REGISTRY.md` |
 | 正式效果 | `model_evaluations/AGENTS.md` 后选比较矩阵相关行和一份报告 |
 | 历史原因 | `STAGE_INDEX.md` 后选一份 `codex/` 记录 |
 | 旧分支 | `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 中命中的条目 |

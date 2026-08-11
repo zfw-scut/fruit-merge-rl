@@ -14,6 +14,7 @@
 | 水果规则、领域状态 | `src/daxigua/core/AGENTS.md` |
 | 物理、CUDA、奖励、回放、场景实验室后端 | `src/daxigua/simulator/AGENTS.md` |
 | 模型、Replay、loss、训练、评估 | `src/daxigua/rl/AGENTS.md` |
+| 模型命名、短称登记 | `docs/model_naming/NAMING_CONVENTION.md`、`docs/model_naming/MODEL_REGISTRY.md` |
 | 门户、场景实验室前端 | `portal/AGENTS.md` |
 | 文档、正式实验结论 | `docs/AGENTS.md` |
 
