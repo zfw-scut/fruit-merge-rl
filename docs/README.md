@@ -27,6 +27,8 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `model_evaluations/model-auxiliary-action-r1.md`：辅助动作完整配置首轮24M训练、4096局双帧率效果、辅助损失和高等级合成诊断；
 - `model_evaluations/model-auxiliary-action-rank-active-r3.md`：排名Top-4主动学习24M与续训34M的双帧率效果、迁移校验和后期净贡献实验建议；
 - `model_evaluations/model-auxiliary-action-single-step-branch-r4.md`：24M正常父轨迹与4M隔离单步旁路样本的完整迁移、双帧率效果和证据边界；
+- `model_evaluations/model-auxiliary-action-structured-branch-128m-r5.md`：零初速度新物理下128M父轨迹、12M结构化单步旁路的完整归档、双帧率效果与迁移前基准；
+- `model_evaluations/model-structured-128m-to-120fps-transfer-r1.md`：128M结构化旁路模型经120 FPS weights-only适应后的同seed双帧率效果与证据边界；
 - `SCENARIO_LAB.md`：鼠标交互式自定义场景、真实21动作物理评估、Reward V2覆盖层和JSON契约；
 - `codex/RULES.md`：较大修改的记录规则；
 - `codex/01_建立accelerated_v1最小基线_2026_08_01.md`：本分支首个结构记录；
@@ -91,6 +93,7 @@ accelerated-v1 当前只维护最小仓库治理文档：
 - `codex/61_统一训练与场景实验室门户_2026_08_11.md`：删除两个旧显示，原生整合训练队列、可缩放曲线和场景实验室工作区。
 - `codex/62_恢复场景实验室直接操作手势_2026_08_11.md`：在统一门户中恢复水果拖放、运行时临时编辑、右键删除、滚轮换级和撤销重做。
 - `codex/63_归档128M至120FPS迁移模型_2026_08_11.md`：迁移并归档128M结构化旁路至120 FPS权重迁移模型，记录双帧率最终评估与新物理身份边界。
+- `codex/64_补全128M结构化辅助旁路归档_2026_08_11.md`：补迁120 FPS模型的完整128M来源run，核对归档、checkpoint、评估索引与权重谱系并纠正L11消除统计。
 
 旧模型、训练、因果归因、云服务器、Android 和 UI 文档没有迁入本分支。它们仍可按
 `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 从旧分支只读查阅，但不属于 accelerated-v1 的

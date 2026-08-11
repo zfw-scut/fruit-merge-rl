@@ -29,7 +29,8 @@
 | `auxiliary-action-epsilon18m-r2` | 同上，延长epsilon探索 + bonus影子诊断 | `0e9c1da` | [`model-auxiliary-action-epsilon18m-r2.md`](model-auxiliary-action-epsilon18m-r2.md) | 低于首轮5.42%/6.64%，但仍高于5层Fast 7.46%/7.23%；18M日程不升级为默认，下一对照优先bonus=2 |
 | `auxiliary-action-rank-active-r3` | 同上，排名Top-4主动学习；24M后续训至34M | `faa1377` / `c01cedb` | [`model-auxiliary-action-rank-active-r3.md`](model-auxiliary-action-rank-active-r3.md) | 34M相对自身24M提高6.32%/5.93%，但仍低于辅助首轮7.34%/6.54%；证明追加预算有效，不证明排名主动优于旧方案 |
 | `auxiliary-action-single-step-branch-r4` | 同上，24M父轨迹 + 4M隔离单步旁路样本 | `bdf04ae` | [`model-auxiliary-action-single-step-branch-r4.md`](model-auxiliary-action-single-step-branch-r4.md) | 30/120 FPS为4668.89/4347.91；低于辅助首轮3.73%/2.87%，但高于5层Fast 9.39%/11.56%，旁路框架保留但不升级为效果默认 |
-| `structured-128m-to-120fps-transfer-r1` | `score_v1`，128M结构化旁路 → 120 FPS weights-only物理域迁移 | `4dd76b4` | [`model-structured-128m-to-120fps-transfer-r1.md`](model-structured-128m-to-120fps-transfer-r1.md) | **零初速度新物理、120 FPS训练**；30/120 FPS局均分8006.41/7568.18，L11消除约98%，单独登记，不与旧物理表同分布比较 |
+| `auxiliary-action-structured-branch-128m-r5` | `score_v1`，128M父轨迹 + 12M隔离单步旁路 + 结构化首次接触头 | `2e0f836` | [`model-auxiliary-action-structured-branch-128m-r5.md`](model-auxiliary-action-structured-branch-128m-r5.md) | **零初速度新物理、30 FPS训练**；30/120 FPS局均分7161.42/6551.90，完整来源run与最终索引已归档，作为120 FPS迁移起点保留 |
+| `structured-128m-to-120fps-transfer-r1` | `score_v1`，128M结构化旁路 → 120 FPS weights-only物理域迁移 | `4dd76b4` | [`model-structured-128m-to-120fps-transfer-r1.md`](model-structured-128m-to-120fps-transfer-r1.md) | **零初速度新物理、120 FPS训练**；30/120 FPS局均分8006.41/7568.18，L11消除64.04%/59.52%，同seed显著高于来源，单独登记 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
 | `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线；墙边投放增加属于常见策略，不能单独判为缺陷 |
 
@@ -82,6 +83,9 @@
   重建Replay；尚无“排名主动40%对主动关闭0%”的同checkpoint后期消融；
 - 单步旁路24M+4M已完成，但与辅助首轮同时改变父主动选择、环境数、旁路Replay和联合loss；
   尚无同父checkpoint的旁路loss 0%/20%成对消融，不能量化旁路数据的单独贡献；
+- 结构化辅助旁路128M+12M及其120 FPS适应模型已经完整归档，并完成同4096 seed成对比较；
+  迁移后双帧率均明显提高，但两个阶段都只有一个训练seed，且尚无固定离线标签集上的
+  各辅助预测头准确率与校准报告，不能把净提升归因于旁路、结构化头或训练帧率中的单项；
 - 五层Fast从24M续训至128M后双帧率均分显著提高并超过辅助首轮，但只有一个训练seed，
   恢复时Replay重新预热；它使用5.33倍transition且中位分仍低于辅助首轮，不能据此宣称
   简洁基线具有更高样本效率或辅助动作无效；
