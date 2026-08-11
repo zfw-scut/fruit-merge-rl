@@ -319,10 +319,11 @@ export function PortalShell() {
       grid: { left: 28, right: 22, top: 28, bottom: 72, containLabel: true },
       tooltip: {
         trigger: "item",
-        backgroundColor: "rgba(9, 14, 27, .96)",
-        borderColor: "rgba(148, 163, 184, .22)",
+        backgroundColor: "rgba(242, 245, 249, .98)",
+        borderColor: "rgba(75, 91, 116, .12)",
         padding: 14,
-        textStyle: { color: "#e8edf8" },
+        extraCssText: "box-shadow: 10px 12px 28px rgba(110,122,142,.24); border-radius: 12px;",
+        textStyle: { color: "#26354c" },
         formatter: (raw: unknown) => {
           const item = raw as { dataIndex: number; value: number };
           const model = MODELS[item.dataIndex];
@@ -333,15 +334,15 @@ export function PortalShell() {
         type: "category",
         data: MODELS.map((model) => model.shortName),
         axisTick: { show: false },
-        axisLine: { lineStyle: { color: "rgba(148,163,184,.18)" } },
-        axisLabel: { color: "#8f9bb3", fontSize: 11, interval: 0, rotate: 0, margin: 18 },
+        axisLine: { lineStyle: { color: "rgba(79,95,119,.14)" } },
+        axisLabel: { color: "#7d899b", fontSize: 11, interval: 0, rotate: 0, margin: 18 },
       },
       yAxis: {
         type: "value",
         name: definition.unit,
-        nameTextStyle: { color: "#65728c", align: "right" },
-        splitLine: { lineStyle: { color: "rgba(148,163,184,.09)" } },
-        axisLabel: { color: "#697792" },
+        nameTextStyle: { color: "#8b96a7", align: "right" },
+        splitLine: { lineStyle: { color: "rgba(76,92,118,.09)" } },
+        axisLabel: { color: "#8792a4" },
       },
       series: [
         {
@@ -359,7 +360,7 @@ export function PortalShell() {
           label: {
             show: true,
             position: "top",
-            color: "#dce5f8",
+            color: "#33425a",
             fontWeight: 700,
             formatter: (raw: unknown) => {
               const item = raw as { value: number };
@@ -377,9 +378,10 @@ export function PortalShell() {
     grid: { left: 58, right: 28, top: 34, bottom: 52 },
     tooltip: {
       trigger: "item",
-      backgroundColor: "rgba(9,14,27,.96)",
-      borderColor: "rgba(148,163,184,.22)",
-      textStyle: { color: "#e8edf8" },
+      backgroundColor: "rgba(242,245,249,.98)",
+      borderColor: "rgba(75,91,116,.12)",
+      extraCssText: "box-shadow: 10px 12px 28px rgba(110,122,142,.24); border-radius: 12px;",
+      textStyle: { color: "#26354c" },
       formatter: (raw: unknown) => {
         const item = raw as { data: [number, number, number, string, string] };
         return `<div class="chart-tooltip"><strong>${item.data[3]}</strong><span>${item.data[0]}M transition</span><b>${number(item.data[1])} 分</b><small>${item.data[2].toFixed(2)}M 参数</small></div>`;
@@ -387,12 +389,12 @@ export function PortalShell() {
     },
     xAxis: {
       type: "log", name: "训练 transition（M）", nameLocation: "middle", nameGap: 34,
-      axisLabel: { color: "#74829d" }, axisLine: { lineStyle: { color: "rgba(148,163,184,.18)" } },
-      splitLine: { lineStyle: { color: "rgba(148,163,184,.08)" } },
+      axisLabel: { color: "#8591a3" }, axisLine: { lineStyle: { color: "rgba(75,91,116,.14)" } },
+      splitLine: { lineStyle: { color: "rgba(75,91,116,.08)" } },
     },
     yAxis: {
       type: "value", name: "120 FPS 平均分", min: 2800,
-      axisLabel: { color: "#74829d" }, splitLine: { lineStyle: { color: "rgba(148,163,184,.08)" } },
+      axisLabel: { color: "#8591a3" }, splitLine: { lineStyle: { color: "rgba(75,91,116,.08)" } },
     },
     series: [{
       type: "scatter",
@@ -401,9 +403,9 @@ export function PortalShell() {
       itemStyle: {
         color: (raw: unknown) => (raw as { data: [number, number, number, string, string] }).data[4],
         shadowBlur: 24,
-        shadowColor: "rgba(34,211,238,.28)",
+        shadowColor: "rgba(61,113,190,.2)",
       },
-      label: { show: true, formatter: (raw: unknown) => (raw as { data: [number, number, number, string] }).data[3], position: "top", color: "#c9d5ea", fontSize: 10 },
+      label: { show: true, formatter: (raw: unknown) => (raw as { data: [number, number, number, string] }).data[3], position: "top", color: "#58677e", fontSize: 10 },
     }],
   }), []);
 

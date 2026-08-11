@@ -31,7 +31,7 @@ export const MODELS: ModelRecord[] = [
     report: "docs/model_evaluations/model-baseline-r1.md",
     commit: "0836ffd",
     physics: "inherited-momentum",
-    accent: "#64748b",
+    accent: "#9aa7b9",
     evidence: "1024局/FPS",
   },
   {
@@ -47,7 +47,7 @@ export const MODELS: ModelRecord[] = [
     report: "docs/model_evaluations/model-baseline-scale-v1-l4-r1.md",
     commit: "f6edba2",
     physics: "inherited-momentum",
-    accent: "#60a5fa",
+    accent: "#78a8ef",
     evidence: "4096局/FPS",
   },
   {
@@ -63,7 +63,7 @@ export const MODELS: ModelRecord[] = [
     report: "docs/model_evaluations/model-baseline-scale-v1-l5-epsilon-r1.md",
     commit: "56c2e3d",
     physics: "inherited-momentum",
-    accent: "#38bdf8",
+    accent: "#4c8de8",
     evidence: "4096局/FPS",
   },
   {
@@ -79,7 +79,7 @@ export const MODELS: ModelRecord[] = [
     report: "docs/model_evaluations/model-auxiliary-action-rank-active-r3.md",
     commit: "c01cedb",
     physics: "inherited-momentum",
-    accent: "#a78bfa",
+    accent: "#8879e4",
     evidence: "4096局/FPS",
   },
   {
@@ -95,7 +95,7 @@ export const MODELS: ModelRecord[] = [
     report: "docs/model_evaluations/model-auxiliary-action-single-step-branch-r4.md",
     commit: "bdf04ae",
     physics: "inherited-momentum",
-    accent: "#f59e0b",
+    accent: "#e5a444",
     evidence: "4096局/FPS",
   },
   {
@@ -111,7 +111,7 @@ export const MODELS: ModelRecord[] = [
     report: "docs/model_evaluations/model-auxiliary-action-r1.md",
     commit: "feb10ec",
     physics: "inherited-momentum",
-    accent: "#34d399",
+    accent: "#46b97b",
     evidence: "4096局/FPS",
   },
   {
@@ -127,7 +127,7 @@ export const MODELS: ModelRecord[] = [
     report: "docs/model_evaluations/model-baseline-scale-v1-l5-fast-128m-r2.md",
     commit: "fd65767",
     physics: "inherited-momentum",
-    accent: "#22d3ee",
+    accent: "#3478e5",
     evidence: "4096局/FPS",
   },
 ];
