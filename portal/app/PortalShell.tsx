@@ -36,7 +36,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { EChart } from "./EChart";
-import { CURRENT_TRAINING, MODELS, type ModelRecord } from "./model-data";
+import { CURRENT_TRAINING, FEATURED_MODEL_IDS, MODELS, type ModelRecord } from "./model-data";
 import { ScenarioWorkspace } from "./ScenarioWorkspace";
 import { TrainingWorkspace, type DashboardStatus } from "./TrainingWorkspace";
 
@@ -48,7 +48,7 @@ const API = (() => {
 })();
 
 type ViewId = "overview" | "models" | "documents" | "tools" | "live" | "lab";
-type MetricId = "score120" | "parameters" | "transitions" | "trainingHours";
+type MetricId = "score30" | "score120" | "parameters" | "transitions" | "trainingHours";
 
 type DocumentRecord = {
   id: string;
@@ -120,6 +120,12 @@ const NAVIGATION: Array<{ id: ViewId; label: string; hint: string; icon: LucideI
 const VIEW_IDS = new Set<ViewId>(NAVIGATION.map((item) => item.id));
 
 const METRICS: Record<MetricId, { label: string; unit: string; title: string; subtitle: string }> = {
+  score30: {
+    label: "30 FPS 得分",
+    unit: "分",
+    title: "30 FPS物理下的最终策略表现",
+    subtitle: "固定评估种子的平均原始分数 · 新旧物理身份必须分开解释",
+  },
   score120: {
     label: "120 FPS 得分",
     unit: "分",
@@ -156,17 +162,26 @@ function number(value: number | null | undefined, digits = 0) {
   return value.toLocaleString("zh-CN", { maximumFractionDigits: digits, minimumFractionDigits: digits });
 }
 
-function duration(seconds: number | null | undefined) {
-  if (!seconds || !Number.isFinite(seconds)) return "—";
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  return `${hours}小时 ${minutes}分`;
-}
-
 function modelValue(model: ModelRecord, metric: MetricId) {
   if (metric === "parameters") return model.parameters / 1_000_000;
   return model[metric];
 }
+
+function physicsLabel(model: ModelRecord) {
+  return model.physics === "zero-velocity" ? "零初速度新物理" : "继承动量旧物理";
+}
+
+function gain(current: number, baseline: number) {
+  return ((current / baseline) - 1) * 100;
+}
+
+const FEATURED_MODELS = FEATURED_MODEL_IDS
+  .map((id) => MODELS.find((model) => model.id === id))
+  .filter((model): model is ModelRecord => Boolean(model));
+
+const BASELINE_128M = MODELS.find((model) => model.id === "baseline-128m") as ModelRecord;
+const STRUCTURED_128M = MODELS.find((model) => model.id === "auxiliary-structured-128m") as ModelRecord;
+const LATEST_MODEL = MODELS.find((model) => model.id === CURRENT_TRAINING.modelId) as ModelRecord;
 
 function normalizeRelative(basePath: string, target: string) {
   const parts = basePath.split("/");
@@ -328,7 +343,7 @@ export function PortalShell() {
       animationDuration: 900,
       animationDurationUpdate: 650,
       animationEasing: "cubicOut",
-      grid: { left: 28, right: 22, top: 28, bottom: 72, containLabel: true },
+      grid: { left: 28, right: 22, top: 28, bottom: 90, containLabel: true },
       tooltip: {
         trigger: "item",
         backgroundColor: "rgba(242, 245, 249, .98)",
@@ -339,7 +354,7 @@ export function PortalShell() {
         formatter: (raw: unknown) => {
           const item = raw as { dataIndex: number; value: number };
           const model = MODELS[item.dataIndex];
-          return `<div class="chart-tooltip"><strong>${model.name}</strong><span>${model.role} · ${model.commit}</span><b>${number(item.value, metric === "score120" ? 0 : 2)} ${definition.unit}</b><small>${model.evidence}</small></div>`;
+          return `<div class="chart-tooltip"><strong>${model.name}</strong><span>${model.role} · ${model.commit}</span><b>${number(item.value, metric === "score30" || metric === "score120" ? 0 : 2)} ${definition.unit}</b><small>${physicsLabel(model)} · ${model.evidence}</small></div>`;
         },
       },
       xAxis: {
@@ -347,7 +362,7 @@ export function PortalShell() {
         data: MODELS.map((model) => model.shortName),
         axisTick: { show: false },
         axisLine: { lineStyle: { color: "rgba(79,95,119,.14)" } },
-        axisLabel: { color: "#7d899b", fontSize: 11, interval: 0, rotate: 0, margin: 18 },
+        axisLabel: { color: "#7d899b", fontSize: 10, interval: 0, rotate: 18, margin: 18 },
       },
       yAxis: {
         type: "value",
@@ -376,7 +391,7 @@ export function PortalShell() {
             fontWeight: 700,
             formatter: (raw: unknown) => {
               const item = raw as { value: number };
-              return number(item.value, metric === "score120" ? 0 : 2);
+              return number(item.value, metric === "score30" || metric === "score120" ? 0 : 2);
             },
           },
           emphasis: { scale: true, focus: "self" },
@@ -395,9 +410,17 @@ export function PortalShell() {
       extraCssText: "box-shadow: 10px 12px 28px rgba(110,122,142,.24); border-radius: 12px;",
       textStyle: { color: "#26354c" },
       formatter: (raw: unknown) => {
-        const item = raw as { data: [number, number, number, string, string] };
-        return `<div class="chart-tooltip"><strong>${item.data[3]}</strong><span>${item.data[0]}M transition</span><b>${number(item.data[1])} 分</b><small>${item.data[2].toFixed(2)}M 参数</small></div>`;
+        const item = raw as { data: [number, number, number, string, string, string] };
+        const model = MODELS.find((candidate) => candidate.id === item.data[5]);
+        return `<div class="chart-tooltip"><strong>${item.data[3]}</strong><span>${model ? physicsLabel(model) : "物理身份未知"} · ${item.data[0]}M transition</span><b>${number(item.data[1])} 分</b><small>${model?.budget ?? `${item.data[2].toFixed(2)}M 参数`}</small></div>`;
       },
+    },
+    legend: {
+      top: 0,
+      right: 8,
+      itemWidth: 10,
+      itemHeight: 10,
+      textStyle: { color: "#758298", fontSize: 10 },
     },
     xAxis: {
       type: "log", name: "训练 transition（M）", nameLocation: "middle", nameGap: 34,
@@ -408,17 +431,36 @@ export function PortalShell() {
       type: "value", name: "120 FPS 平均分", min: 2800,
       axisLabel: { color: "#8591a3" }, splitLine: { lineStyle: { color: "rgba(75,91,116,.08)" } },
     },
-    series: [{
-      type: "scatter",
-      symbolSize: (raw: unknown) => 18 + ((raw as [number, number, number])[2] * 16),
-      data: MODELS.map((model) => [model.transitions, model.score120, model.parameters / 1_000_000, model.shortName, model.accent]),
-      itemStyle: {
-        color: (raw: unknown) => (raw as { data: [number, number, number, string, string] }).data[4],
-        shadowBlur: 24,
-        shadowColor: "rgba(61,113,190,.2)",
+    series: [
+      {
+        name: "继承动量旧物理",
+        type: "scatter",
+        symbol: "circle",
+        symbolSize: (raw: unknown) => 18 + ((raw as [number, number, number])[2] * 16),
+        data: MODELS.filter((model) => model.physics === "inherited-momentum")
+          .map((model) => [model.transitions, model.score120, model.parameters / 1_000_000, model.shortName, model.accent, model.id]),
+        itemStyle: {
+          color: (raw: unknown) => (raw as { data: [number, number, number, string, string] }).data[4],
+          shadowBlur: 24,
+          shadowColor: "rgba(61,113,190,.2)",
+        },
+        label: { show: true, formatter: (raw: unknown) => (raw as { data: [number, number, number, string] }).data[3], position: "top", color: "#58677e", fontSize: 10 },
       },
-      label: { show: true, formatter: (raw: unknown) => (raw as { data: [number, number, number, string] }).data[3], position: "top", color: "#58677e", fontSize: 10 },
-    }],
+      {
+        name: "零初速度新物理",
+        type: "scatter",
+        symbol: "diamond",
+        symbolSize: (raw: unknown) => 20 + ((raw as [number, number, number])[2] * 16),
+        data: MODELS.filter((model) => model.physics === "zero-velocity")
+          .map((model) => [model.transitions, model.score120, model.parameters / 1_000_000, model.shortName, model.accent, model.id]),
+        itemStyle: {
+          color: (raw: unknown) => (raw as { data: [number, number, number, string, string] }).data[4],
+          shadowBlur: 28,
+          shadowColor: "rgba(135,87,217,.26)",
+        },
+        label: { show: true, formatter: (raw: unknown) => (raw as { data: [number, number, number, string] }).data[3], position: "top", color: "#7357d9", fontSize: 10, fontWeight: 700 },
+      },
+    ],
   }), []);
 
   const openDocument = useCallback((doc: DocumentRecord) => {
@@ -483,8 +525,6 @@ export function PortalShell() {
     }
   };
 
-  const training = dashboard.payload?.training ?? {};
-
   return (
     <div className="portal-shell">
       <div className="ambient ambient-one" />
@@ -535,9 +575,9 @@ export function PortalShell() {
         </div>
         <div className="topbar-actions">
           <button className="icon-button" onClick={() => { void loadDocuments(); void loadTools(); }} aria-label="刷新数据"><RefreshCw size={17} /></button>
-          <button className="training-pill" onClick={() => navigate("live")}>
+          <button className="training-pill" onClick={() => navigate(dashboard.available ? "live" : "models")}>
             <span className={dashboard.available ? "pulse" : ""} />
-            <span><small>CURRENT RUN</small><b>{dashboard.available ? "训练遥测在线" : "等待训练面板"}</b></span>
+            <span><small>{dashboard.available ? "CURRENT RUN" : "LATEST MODEL"}</small><b>{dashboard.available ? "训练遥测在线" : "120FPS迁移 · 7,568.18"}</b></span>
             <ChevronRight size={16} />
           </button>
         </div>
@@ -575,17 +615,17 @@ export function PortalShell() {
                 <div className="hero-orbit" aria-hidden="true">
                   <div className="orbit-ring ring-one" />
                   <div className="orbit-ring ring-two" />
-                  <div className="orbit-core"><span>4,795</span><small>120 FPS BEST</small></div>
-                  <div className="orbit-node node-a">128M</div>
-                  <div className="orbit-node node-b">1.03M</div>
+                  <div className="orbit-core"><span>7,568</span><small>120 FPS BEST</small></div>
+                  <div className="orbit-node node-a">156M</div>
+                  <div className="orbit-node node-b">1.22M</div>
                   <div className="orbit-node node-c">4096×2</div>
                 </div>
               </motion.div>
 
               <motion.div className="stat-grid" variants={fadeUp}>
-                <StatCard icon={Gauge} label="绝对均分基准" value="4,794.81" note="5L Fast · 128M · 120 FPS" tone="cyan" />
-                <StatCard icon={Sparkles} label="24M预算最佳" value="4,476.35" note="辅助动作首轮 · +14.86%" tone="green" />
-                <StatCard icon={Database} label="当前长训预算" value="140M" note="128M父轨迹 + 12M旁路" tone="violet" />
+                <StatCard icon={Gauge} label="新物理120FPS最佳" value="7,568.18" note="结构化辅助迁移 · 相对来源 +15.51%" tone="cyan" />
+                <StatCard icon={Sparkles} label="新物理30FPS最佳" value="8,006.41" note="同一迁移模型 · 4096局" tone="green" />
+                <StatCard icon={Database} label="完整训练谱系" value="156M" note="128M父 + 12M旁路 + 16M适应" tone="violet" />
                 <StatCard icon={FileText} label="可检索知识" value={String(documents.length || "—")} note="设计、评估与工程记录" tone="amber" />
               </motion.div>
 
@@ -606,20 +646,20 @@ export function PortalShell() {
                   <EChart option={barOption} className="hero-chart" onClick={(payload) => {
                     if (payload.dataIndex !== undefined) openReport(MODELS[payload.dataIndex]);
                   }} />
-                  <div className="chart-footnote"><AlertCircle size={13} /> 已归档模型均为旧“继承动量”物理；当前零初速度模型完成后将单列身份。</div>
+                  <div className="chart-footnote"><AlertCircle size={13} /> 图表同时包含继承动量旧物理和零初速度新物理；点击柱体查看身份，跨物理分数只表示已保存模型的原始效果排序。</div>
                 </section>
 
                 <aside className="insight-stack">
                   <section className="panel run-card">
-                    <div className="run-card-top"><span className="live-badge"><i /> LIVE EXPERIMENT</span><Activity size={18} /></div>
+                    <div className="run-card-top"><span className="live-badge completed"><i /> LATEST COMPLETED</span><CheckCircle2 size={18} /></div>
                     <h3>{CURRENT_TRAINING.name}</h3>
                     <p>{CURRENT_TRAINING.budget}</p>
-                    <div className="run-progress"><span style={{ width: dashboard.available ? `${Math.min(100, Number(training.progress_fraction ?? 0) * 100)}%` : "8%" }} /></div>
+                    <div className="run-progress"><span style={{ width: "100%" }} /></div>
                     <div className="run-metrics">
-                      <span><small>TRANSITIONS</small><b>{dashboard.available ? number(Number(training.transitions ?? 0)) : "等待连接"}</b></span>
-                      <span><small>ETA</small><b>{dashboard.available ? duration(Number(training.eta_seconds ?? 0)) : "—"}</b></span>
+                      <span><small>ADAPTATION</small><b>{CURRENT_TRAINING.stageTransitions}M</b></span>
+                      <span><small>120 FPS SCORE</small><b>{number(CURRENT_TRAINING.score120, 2)}</b></span>
                     </div>
-                    <button onClick={() => navigate("live")}>打开实时遥测 <ChevronRight size={16} /></button>
+                    <button onClick={() => openReport(LATEST_MODEL)}>打开最终评估报告 <ChevronRight size={16} /></button>
                   </section>
                   <section className="panel evidence-card">
                     <span className="panel-kicker">EVIDENCE RULE</span>
@@ -634,10 +674,48 @@ export function PortalShell() {
 
           {activeView === "models" && (
             <motion.section key="models" className="page" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-              <PageHeader eyebrow="MODEL EVIDENCE MAP" title="模型性能，不只看一个最高分。" description="同时审视训练规模、模型容量、精确物理得分与样本效率。所有点均可追溯到正式评估报告。" />
+              <PageHeader eyebrow="MODEL EVIDENCE MAP" title="模型性能，不只看一个最高分。" description="同时审视训练规模、模型容量、双帧率得分、L11事件与物理身份。所有点均可追溯到正式评估报告。" />
+              <section className="panel latest-model-evidence">
+                <div className="panel-head latest-evidence-head">
+                  <div>
+                    <span className="panel-kicker">LATEST TRAINING EVIDENCE</span>
+                    <h2>旧基线 → 结构化旁路 → 120 FPS迁移</h2>
+                    <p>每个数值来自最终4096局/FPS评估；旧物理与新物理并排展示，但不伪装成严格算法消融。</p>
+                  </div>
+                  <div className="evidence-seed"><CheckCircle2 size={14} /> seed base 42,000,000</div>
+                </div>
+                <div className="featured-model-grid">
+                  {FEATURED_MODELS.map((model) => (
+                    <button key={model.id} className={`featured-model ${model.id === LATEST_MODEL.id ? "latest" : ""}`} onClick={() => openReport(model)}>
+                      <div className="featured-model-top">
+                        <span className={`physics-chip ${model.physics === "zero-velocity" ? "new" : "legacy"}`}>{physicsLabel(model)}</span>
+                        <ArrowUpRight size={16} />
+                      </div>
+                      <h3>{model.name}</h3>
+                      <p>{model.budget}</p>
+                      <div className="featured-score-pair">
+                        <span><small>30 FPS</small><b>{number(model.score30, 2)}</b></span>
+                        <span><small>120 FPS</small><b>{number(model.score120, 2)}</b></span>
+                      </div>
+                      <div className="featured-detail-grid">
+                        <span><small>L11消除 30 / 120</small><b>{number(model.l11Removed30, 2)}% / {number(model.l11Removed120, 2)}%</b></span>
+                        <span><small>危险投放 30 / 120</small><b>{number(model.danger30, 2)}% / {number(model.danger120, 2)}%</b></span>
+                        <span><small>中位分 30 / 120</small><b>{number(model.median30, 1)} / {number(model.median120, 1)}</b></span>
+                        <span><small>训练谱系</small><b>{number(model.transitions, 3)}M</b></span>
+                      </div>
+                      <footer>{model.role}<span>{model.commit}</span></footer>
+                    </button>
+                  ))}
+                </div>
+                <div className="comparison-summary">
+                  <div><span>相对旧基线的原始得分</span><b>+{number(gain(LATEST_MODEL.score30, BASELINE_128M.score30), 2)}% / +{number(gain(LATEST_MODEL.score120, BASELINE_128M.score120), 2)}%</b><small>30 / 120 FPS · 跨物理，仅作最终效果排序</small></div>
+                  <div><span>120 FPS适应的同物理净增益</span><b>+{number(gain(LATEST_MODEL.score30, STRUCTURED_128M.score30), 2)}% / +{number(gain(LATEST_MODEL.score120, STRUCTURED_128M.score120), 2)}%</b><small>30 / 120 FPS · 相同模型谱系与评估seed</small></div>
+                  <div><span>适应后L11消除提升</span><b>+{number((LATEST_MODEL.l11Removed30 ?? 0) - (STRUCTURED_128M.l11Removed30 ?? 0), 2)} / +{number((LATEST_MODEL.l11Removed120 ?? 0) - (STRUCTURED_128M.l11Removed120 ?? 0), 2)} pp</b><small>30 / 120 FPS · 生成率与消除率分开统计</small></div>
+                </div>
+              </section>
               <div className="model-layout">
                 <section className="panel scatter-panel">
-                  <div className="panel-head"><div><span className="panel-kicker">SCALE × PERFORMANCE</span><h2>训练投入与120 FPS得分</h2><p>气泡大小代表参数量，对数横轴突出不同预算下的样本效率。</p></div></div>
+                  <div className="panel-head"><div><span className="panel-kicker">SCALE × PERFORMANCE</span><h2>训练投入与120 FPS得分</h2><p>气泡大小代表参数量；圆形为旧物理，菱形为零初速度新物理，迁移模型横轴使用完整训练谱系。</p></div></div>
                   <EChart option={scatterOption} className="scatter-chart" />
                 </section>
                 <section className="panel leaderboard">
@@ -646,7 +724,7 @@ export function PortalShell() {
                     <button key={model.id} onClick={() => openReport(model)}>
                       <span className="rank">{String(index + 1).padStart(2, "0")}</span>
                       <i style={{ background: model.accent }} />
-                      <span className="leader-copy"><b>{model.shortName}</b><small>{model.role} · {model.transitions}M</small></span>
+                      <span className="leader-copy"><b>{model.shortName}</b><small>{model.role} · {model.transitions}M · {model.physics === "zero-velocity" ? "零速" : "动量"}</small></span>
                       <strong>{number(model.score120)}<small>分</small></strong>
                       <ChevronRight size={15} />
                     </button>
@@ -656,10 +734,13 @@ export function PortalShell() {
               <section className="model-cards">
                 {MODELS.map((model) => (
                   <motion.button key={model.id} whileHover={{ y: -6 }} onClick={() => openReport(model)} className="model-card">
-                    <div className="model-card-head"><span style={{ color: model.accent }}>{model.role}</span><ArrowUpRight size={17} /></div>
+                    <div className="model-card-head"><span style={{ color: model.accent }}>{model.role}</span><span className={`physics-chip ${model.physics === "zero-velocity" ? "new" : "legacy"}`}>{model.physics === "zero-velocity" ? "零速" : "动量"}</span><ArrowUpRight size={17} /></div>
                     <h3>{model.name}</h3>
                     <strong>{number(model.score120)}<small>120 FPS</small></strong>
-                    <div><span>{(model.parameters / 1_000_000).toFixed(2)}M 参数</span><span>{model.transitions}M 样本</span></div>
+                    <div className="model-card-meta"><span>{(model.parameters / 1_000_000).toFixed(2)}M 参数</span><span>{model.transitions}M 谱系</span></div>
+                    {model.l11Removed120 !== undefined && (
+                      <div className="model-card-evidence"><span>L11消除 <b>{number(model.l11Removed120, 2)}%</b></span><span>危险投放 <b>{number(model.danger120, 2)}%</b></span></div>
+                    )}
                   </motion.button>
                 ))}
               </section>

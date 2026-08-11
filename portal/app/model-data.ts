@@ -13,6 +13,15 @@ export type ModelRecord = {
   physics: "inherited-momentum" | "zero-velocity";
   accent: string;
   evidence: string;
+  budget?: string;
+  median30?: number;
+  median120?: number;
+  l11Created30?: number;
+  l11Created120?: number;
+  l11Removed30?: number;
+  l11Removed120?: number;
+  danger30?: number;
+  danger120?: number;
 };
 
 // 数值来自 docs/model_evaluations/COMPARISON_MATRIX.md；训练小时为基于
@@ -129,13 +138,81 @@ export const MODELS: ModelRecord[] = [
     physics: "inherited-momentum",
     accent: "#3478e5",
     evidence: "4096局/FPS",
+    budget: "128M 普通父轨迹",
+    median30: 4046,
+    median120: 3936.5,
+    l11Created30: 92.82,
+    l11Created120: 89.97,
+    l11Removed30: 26.34,
+    l11Removed120: 23.46,
+    danger30: 7.02,
+    danger120: 7.75,
+  },
+  {
+    id: "auxiliary-structured-128m",
+    name: "结构化辅助旁路 128M+12M",
+    shortName: "结构化 128M",
+    role: "新物理迁移起点",
+    score30: 7161.42,
+    score120: 6551.90,
+    parameters: 1220979,
+    transitions: 140.001,
+    trainingHours: 14.06,
+    report: "docs/model_evaluations/model-auxiliary-action-structured-branch-128m-r5.md",
+    commit: "2e0f836",
+    physics: "zero-velocity",
+    accent: "#7357d9",
+    evidence: "4096局/FPS · seed 42M",
+    budget: "128M父轨迹 + 12M隔离单步旁路",
+    median30: 7452,
+    median120: 4942.5,
+    l11Created30: 97.56,
+    l11Created120: 95.34,
+    l11Removed30: 54.4677734375,
+    l11Removed120: 46.435546875,
+    danger30: 5.05,
+    danger120: 5.91,
+  },
+  {
+    id: "auxiliary-structured-120fps-transfer",
+    name: "结构化辅助 120 FPS 迁移",
+    shortName: "120FPS 迁移",
+    role: "新物理当前最佳",
+    score30: 8006.41,
+    score120: 7568.18,
+    parameters: 1220979,
+    transitions: 156.003,
+    trainingHours: 16.11,
+    report: "docs/model_evaluations/model-structured-128m-to-120fps-transfer-r1.md",
+    commit: "4dd76b4",
+    physics: "zero-velocity",
+    accent: "#b366db",
+    evidence: "同seed 4096局/FPS · weights-only",
+    budget: "继承128M+12M谱系，再做16M 120FPS适应",
+    median30: 8110,
+    median120: 7780,
+    l11Created30: 98.34,
+    l11Created120: 98.02,
+    l11Removed30: 64.0380859375,
+    l11Removed120: 59.521484375,
+    danger30: 4.26,
+    danger120: 4.99,
   },
 ];
 
 export const CURRENT_TRAINING = {
-  name: "结构化辅助旁路 128M",
-  status: "训练中",
+  modelId: "auxiliary-structured-120fps-transfer",
+  name: "结构化辅助 120 FPS 迁移",
+  status: "已完成并归档",
   physics: "合成水果速度归零",
-  budget: "128M 父轨迹 + 12M 旁路",
-  report: "docs/codex/55_启动128M结构化辅助旁路训练_2026_08_11.md",
+  budget: "128M父轨迹 + 12M旁路 → 16M适应",
+  stageTransitions: 16.001,
+  score120: 7568.18,
+  report: "docs/model_evaluations/model-structured-128m-to-120fps-transfer-r1.md",
 };
+
+export const FEATURED_MODEL_IDS = [
+  "baseline-128m",
+  "auxiliary-structured-128m",
+  "auxiliary-structured-120fps-transfer",
+] as const;

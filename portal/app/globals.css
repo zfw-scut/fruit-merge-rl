@@ -2127,3 +2127,142 @@ body {
   .lab-action-strip { grid-template-columns: 30px 1fr; }
   .lab-action-strip b { grid-column: 2; text-align: left; }
 }
+
+/* 最新模型证据：旧基线、结构化旁路与120 FPS迁移保持物理身份分离。 */
+.latest-model-evidence {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 14px;
+  padding: 25px;
+}
+.latest-model-evidence::after {
+  position: absolute;
+  right: -90px;
+  top: -120px;
+  width: 280px;
+  height: 280px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(115, 87, 217, 0.11), transparent 68%);
+  pointer-events: none;
+  content: "";
+}
+.latest-evidence-head { position: relative; z-index: 1; align-items: flex-start; }
+.evidence-seed {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid rgba(115, 87, 217, 0.14);
+  border-radius: 999px;
+  background: #e7e8f3;
+  padding: 7px 11px;
+  color: #6754a8;
+  font-family: var(--mono);
+  font-size: 8px;
+  box-shadow: var(--soft-inset);
+}
+.featured-model-grid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 11px;
+  margin-top: 20px;
+}
+.featured-model {
+  display: flex;
+  min-width: 0;
+  min-height: 310px;
+  flex-direction: column;
+  border: 1px solid rgba(255, 255, 255, 0.76);
+  border-radius: 16px;
+  background: #e9edf4;
+  padding: 17px;
+  color: #68768c;
+  text-align: left;
+  box-shadow: var(--soft-shadow-small), inset 0 1px rgba(255, 255, 255, 0.74);
+  transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+.featured-model:hover {
+  transform: translateY(-3px);
+  background: #eef2f7;
+  box-shadow: 10px 10px 20px rgba(161, 171, 187, 0.38), -8px -8px 18px rgba(255, 255, 255, 0.78);
+}
+.featured-model.latest {
+  border-color: rgba(179, 102, 219, 0.25);
+  background: linear-gradient(145deg, #eee9f5, #e9edf4 70%);
+}
+.featured-model-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #8793a5; }
+.physics-chip {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 7px;
+  font-family: var(--mono);
+  font-size: 7px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.physics-chip.legacy { background: rgba(52, 120, 229, 0.09); color: #4477bd; }
+.physics-chip.new { background: rgba(137, 83, 197, 0.10); color: #7952ae; }
+.featured-model h3 { margin: 16px 0 5px; color: #35445b; font-size: 15px; font-weight: 650; }
+.featured-model > p { min-height: 34px; margin: 0; color: #8995a6; font-size: 9px; line-height: 1.6; }
+.featured-score-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 15px 0 12px; }
+.featured-score-pair span,
+.featured-detail-grid span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  border-radius: 10px;
+  background: #e4e9f0;
+  padding: 9px;
+  box-shadow: var(--soft-inset);
+}
+.featured-score-pair small,
+.featured-detail-grid small { color: #98a3b2; font-size: 7px; }
+.featured-score-pair b { color: #2c3b52; font-family: var(--mono); font-size: 17px; letter-spacing: -0.04em; }
+.featured-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.featured-detail-grid b { overflow: hidden; color: #56657b; font-family: var(--mono); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.featured-model footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; padding-top: 14px; color: #66758b; font-size: 8px; }
+.featured-model footer span { color: #9aa4b4; font-family: var(--mono); }
+.comparison-summary {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 13px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.74);
+  border-radius: 13px;
+  background: rgba(113, 127, 149, 0.08);
+  box-shadow: var(--soft-inset);
+}
+.comparison-summary > div { display: flex; min-width: 0; flex-direction: column; gap: 5px; background: rgba(237, 241, 247, 0.76); padding: 13px 15px; }
+.comparison-summary span { color: #78869a; font-size: 8px; }
+.comparison-summary b { color: #3d506b; font-family: var(--mono); font-size: 13px; }
+.comparison-summary small { color: #9ba5b4; font-size: 7px; line-height: 1.5; }
+.model-card { min-height: 220px; }
+.model-card-head { gap: 7px; }
+.model-card-head > span:first-child { margin-right: auto; }
+.model-card-meta { display: flex; gap: 12px; margin-top: 14px; color: #8d99aa; font-size: 8px; }
+.model-card-evidence { display: flex; gap: 11px; margin-top: 12px; border-top: 1px solid rgba(77, 93, 117, 0.07); padding-top: 10px; color: #929dad; font-size: 7px; }
+.model-card-evidence b { color: #526278; font-family: var(--mono); }
+.live-badge.completed { color: #6754a8; }
+.live-badge.completed i { background: #8d64c6; box-shadow: 0 0 0 4px rgba(141, 100, 198, 0.10); }
+
+@media (max-width: 1080px) {
+  .featured-model-grid { grid-template-columns: 1fr; }
+  .featured-model { min-height: 0; }
+  .comparison-summary { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 620px) {
+  .latest-model-evidence { padding: 18px; }
+  .latest-evidence-head { align-items: flex-start; flex-direction: column; }
+  .evidence-seed { margin-top: 12px; }
+  .featured-detail-grid { grid-template-columns: 1fr; }
+  .featured-score-pair b { font-size: 14px; }
+}
