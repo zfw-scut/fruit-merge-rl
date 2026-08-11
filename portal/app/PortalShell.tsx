@@ -79,6 +79,8 @@ type ProcessSnapshot = {
   url: string | null;
   command_preview: string;
   log_tail: string[];
+  error_summary?: string | null;
+  stopped_by_user?: boolean;
 };
 
 type ToolDefinition = {
@@ -725,7 +727,7 @@ export function PortalShell() {
                       {tool.process && (
                         <div className="process-strip">
                           <span className={running ? "on" : ""} />
-                          <b>{running ? `PID ${tool.process.pid}` : tool.process.exit_code === 0 ? "最近执行完成" : `已退出 ${tool.process.exit_code ?? ''}`}</b>
+                          <b>{running ? `PID ${tool.process.pid}` : tool.process.stopped_by_user ? "已手动停止" : tool.process.exit_code === 0 ? "最近执行完成" : `已退出 ${tool.process.exit_code ?? ''}`}</b>
                           <small>{tool.process.started_at ? new Date(tool.process.started_at * 1000).toLocaleTimeString('zh-CN', { hour12: false }) : ''}</small>
                         </div>
                       )}
@@ -738,6 +740,9 @@ export function PortalShell() {
                         ) : <button className="primary-button compact" onClick={() => openToolSettings(tool)}><Play size={15} /> {tool.primary_action}</button>}
                         <button className="icon-button" onClick={() => openToolSettings(tool)} aria-label={`${tool.name}参数`}><Settings2 size={16} /></button>
                       </div>
+                      {tool.process && !running && !tool.process.stopped_by_user && tool.process.exit_code !== 0 && tool.process.error_summary ? (
+                        <div className="tool-process-error"><AlertCircle size={14} /><span><b>启动失败</b>{tool.process.error_summary}</span></div>
+                      ) : null}
                       {tool.process?.log_tail?.length ? <details className="tool-log"><summary>最近日志</summary><pre>{tool.process.log_tail.join('\n')}</pre></details> : null}
                     </motion.article>
                   );

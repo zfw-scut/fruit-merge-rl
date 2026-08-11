@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from threading import Thread
 import unittest
@@ -8,6 +9,7 @@ from urllib.request import Request, urlopen
 
 from daxigua.portal.service import (
     PortalServer,
+    _subprocess_environment,
     build_tool_command,
     document_revision,
     scan_documents,
@@ -50,6 +52,13 @@ class PortalServiceTests(unittest.TestCase):
         self.assertEqual(command[command.index('--host') + 1], '127.0.0.1')
         self.assertEqual(command[command.index('--device') + 1], 'cuda')
         self.assertEqual(url, 'http://127.0.0.1:8769/')
+
+    def test_tool_environment_includes_project_source_root(self):
+        environment = _subprocess_environment()
+        entries = environment['PYTHONPATH'].split(os.pathsep)
+        self.assertEqual(Path(entries[0]).resolve(), (PROJECT_ROOT / 'src').resolve())
+        self.assertEqual(environment['PYTHONIOENCODING'], 'utf-8')
+        self.assertEqual(environment['PYTHONUTF8'], '1')
 
     def test_tool_command_rejects_unlisted_choices(self):
         with self.assertRaisesRegex(ValueError, 'device'):

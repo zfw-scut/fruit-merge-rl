@@ -270,9 +270,17 @@ class ManagedProcess:
     started_at: float
     url: str | None
     command: list[str]
+    stopped_by_user: bool = False
 
     def snapshot(self) -> dict[str, Any]:
         exit_code = self.process.poll()
+        log_tail = self._tail()
+        error_summary = None
+        if exit_code not in (None, 0) and not self.stopped_by_user:
+            error_summary = next(
+                (line.strip() for line in reversed(log_tail) if line.strip()),
+                f'进程退出码 {exit_code}',
+            )
         return {
             'tool_id': self.tool_id,
             'pid': self.process.pid,
@@ -281,7 +289,9 @@ class ManagedProcess:
             'started_at': self.started_at,
             'url': self.url,
             'command_preview': subprocess.list2cmdline(self.command),
-            'log_tail': self._tail(),
+            'log_tail': log_tail,
+            'error_summary': error_summary,
+            'stopped_by_user': self.stopped_by_user,
         }
 
     def _tail(self, lines: int = 24) -> list[str]:
@@ -310,6 +320,7 @@ class ProcessRegistry:
             process = subprocess.Popen(
                 command,
                 cwd=PROJECT_ROOT,
+                env=_subprocess_environment(),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -326,6 +337,7 @@ class ProcessRegistry:
             if managed is None:
                 raise ValueError('该工具没有门户启动记录')
             if managed.process.poll() is None:
+                managed.stopped_by_user = True
                 managed.process.terminate()
                 try:
                     managed.process.wait(timeout=5)
@@ -336,6 +348,20 @@ class ProcessRegistry:
     def snapshots(self) -> dict[str, dict[str, Any]]:
         with self._lock:
             return {key: item.snapshot() for key, item in self._items.items()}
+
+
+def _subprocess_environment() -> dict[str, str]:
+    """为仓库工具统一注入src路径，不依赖调用门户前的终端环境。"""
+    environment = os.environ.copy()
+    source_root = str(PROJECT_ROOT / 'src')
+    current = environment.get('PYTHONPATH', '')
+    entries = [entry for entry in current.split(os.pathsep) if entry]
+    if source_root not in entries:
+        entries.insert(0, source_root)
+    environment['PYTHONPATH'] = os.pathsep.join(entries)
+    environment['PYTHONIOENCODING'] = 'utf-8'
+    environment['PYTHONUTF8'] = '1'
+    return environment
 
 
 class PortalServer:
