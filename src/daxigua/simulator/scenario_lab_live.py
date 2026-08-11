@@ -17,7 +17,7 @@ from .reference import PymunkReferenceGame
 class ScenarioLabLiveSession:
     """在独立线程中按固定时间步持续推进一个 Pymunk 世界。"""
 
-    def __init__(self, *, physics_fps=120, publish_fps=60, seed=20260806):
+    def __init__(self, *, physics_fps=120, publish_fps=120, seed=20260806):
         if physics_fps not in (30, 120):
             raise ValueError('physics_fps must be 30 or 120')
         if not 1 <= int(publish_fps) <= int(physics_fps):

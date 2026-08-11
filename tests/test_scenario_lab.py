@@ -239,6 +239,13 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertGreater(later['physics_frame'], snapshot['physics_frame'])
         self.assertFalse(snapshot['paused'])
 
+    def test_live_session_defaults_to_full_rate_publish(self):
+        session = ScenarioLabLiveSession()
+        snapshot = session.snapshot()
+
+        self.assertEqual(120, snapshot['physics_fps'])
+        self.assertEqual(120, snapshot['publish_fps'])
+
     def test_live_session_model_action_advances_natural_queue(self):
         session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
         session.start()
