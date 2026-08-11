@@ -11,6 +11,7 @@ import torch
 
 from daxigua.rl.autoscale import AdaptiveScaleController
 from daxigua.rl.checkpoint import (
+    initialize_learner_weights,
     load_checkpoint,
     restore_rng_state,
     save_checkpoint_atomic,
@@ -43,9 +44,11 @@ from daxigua.rl.monitoring import (
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
 from daxigua.rl.trainer import (
+    BaselineTrainer,
     _bounded_stage_thresholds,
     _lower_unreachable_prewarm_targets,
     epsilon_at_transition,
+    training_simulator_config,
 )
 from daxigua.rl.viewer import (
     load_viewer_model,
@@ -359,8 +362,35 @@ class RewardTrainingConfigTest(unittest.TestCase):
             0.20,
         )
 
+        transfer_120fps = TrainingConfig.from_toml(
+            project_root
+            / 'configs'
+            / 'gnn_dqn_auxiliary_action_structured_120fps_transfer_16m.toml'
+        )
+        self.assertEqual(transfer_120fps.training_physics_fps, 120)
+        self.assertEqual(transfer_120fps.total_transitions, 16_000_000)
+        self.assertEqual(transfer_120fps.dqn.learning_rate, 3e-5)
+        self.assertEqual(
+            transfer_120fps.dqn.epsilon_schedule,
+            ((0, 0.10), (4_000_000, 0.05), (16_000_000, 0.05)),
+        )
+        self.assertTrue(transfer_120fps.model.structured_contact_enabled)
+        self.assertFalse(transfer_120fps.branch_learning.enabled)
+
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):
+    def test_training_physics_profile_is_explicit_and_validated(self):
+        with self.assertRaisesRegex(ValueError, '30 or 120'):
+            TrainingConfig(training_physics_fps=60)
+        fast = training_simulator_config(TrainingConfig(), 'cpu')
+        accurate = training_simulator_config(
+            TrainingConfig(training_physics_fps=120), 'cpu'
+        )
+        self.assertEqual(fast.physics_fps, 30)
+        self.assertEqual(accurate.physics_fps, 120)
+        self.assertTrue(fast.drop_fast_forward)
+        self.assertTrue(accurate.drop_fast_forward)
+
     def test_censored_stage_quantiles_use_the_pilot_window_quartiles(self):
         self.assertEqual(
             _bounded_stage_thresholds((128, 128, 128), 128),
@@ -456,6 +486,155 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
         self.assertEqual(viewer_model.device, torch.device('cpu'))
         self.assertFalse(
             loaded['replay_metadata']['replay_saved_in_checkpoint']
+        )
+
+    def test_weights_only_initialization_resets_training_state(self):
+        model_config = _small_model_config()
+        source = DqnLearner(
+            BaselineGnnDqn(model_config),
+            DqnConfig(use_bfloat16=False, fused_adam=False),
+        )
+        with torch.no_grad():
+            for parameter in source.online_module.parameters():
+                parameter.fill_(0.25)
+            for parameter in source.target_module.parameters():
+                parameter.fill_(0.75)
+        source.update_count = 17
+        config = TrainingConfig(
+            device='cpu',
+            max_envs=2,
+            active_envs=2,
+            total_transitions=8,
+            model=model_config,
+            replay=ReplayConfig(
+                capacity=8,
+                batch_size=2,
+                warmup_transitions=2,
+                warmup_stage_ratios=(1.0, 0.0, 0.0, 0.0),
+            ),
+            dashboard=DashboardConfig(enabled=False),
+            autoscale=AutoScaleConfig(enabled=False),
+        )
+        target = DqnLearner(
+            BaselineGnnDqn(model_config),
+            DqnConfig(use_bfloat16=False, fused_adam=False),
+        )
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.pt'
+            save_checkpoint_atomic(
+                path,
+                learner=source,
+                training_config=config,
+                progress={'transitions': 128_000_000, 'updates': 17},
+                replay_metadata={'replay_saved_in_checkpoint': False},
+            )
+            metadata = initialize_learner_weights(
+                target,
+                path,
+                expected_model_config=config.to_dict()['model'],
+            )
+        self.assertEqual(target.update_count, 0)
+        self.assertFalse(target.optimizer.state)
+        self.assertEqual(metadata['kind'], 'weights_only')
+        self.assertEqual(
+            metadata['source_progress']['transitions'], 128_000_000
+        )
+        for online, source_online, target_parameter in zip(
+                target.online_module.parameters(),
+                source.online_module.parameters(),
+                target.target_module.parameters()):
+            self.assertTrue(torch.equal(online, source_online))
+            self.assertTrue(torch.equal(target_parameter, source_online))
+
+    def test_120fps_training_uses_120fps_as_periodic_primary_eval(self):
+        trainer = object.__new__(BaselineTrainer)
+        trainer.config = TrainingConfig(
+            training_physics_fps=120,
+            evaluation=EvaluationConfig(
+                fast_interval_transitions=4_000_000,
+                accurate_milestones=(8_000_000,),
+            ),
+        )
+        trainer.simulator_config = SimulatorConfig.high_fidelity_fast()
+        trainer.transitions = 4_000_000
+        trainer.completed_accurate_milestones = set()
+        calls = []
+        trainer._evaluate = lambda fps, episodes, transition: calls.append(
+            (fps, episodes, transition)
+        )
+        trainer._maybe_evaluate(0)
+        self.assertEqual(calls, [(120, 512, 4_000_000)])
+
+    def test_trainer_records_weights_only_initialization_identity(self):
+        model_config = _small_model_config()
+        source = DqnLearner(
+            BaselineGnnDqn(model_config),
+            DqnConfig(use_bfloat16=False, fused_adam=False),
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_config = TrainingConfig(
+                run_dir=str(root / 'source'),
+                device='cpu',
+                max_envs=2,
+                active_envs=2,
+                total_transitions=8,
+                model=model_config,
+                replay=ReplayConfig(
+                    capacity=8,
+                    batch_size=2,
+                    warmup_transitions=2,
+                    warmup_stage_ratios=(1.0, 0.0, 0.0, 0.0),
+                ),
+                dashboard=DashboardConfig(enabled=False),
+                autoscale=AutoScaleConfig(enabled=False),
+            )
+            source_path = root / 'source.pt'
+            save_checkpoint_atomic(
+                source_path,
+                learner=source,
+                training_config=source_config,
+                progress={'transitions': 128_000_000},
+                replay_metadata={'replay_saved_in_checkpoint': False},
+            )
+            target_config = TrainingConfig(
+                run_dir=str(root / 'target'),
+                device='cpu',
+                training_physics_fps=120,
+                max_envs=2,
+                active_envs=2,
+                total_transitions=8,
+                model=model_config,
+                replay=source_config.replay,
+                dashboard=DashboardConfig(enabled=False),
+                autoscale=AutoScaleConfig(enabled=False),
+            )
+            trainer = BaselineTrainer(target_config)
+            try:
+                metadata = trainer.initialize_from_checkpoint(source_path)
+                initialization = json.loads(
+                    (root / 'target' / 'initialization.json').read_text(
+                        encoding='utf-8'
+                    )
+                )
+                identity = json.loads(
+                    (root / 'target' / 'run_identity.json').read_text(
+                        encoding='utf-8'
+                    )
+                )
+            finally:
+                trainer.resource_sampler.close()
+                trainer.dashboard.close()
+        self.assertEqual(trainer.transitions, 0)
+        self.assertEqual(trainer.learner.update_count, 0)
+        self.assertEqual(metadata['target_training_physics_fps'], 120)
+        self.assertEqual(initialization['source_training_physics_fps'], 30)
+        self.assertEqual(
+            identity['initialization']['source_checkpoint_sha256'],
+            metadata['source_checkpoint_sha256'],
+        )
+        self.assertEqual(
+            identity['training_simulator_config']['physics_fps'], 120
         )
 
     @unittest.skipUnless(torch.cuda.is_available(), 'CUDA required')

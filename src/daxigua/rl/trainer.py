@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
+from dataclasses import asdict
 import json
 import math
 import os
@@ -21,6 +22,7 @@ from daxigua.simulator import (
 )
 
 from .checkpoint import (
+    initialize_learner_weights,
     load_checkpoint,
     restore_rng_state,
     save_checkpoint_atomic,
@@ -75,6 +77,24 @@ def epsilon_at_transition(dqn_config, transition, total_transitions):
         dqn_config.epsilon_start
         + progress
         * (dqn_config.epsilon_end - dqn_config.epsilon_start)
+    )
+
+
+def training_simulator_config(config, device):
+    """按训练身份构造30或120 FPS模拟器，避免入口各自硬编码。"""
+
+    device = torch.device(device)
+    factory = (
+        SimulatorConfig.training_fast
+        if config.training_physics_fps == 30
+        else SimulatorConfig.high_fidelity_fast
+    )
+    return factory(
+        max_fruits=config.model.max_fruits,
+        action_count=config.model.action_count,
+        queue_length=config.model.queue_length,
+        use_cuda_extension=device.type == 'cuda',
+        track_action_effects=config.model.action_effect_enabled,
     )
 
 
@@ -208,7 +228,7 @@ class _TensorMetricAccumulator:
 
 
 class BaselineTrainer:
-    """30 FPS 独占训练；评估模拟器从不写入 Replay。"""
+    """单一物理域训练；其它帧率评估从不写入 Replay。"""
 
     CHECKPOINT_MILESTONES = (
         1_000_000,
@@ -258,12 +278,8 @@ class BaselineTrainer:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.set_float32_matmul_precision('high')
 
-        self.simulator_config = SimulatorConfig.training_fast(
-            max_fruits=config.model.max_fruits,
-            action_count=config.model.action_count,
-            queue_length=config.model.queue_length,
-            use_cuda_extension=self.device.type == 'cuda',
-            track_action_effects=config.model.action_effect_enabled,
+        self.simulator_config = training_simulator_config(
+            config, self.device
         )
         self.simulator = TensorVectorSimulator(
             config.max_envs,
@@ -404,6 +420,7 @@ class BaselineTrainer:
     def _write_run_identity(self):
         identity = {
             'training_config': self.config.to_dict(),
+            'training_simulator_config': asdict(self.simulator_config),
             'git': _git_identity(self.project_root),
             'torch_version': torch.__version__,
             'cuda_runtime': torch.version.cuda,
@@ -420,6 +437,52 @@ class BaselineTrainer:
             json.dumps(identity, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
+
+    def initialize_from_checkpoint(self, checkpoint_path):
+        """从来源checkpoint只迁移网络参数，保持当前run为全新训练。"""
+
+        metadata = initialize_learner_weights(
+            self.learner,
+            checkpoint_path,
+            expected_model_config=self.config.to_dict()['model'],
+            map_location=self.device,
+        )
+        metadata['target_training_physics_fps'] = (
+            self.simulator_config.physics_fps
+        )
+        path = self.run_dir / 'initialization.json'
+        temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+        temporary.write_text(
+            json.dumps(_json_safe(metadata), ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        os.replace(temporary, path)
+
+        identity_path = self.run_dir / 'run_identity.json'
+        identity = json.loads(identity_path.read_text(encoding='utf-8'))
+        identity['initialization'] = metadata
+        temporary = identity_path.with_name(
+            f'.{identity_path.name}.{os.getpid()}.tmp'
+        )
+        temporary.write_text(
+            json.dumps(_json_safe(identity), ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        os.replace(temporary, identity_path)
+        self.dashboard.event(
+            'weights_initialized',
+            '已仅迁移在线模型权重；目标网络已同步，训练状态全部重新开始',
+            source_checkpoint_sha256=(
+                metadata['source_checkpoint_sha256']
+            ),
+            source_training_physics_fps=(
+                metadata['source_training_physics_fps']
+            ),
+            target_training_physics_fps=(
+                metadata['target_training_physics_fps']
+            ),
+        )
+        return metadata
 
     def _write_run_status(self, phase, message, **values):
         path = self.run_dir / 'run_status.json'
@@ -1262,11 +1325,13 @@ class BaselineTrainer:
 
     def _maybe_evaluate(self, previous_transitions):
         interval = self.config.evaluation.fast_interval_transitions
+        primary_fps = self.simulator_config.physics_fps
+        secondary_fps = 120 if primary_fps == 30 else 30
         if (
                 previous_transitions // interval
                 < self.transitions // interval):
             self._evaluate(
-                30,
+                primary_fps,
                 self.config.evaluation.periodic_episodes,
                 self.transitions,
             )
@@ -1275,7 +1340,7 @@ class BaselineTrainer:
                     previous_transitions < milestone <= self.transitions
                     and milestone not in self.completed_accurate_milestones):
                 self._evaluate(
-                    120,
+                    secondary_fps,
                     self.config.evaluation.periodic_episodes,
                     self.transitions,
                 )
@@ -1451,11 +1516,14 @@ class BaselineTrainer:
         self.dashboard.event(
             'training_started',
             (
-                '空间奖励30 FPS GNN-DQN训练启动'
+                f'空间奖励{self.simulator_config.physics_fps} FPS '
+                'GNN-DQN训练启动'
                 if self.config.reward.kind in ('spatial_v2', 'spatial_v2_1')
-                else '纯分数基线 30 FPS GNN-DQN 训练启动'
+                else f'纯分数基线 {self.simulator_config.physics_fps} FPS '
+                'GNN-DQN 训练启动'
             ),
             reward_kind=self.config.reward.kind,
+            training_physics_fps=self.simulator_config.physics_fps,
             dashboard=f'http://{self.config.dashboard.host}:{self.config.dashboard.port}',
         )
         self._write_run_status('training', '训练正在进行')

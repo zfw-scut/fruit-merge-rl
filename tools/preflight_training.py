@@ -20,7 +20,11 @@ if str(SRC_ROOT) not in sys.path:
 import torch
 
 from daxigua.rl.action_effects import build_action_effect_targets
-from daxigua.rl.checkpoint import load_checkpoint, save_checkpoint_atomic
+from daxigua.rl.checkpoint import (
+    initialize_learner_weights,
+    load_checkpoint,
+    save_checkpoint_atomic,
+)
 from daxigua.rl.config import TrainingConfig
 from daxigua.rl.curves import render_training_curve_snapshot
 from daxigua.rl.evaluation import evaluate_policy
@@ -28,9 +32,11 @@ from daxigua.rl.learner import DqnLearner
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.observations import TensorState
 from daxigua.rl.replay import GpuReplayBuffer
-from daxigua.rl.trainer import ranked_active_learning_candidates
+from daxigua.rl.trainer import (
+    ranked_active_learning_candidates,
+    training_simulator_config,
+)
 from daxigua.simulator import (
-    SimulatorConfig,
     SpatialRewardComputer,
     SpatialRewardConfig,
     TensorVectorSimulator,
@@ -48,6 +54,10 @@ def parse_args():
     parser.add_argument('--smoke-batch-size', type=int, default=16)
     parser.add_argument('--evaluation-episodes', type=int, default=8)
     parser.add_argument('--evaluation-max-drops', type=int, default=16)
+    parser.add_argument(
+        '--init-checkpoint', type=Path,
+        help='在预检更新前验证weights-only迁移来源',
+    )
     parser.add_argument(
         '--disable-compile',
         action='store_true',
@@ -67,13 +77,7 @@ def run_preflight(args):
         raise RuntimeError('CUDA is not available')
     if device.type == 'cuda' and device.index is None:
         device = torch.device('cuda', torch.cuda.current_device())
-    simulator_config = SimulatorConfig.training_fast(
-        max_fruits=config.model.max_fruits,
-        action_count=config.model.action_count,
-        queue_length=config.model.queue_length,
-        use_cuda_extension=device.type == 'cuda',
-        track_action_effects=config.model.action_effect_enabled,
-    )
+    simulator_config = training_simulator_config(config, device)
     simulator = TensorVectorSimulator(
         args.smoke_envs,
         config=simulator_config,
@@ -108,6 +112,14 @@ def run_preflight(args):
             ),
         ),
     )
+    initialization = None
+    if args.init_checkpoint is not None:
+        initialization = initialize_learner_weights(
+            learner,
+            args.init_checkpoint,
+            expected_model_config=config.to_dict()['model'],
+            map_location=device,
+        )
     model = learner.online_model
     replay = GpuReplayBuffer(
         max(args.smoke_envs * 2, args.smoke_batch_size * 2),
@@ -442,7 +454,8 @@ def run_preflight(args):
         'evaluations': evaluations,
         'checkpoint_round_trip': True,
         'curve_snapshot': curve_snapshot,
-        'training_physics_fps': 30,
+        'training_physics_fps': simulator_config.physics_fps,
+        'initialization': initialization,
         'evaluation_physics_fps': [30, 120],
         'accurate_replay_writes': 0,
         'reward_kind': config.reward.kind,

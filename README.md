@@ -15,7 +15,8 @@
 - 按当前规则重新实现的 Pymunk 行为参考环境，只用于对照和回退。
 - 定长混合局部物理图、q0～q3 队列图和 21 个单向动作探针；
 - 1-step Dueling Double DQN、GPU Replay、分阶段预热和原子 checkpoint；
-- 只使用 30 FPS 采集训练数据，隔离执行 30/120 FPS greedy 评估；
+- 默认使用 30 FPS 采集训练数据，也支持独立的 120 FPS 物理域适应训练；
+  两种训练都隔离执行 30/120 FPS greedy 评估；
 - 云端 CUDA 门禁、端到端性能标定、动态环境扩容和低开销 Web 面板；
 - 最终 Replay 抽样、完整决策边界轨迹和 SHA-256 产物清单。
 - 从任意当前格式 checkpoint 重建在线 GNN，并生成带逐帧物理、Q 值和动作解释的本地模型观看页面。
@@ -60,8 +61,9 @@ python tools/run_autotuned_training.py --max-wall-hours 12
 ```
 
 也可以直接运行 `scripts/run_cloud_training.sh --max-wall-hours 12`。面板默认监听
-`127.0.0.1:8765`，应通过 SSH 端口转发访问。训练只调用 30 FPS 物理；120 FPS 只在里程碑
-和最终评估中使用，相关状态不会写入 Replay 或 loss。面板旁路默认每 120 秒原子更新
+`127.0.0.1:8765`，应通过 SSH 端口转发访问。默认配置只调用 30 FPS 训练物理；使用
+`training_physics_fps = 120` 的迁移配置时，Replay和loss则只接收120 FPS状态，不与30 FPS
+经验混合。另一个帧率仍只用于里程碑和最终评估。面板旁路默认每 120 秒原子更新
 `<run_dir>/plots/training_curves.png`，评估完成和训练收尾时也会立即刷新；页面会自动显示
 最新图片，最终 PNG 与 `training_curves.json` 一并作为训练产物保留。
 
@@ -185,6 +187,20 @@ simulator.reset(reset_mask)
 
 预检通过后再用相同配置启动 `tools\train_gnn_dqn.py`；不要把预览图或 smoke 指标当作
 正式效果结论。
+
+从同结构checkpoint进入新的物理域时使用weights-only入口，不能用严格恢复入口：
+
+```powershell
+& $python tools\preflight_training.py `
+    --config configs\gnn_dqn_auxiliary_action_structured_120fps_transfer_16m.toml `
+    --init-checkpoint runs\<来源run>\checkpoints\final.pt
+& $python tools\train_gnn_dqn.py `
+    --config configs\gnn_dqn_auxiliary_action_structured_120fps_transfer_16m.toml `
+    --init-checkpoint runs\<来源run>\checkpoints\final.pt
+```
+
+该入口只迁移在线模型参数并用其重建目标网络；优化器、Replay、RNG、训练计数和epsilon
+进度全部重新开始，并在新run中写入来源checkpoint的SHA-256和迁移清单。
 
 ## 验证和性能
 

@@ -75,6 +75,79 @@ def load_checkpoint(path, *, map_location='cpu'):
     )
 
 
+def initialize_learner_weights(
+        learner,
+        checkpoint_path,
+        *,
+        expected_model_config,
+        map_location='cpu'):
+    """只继承在线模型权重，并显式重建目标网络。
+
+    该入口用于物理域或其它训练分布迁移。优化器、更新计数、Replay、RNG
+    和训练进度都不得从来源 checkpoint 继承。
+    """
+
+    if learner.update_count != 0 or learner.optimizer.state:
+        raise RuntimeError(
+            'weights-only initialization requires a fresh learner'
+        )
+    checkpoint_path = Path(checkpoint_path).resolve()
+    checkpoint = load_checkpoint(
+        checkpoint_path, map_location=map_location
+    )
+    source_training_config = checkpoint.get('training_config')
+    if not isinstance(source_training_config, dict):
+        raise ValueError('source checkpoint has no training_config')
+    source_model_config = source_training_config.get('model')
+    expected_model_config = dict(expected_model_config)
+    if source_model_config != expected_model_config:
+        raise ValueError(
+            'source checkpoint model config does not match target model config'
+        )
+    learner_state = checkpoint.get('learner')
+    if (
+            not isinstance(learner_state, dict)
+            or 'online_model' not in learner_state):
+        raise ValueError('source checkpoint has no online model weights')
+    learner.online_module.load_state_dict(
+        learner_state['online_model'], strict=True
+    )
+    learner.target_module.load_state_dict(
+        learner.online_module.state_dict(), strict=True
+    )
+    learner.update_count = 0
+    if learner.optimizer.state:
+        raise RuntimeError(
+            'weights-only initialization restored optimizer state'
+        )
+    source_progress_payload = checkpoint.get('progress', {})
+    source_progress = {
+        name: int(source_progress_payload.get(name, 0))
+        for name in (
+            'transitions', 'branch_transitions', 'branch_source_states',
+            'updates', 'episodes',
+        )
+    }
+    return {
+        'kind': 'weights_only',
+        'source_checkpoint': str(checkpoint_path),
+        'source_checkpoint_sha256': sha256_file(checkpoint_path),
+        'source_training_physics_fps': int(
+            source_training_config.get('training_physics_fps', 30)
+        ),
+        'source_progress': source_progress,
+        'source_model_config': source_model_config,
+        'reset_components': [
+            'target_model_from_online',
+            'optimizer',
+            'replay',
+            'rng',
+            'training_progress',
+            'epsilon_schedule_progress',
+        ],
+    }
+
+
 def sha256_file(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as handle:

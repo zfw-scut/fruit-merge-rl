@@ -375,6 +375,7 @@ class TrainingConfig:
     run_dir: str = 'runs/gnn_dqn_baseline'
     device: str = 'cuda'
     seed: int = 20260805
+    training_physics_fps: int = 30
     max_envs: int = 4096
     active_envs: int = 4096
     total_transitions: int = 50_000_000
@@ -401,6 +402,8 @@ class TrainingConfig:
     autoscale: AutoScaleConfig = field(default_factory=AutoScaleConfig)
 
     def __post_init__(self):
+        if self.training_physics_fps not in (30, 120):
+            raise ValueError('training_physics_fps must be 30 or 120')
         if self.max_envs <= 0 or self.active_envs <= 0:
             raise ValueError('environment counts must be positive')
         if self.active_envs > self.max_envs:

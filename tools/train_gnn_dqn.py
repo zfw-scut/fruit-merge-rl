@@ -45,7 +45,12 @@ def parse_args():
     parser.add_argument('--disable-autoscale', action='store_true')
     parser.add_argument('--compile-model', action='store_true')
     parser.add_argument('--disable-compile', action='store_true')
-    parser.add_argument('--resume', type=Path)
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument('--resume', type=Path)
+    initialization.add_argument(
+        '--init-checkpoint', type=Path,
+        help='只迁移在线模型权重；优化器、Replay、RNG和训练进度重新开始',
+    )
     parser.add_argument('--skip-final-evaluation', action='store_true')
     parser.add_argument(
         '--exit-after-completion', action='store_true',
@@ -205,6 +210,8 @@ def main():
         signal.signal(signal.SIGTERM, stop_handler)
     if args.resume is not None:
         trainer.resume(args.resume)
+    elif args.init_checkpoint is not None:
+        trainer.initialize_from_checkpoint(args.init_checkpoint)
     result = trainer.run(
         final_evaluation=not args.skip_final_evaluation
     )
