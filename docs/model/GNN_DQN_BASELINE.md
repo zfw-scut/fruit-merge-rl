@@ -2,8 +2,8 @@
 
 - 状态：模型、1-step TD、奖励与第一版训练系统均已确认
 - 目标：建立后续所有模型升级共同对比的最小 GNN-DQN 参考版本
-- 实现状态：已完成RTX 5090首轮基线与4层传播扩容训练；当前效果基准见
-  `../model_evaluations/model-baseline-scale-v1-l4-r1.md`
+- 实现状态：已完成首轮基线与后续传播扩容；本文保留最小参考规格，最新模型排序见
+  `../model_evaluations/COMPARISON_MATRIX.md`
 
 ## 1. 基线边界
 

@@ -1,9 +1,12 @@
 # 辅助动作效果学习与策略不确定性
 
-- 状态：单步旁路训练已完成；结构化首次接触头已实现、等待下一轮正式训练验证
-- 更新日期：2026-08-11
-- 推荐配置：`configs/gnn_dqn_auxiliary_action_l5_24m.toml`
+- 状态：结构化首次接触头、128M父训练+12M旁路及120 FPS迁移均已完成；单模块因果仍待消融
+- 更新日期：2026-08-12
+- 最新归档配置：`configs/gnn_dqn_auxiliary_action_l5_128m.toml`、`configs/gnn_dqn_auxiliary_action_structured_120fps_transfer_16m.toml`
 - 对照边界：历史模型与历史配置保持单策略头、无辅助损失，仍可加载
+
+> 正文按实验发生顺序保留“下一轮”等历史措辞，不代表当前推荐；最新效果与决策以
+> `../model_evaluations/COMPARISON_MATRIX.md` 为准。
 
 首轮与第二轮正式训练分别验证过6.4M和18M降至0.05的epsilon曲线。第二轮影子诊断表明
 固定bonus存在量纲依赖且实际改动作率有限。随后直接在主轨迹中执行排名主动动作的

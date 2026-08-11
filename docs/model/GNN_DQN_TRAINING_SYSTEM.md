@@ -1,15 +1,14 @@
 # 第一版 GNN-DQN 训练、性能标定与云端运行规格
 
 本文保留 `score_v1` 基线的冻结训练规格，作为后续代际比较依据。`reward-v2` 分支保持
-相同模型、1-step TD、Replay 和30 FPS训练流程，只通过
-`configs/gnn_dqn_reward_v2.toml` 保留首轮空间奖励，
-`configs/gnn_dqn_reward_v2_1.toml` 是当前默认空间奖励；具体公式和性能门禁见
+相同模型、1-step TD、Replay 和30 FPS训练流程；两个历史空间奖励实验分别保留在
+`configs/gnn_dqn_reward_v2.toml` 和 `configs/gnn_dqn_reward_v2_1.toml`。当前实际训练参数
+以用户指定的 TOML 和 `src/daxigua/rl/config.py` 为准；具体历史公式见
 `REWARD_V2_ACCESSIBLE_SPACE.md`。
 
 - 状态：第一版基线训练系统已确认
-- 实现：模型、trainer、隔离评估、面板、性能标定和分析产物已完成本机验证；RTX 5090
-  已完成3层首轮基线与4层16M扩容训练，当前正式规模为1792环境、batch 768，完整结果见
-  `../model_evaluations/model-baseline-scale-v1-l4-r1.md`
+- 实现：模型、trainer、隔离评估、面板、性能标定和分析产物已完成验证；本文中的环境数、
+  batch 和模型结果属于第一版冻结规格，不代表当前最佳配置，最新结果见比较矩阵。
 - 目标：在单张 RTX 5090 上同时完成基线训练、端到端性能上限测量和可审计产物归档
 - 边界：本页只规定第一版基线；战略模型、FiLM、高层计划和 BMCTS 不进入本轮训练
 

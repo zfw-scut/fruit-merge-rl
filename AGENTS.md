@@ -1,20 +1,30 @@
 # 项目协作规则
 
-- 写代码前先浏览 `docs` 目录下的文档，了解已有功能和接口，避免重复造轮子。
-- 需要调用云服务器、SSH 隧道或训练面板转发时，先读取 `docs/CLOUD_SERVER_LOCAL.md`
-  获取当前实例的连接方式与密码；该文件仅本机保存、不进入仓库，服务器更换后应更新它
-  并删除已弃用实例，不得凭记忆使用未登记或已弃用的实例。
-- 涉及模型、奖励、训练、模拟器、状态表示、长期规划或性能管线时，必须先阅读
-  `docs/LEGACY_PROJECT_EXPERIENCE_INDEX.md`，再通过 `git show` 等只读命令审计
-  `codex/work-1` 的相关实现和证据；旧分支不得作为运行依赖，也不得整批迁移。
-- 涉及模型、奖励或训练方案时，还必须阅读 `docs/model_evaluations/README.md`、
-  `docs/model_evaluations/COMPARISON_MATRIX.md` 和最近一代相关模型报告。每次正式训练或
-  具有决策价值的评估结束后，应更新对应报告和比较矩阵；必须区分事实、观察、原因
-  假设与决策，不得把单次训练、loss下降或吞吐达标写成策略提升结论。
-- 所有 Git 提交的标题和正文必须使用简体中文；文件名、命令、类名和必要的技术
-  专有名词可以保留原文。
-- 提交、合并和历史改写遵循 `docs/GIT_WORKFLOW.md`。
-- 使用python默认使用conda中的python-torch环境。
-- 创建 Git 提交后默认立即普通推送到当前分支对应的远程分支；首次推送需设置
-  upstream。只有用户明确要求仅保留本地提交时才不推送，禁止把默认推送理解为
-  强制推送或历史改写授权。
+## 最少阅读原则
+
+- 先读目标目录最近的 `AGENTS.md`，再只读它指向的文件；不要预先通读 `README.md`、`docs/` 或整个模块。
+- 先用文件名、符号名和 `rg` 定位。除非任务明确涉及产物诊断，不搜索 `runs/`、`recordings/`、`.torch_extensions/`、`portal/node_modules/`、`portal/.next/`、`portal/dist/`。
+- 用户指定了文件和参数时，从该文件开始；仅在接口、约束或影响范围不清楚时向外扩展。
+
+## 快速路由
+
+| 任务 | 先读 |
+| --- | --- |
+| TOML 参数 | `configs/AGENTS.md` |
+| 水果规则、领域状态 | `src/daxigua/core/AGENTS.md` |
+| 物理、CUDA、奖励、回放、场景实验室后端 | `src/daxigua/simulator/AGENTS.md` |
+| 模型、Replay、loss、训练、评估 | `src/daxigua/rl/AGENTS.md` |
+| 门户、场景实验室前端 | `portal/AGENTS.md` |
+| 文档、正式实验结论 | `docs/AGENTS.md` |
+
+入口脚本在 `tools/`，测试按同名功能在 `tests/` 查找；通常不需要为此浏览整个目录。
+
+## 必须遵守
+
+- Python 默认使用 conda 的 `python-torch` 环境。
+- 云服务器、SSH 隧道或训练面板转发前，读取本机 `docs/CLOUD_SERVER_LOCAL.md`；不得使用未登记实例。
+- 旧分支只可用 `git show` 等只读命令审计，不得作为运行依赖或整批迁移。
+- 只有新模型、新奖励、新训练方法、正式训练或有决策价值的评估，才按 `docs/AGENTS.md` 阅读历史证据并更新报告。已有参数的小幅调整、修复、UI 和工具修改不触发这套阅读。
+- 不得把单次训练、loss 下降或吞吐达标写成策略提升结论。
+- 提交、合并和历史改写遵循 `docs/GIT_WORKFLOW.md`。Git 提交标题和正文使用简体中文。
+- 创建提交后默认普通推送当前分支；首次推送设置 upstream。除非用户明确授权，不强推、不改写历史。

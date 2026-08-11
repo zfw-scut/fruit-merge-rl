@@ -2,7 +2,7 @@
 
 - 状态：基础框架、密集辅助监督与单步旁路主动采样已实现；行为段反事实任务未实现
 - 更新日期：2026-08-10
-- 当前基线：5 层 Fast epsilon、`score_v1`、1-step Dueling Double DQN
+- 实现基础：5 层、`score_v1`、1-step Dueling Double DQN；最新训练谱系见模型评估比较矩阵
 
 ## 1. 目标与边界
 
