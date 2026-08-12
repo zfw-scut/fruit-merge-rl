@@ -32,8 +32,6 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=20260804)
     parser.add_argument('--tail-frames', type=int, default=120)
     parser.add_argument('--solver-iterations', type=int, default=4)
-    parser.add_argument('--kinematic-rest-frames', type=int, default=4)
-    parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
     parser.add_argument(
         '--env-indices',
         help='逗号分隔的指定环境索引；提供后不再随机抽样。',
@@ -253,11 +251,7 @@ def main():
         sampled_values = None
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    config = SimulatorConfig(
-        solver_iterations=args.solver_iterations,
-        kinematic_rest_frames=args.kinematic_rest_frames,
-        kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
-    )
+    config = SimulatorConfig(solver_iterations=args.solver_iterations)
     simulator = TensorVectorSimulator(
         args.num_envs, config=config, device='cuda'
     )
@@ -374,10 +368,6 @@ def main():
             'stable_frames': config.stable_frames,
             'max_physics_frames': config.max_physics_frames,
             'solver_iterations': config.solver_iterations,
-            'kinematic_rest_frames': config.kinematic_rest_frames,
-            'kinematic_rest_displacement_epsilon': (
-                config.kinematic_rest_displacement_epsilon
-            ),
         },
         'diagnostics': diagnostics,
     }

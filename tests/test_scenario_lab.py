@@ -14,8 +14,14 @@ from daxigua.simulator.scenario_lab_service import (
     validate_scenario,
 )
 from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
+from daxigua.simulator.scenario_lab_comparison import (
+    ScenarioLabComparisonSession,
+)
 from daxigua.simulator.scenario_lab_server import ScenarioLabServer
-from daxigua.rl.scenario_model_controller import ScenarioModelController
+from daxigua.rl.scenario_model_controller import (
+    ScenarioComparisonModelController,
+    ScenarioModelController,
+)
 from daxigua.rl.config import ModelConfig
 from daxigua.rl.model import BaselineGnnDqn
 from daxigua.rl.scenario_model_evaluator import ScenarioModelEvaluator
@@ -35,6 +41,143 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertGreater(specs[0]['merged_physics_radius'], 0)
 
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_comparison_model_controller_repeats_same_policy_action(self):
+        class FakeEvaluator:
+            @staticmethod
+            def evaluate(scene, **_context):
+                return {
+                    'action': 10,
+                    'drop_x': 280.0,
+                    'selected_q': 1.0,
+                    'q_values': [float(index) for index in range(21)],
+                    'inference_ms': 0.1,
+                    'queue': list(scene['queue']),
+                }
+
+        session = ScenarioLabComparisonSession(
+            preset='backend_parity',
+            accelerated_device='cpu',
+            publish_fps=60,
+        )
+        controller = ScenarioComparisonModelController(
+            session, FakeEvaluator(), max_decisions=2
+        )
+        session.start()
+        controller.start_service()
+        try:
+            session.execute({'type': 'clear', 'queue': [1, 2, 3, 4]})
+            controller.start()
+            deadline = time.monotonic() + 15.0
+            status = controller.status()
+            while (
+                    status['decision_count'] < 2
+                    and time.monotonic() < deadline):
+                time.sleep(0.02)
+                status = controller.status()
+            snapshot = session.snapshot()
+        finally:
+            controller.close()
+            session.close()
+
+        self.assertEqual(2, status['decision_count'])
+        self.assertEqual('limit', status['phase'])
+        self.assertEqual(2, snapshot['left']['step_count'])
+        self.assertEqual(2, snapshot['right']['step_count'])
+        self.assertFalse(snapshot['difference']['diverged'])
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is required')
+    def test_play_vs_training_stops_at_aligned_trace_endpoint(self):
+        session = ScenarioLabComparisonSession(
+            preset='play_vs_training',
+            play_device='cuda',
+            accelerated_device='cuda',
+            publish_fps=30,
+        ).start()
+        try:
+            session.execute({'type': 'clear', 'queue': [1, 2, 3, 4]})
+            outcome = session.execute(
+                {'type': 'drop_action', 'action': 10}, timeout=15.0
+            )
+            deadline = time.monotonic() + 20.0
+            snapshot = session.snapshot()
+            while not snapshot['paused'] and time.monotonic() < deadline:
+                snapshot = session.wait_for_snapshot(
+                    snapshot['sequence'], timeout=1.0
+                )
+        finally:
+            session.close()
+
+        self.assertEqual(0, outcome['right']['fast_forwarded_frames'])
+        self.assertFalse(snapshot['profiles']['right']['drop_fast_forward'])
+        self.assertTrue(snapshot['paused'])
+        self.assertFalse(snapshot['action_in_progress'])
+        self.assertTrue(snapshot['difference_comparable'])
+        self.assertTrue(snapshot['right']['trace']['playback_complete'])
+
+    def test_comparison_session_synchronizes_identical_tensor_lanes(self):
+        session = ScenarioLabComparisonSession(
+            preset='backend_parity',
+            accelerated_device='cpu',
+            publish_fps=30,
+        ).start()
+        try:
+            session.execute({'type': 'clear', 'queue': [1, 2, 3, 4]})
+            session.execute({'type': 'drop_action', 'action': 10})
+            deadline = time.monotonic() + 1.0
+            snapshot = session.snapshot()
+            while (
+                    snapshot['left']['physics_frame'] < 8
+                    and time.monotonic() < deadline):
+                snapshot = session.wait_for_snapshot(
+                    snapshot['sequence'], timeout=0.1
+                )
+        finally:
+            session.close()
+
+        self.assertEqual('backend_parity', snapshot['preset'])
+        self.assertEqual(
+            snapshot['left']['physics_frame'],
+            snapshot['right']['physics_frame'],
+        )
+        self.assertFalse(snapshot['difference']['diverged'])
+        self.assertEqual(0.0, snapshot['difference']['max_position_delta'])
+
+    def test_comparison_http_api_exposes_state_and_commands(self):
+        comparison = ScenarioLabComparisonSession(
+            preset='backend_parity',
+            accelerated_device='cpu',
+            publish_fps=30,
+        )
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'),
+            comparison_session=comparison,
+            host='127.0.0.1',
+            port=0,
+        ).start()
+        try:
+            with urlopen(server.url + 'api/health', timeout=2.0) as response:
+                health = json.loads(response.read())
+            request = Request(
+                server.url + 'api/comparison/command',
+                data=json.dumps({
+                    'command': {'type': 'drop_action', 'action': 10},
+                }).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=2.0) as response:
+                accepted = json.loads(response.read())
+            with urlopen(
+                    server.url + 'api/comparison/state', timeout=2.0
+            ) as response:
+                state = json.loads(response.read())
+        finally:
+            server.close()
+
+        self.assertTrue(health['comparison_available'])
+        self.assertTrue(accepted['accepted'])
+        self.assertEqual(1, state['left']['step_count'])
+        self.assertEqual(1, state['right']['step_count'])
     def test_http_service_is_api_only_and_exposes_portal_config(self):
         server = ScenarioLabServer(
             SimpleNamespace(device='cpu'), host='127.0.0.1', port=0
@@ -192,6 +335,62 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(21, len(result['q_values']))
         self.assertTrue(control['running'])
 
+    def test_comparison_model_control_http_api(self):
+        class FakeModelEvaluator:
+            identity = {'checkpoint': 'best.pt'}
+
+        class FakeController:
+            def __init__(self):
+                self.running = False
+
+            def start_service(self):
+                return self
+
+            def close(self):
+                return None
+
+            def status(self):
+                return {'running': self.running, 'decision_count': 0}
+
+            def start(self):
+                self.running = True
+                return self.status()
+
+            def stop(self, **_kwargs):
+                self.running = False
+                return self.status()
+
+        comparison = ScenarioLabComparisonSession(
+            preset='backend_parity', accelerated_device='cpu'
+        )
+        controller = FakeController()
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'),
+            model_evaluator=FakeModelEvaluator(),
+            comparison_session=comparison,
+            comparison_model_controller=controller,
+            host='127.0.0.1',
+            port=0,
+        ).start()
+        try:
+            request = Request(
+                server.url + 'api/comparison/model/control',
+                data=json.dumps({'command': 'start'}).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=2.0) as response:
+                control = json.loads(response.read())
+            with urlopen(
+                    server.url + 'api/comparison/state', timeout=2.0
+            ) as response:
+                state = json.loads(response.read())
+        finally:
+            server.close()
+
+        self.assertTrue(control['running'])
+        self.assertTrue(state['model_continuous']['running'])
+
     def test_live_http_api_exposes_state_and_accepts_drop_command(self):
         server = ScenarioLabServer(
             SimpleNamespace(device='cpu'), host='127.0.0.1', port=0
@@ -324,7 +523,7 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(dropped['fruit_id'], removed['fruit_id'])
         self.assertEqual([], snapshot['fruits'])
 
-    def test_removed_support_releases_incremental_rest_state(self):
+    def test_removed_support_releases_upper_fruit(self):
         session = ScenarioLabLiveSession(physics_fps=120, publish_fps=60)
         session.start()
         try:
@@ -339,7 +538,6 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             session.execute({
                 'type': 'load_scene', 'scene': scene, 'paused': True,
             })
-            session.simulator._incremental_quiet_frames.fill_(255)
             removed = session.execute({'type': 'remove', 'fruit_id': 1})
             before = next(
                 fruit for fruit in session.snapshot()['fruits']

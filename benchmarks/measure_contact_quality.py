@@ -28,11 +28,9 @@ def parse_args():
     parser.add_argument('--max-physics-frames', type=int, default=180)
     parser.add_argument('--stable-frames', type=int, default=4)
     parser.add_argument('--solver-iterations', type=int, default=4)
-    parser.add_argument('--drop-fast-forward', action='store_true')
     parser.add_argument('--adaptive-collision-substeps', action='store_true')
     parser.add_argument('--max-collision-substeps', type=int, default=2)
     parser.add_argument('--position-correction', type=float, default=0.75)
-    parser.add_argument('--kinematic-rest-frames', type=int, default=4)
     parser.add_argument(
         '--restitution-velocity-threshold', type=float, default=35.0
     )
@@ -126,11 +124,9 @@ def main():
         max_physics_frames=args.max_physics_frames,
         stable_frames=args.stable_frames,
         solver_iterations=args.solver_iterations,
-        drop_fast_forward=args.drop_fast_forward,
         adaptive_collision_substeps=args.adaptive_collision_substeps,
         max_collision_substeps=args.max_collision_substeps,
         position_correction=args.position_correction,
-        kinematic_rest_frames=args.kinematic_rest_frames,
         restitution_velocity_threshold=args.restitution_velocity_threshold,
     )
     simulator = TensorVectorSimulator(
@@ -194,7 +190,6 @@ def main():
                 'adaptive_collision_substeps',
                 'max_collision_substeps',
                 'position_correction',
-                'kinematic_rest_frames',
                 'restitution_velocity_threshold',
             )
         },

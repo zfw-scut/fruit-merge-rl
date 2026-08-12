@@ -27,7 +27,6 @@ def parse_args():
     parser.add_argument('--max-physics-frames', type=int, default=720)
     parser.add_argument('--stable-frames', type=int, default=15)
     parser.add_argument('--solver-iterations', type=int, default=4)
-    parser.add_argument('--drop-fast-forward', action='store_true')
     parser.add_argument('--adaptive-collision-substeps', action='store_true')
     parser.add_argument('--max-collision-substeps', type=int, default=4)
     parser.add_argument(
@@ -36,8 +35,6 @@ def parse_args():
     parser.add_argument(
         '--collision-substep-penetration-threshold', type=float, default=1.0
     )
-    parser.add_argument('--kinematic-rest-frames', type=int, default=4)
-    parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
     parser.add_argument(
         '--restitution-velocity-threshold', type=float, default=35.0
     )
@@ -105,7 +102,6 @@ def main():
         max_physics_frames=args.max_physics_frames,
         stable_frames=args.stable_frames,
         solver_iterations=args.solver_iterations,
-        drop_fast_forward=args.drop_fast_forward,
         adaptive_collision_substeps=args.adaptive_collision_substeps,
         max_collision_substeps=args.max_collision_substeps,
         collision_substep_motion_fraction=(
@@ -114,8 +110,6 @@ def main():
         collision_substep_penetration_threshold=(
             args.collision_substep_penetration_threshold
         ),
-        kinematic_rest_frames=args.kinematic_rest_frames,
-        kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
         restitution_velocity_threshold=args.restitution_velocity_threshold,
         position_correction=args.position_correction,
     )
@@ -215,10 +209,6 @@ def main():
             ),
             'collision_substep_penetration_threshold': (
                 config.collision_substep_penetration_threshold
-            ),
-            'kinematic_rest_frames': config.kinematic_rest_frames,
-            'kinematic_rest_displacement_epsilon': (
-                config.kinematic_rest_displacement_epsilon
             ),
             'max_physics_frames': config.max_physics_frames,
             'stable_frames': config.stable_frames,

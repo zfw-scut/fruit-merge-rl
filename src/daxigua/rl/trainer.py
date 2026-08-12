@@ -15,6 +15,7 @@ import time
 import torch
 
 from daxigua.simulator import (
+    PHYSICS_IDENTITY,
     SimulatorConfig,
     SpatialRewardComputer,
     SpatialRewardConfig,
@@ -24,6 +25,7 @@ from daxigua.simulator import (
 from .checkpoint import (
     initialize_learner_weights,
     load_checkpoint,
+    require_matching_physics_identity,
     restore_rng_state,
     save_checkpoint_atomic,
     write_artifact_manifest,
@@ -419,6 +421,7 @@ class BaselineTrainer:
 
     def _write_run_identity(self):
         identity = {
+            'physics_identity': PHYSICS_IDENTITY,
             'training_config': self.config.to_dict(),
             'training_simulator_config': asdict(self.simulator_config),
             'git': _git_identity(self.project_root),
@@ -1173,6 +1176,7 @@ class BaselineTrainer:
         checkpoint = load_checkpoint(
             checkpoint_path, map_location=self.device
         )
+        require_matching_physics_identity(checkpoint)
         self.learner.load_state_dict(checkpoint['learner'])
         restore_rng_state(checkpoint['rng_state'])
         progress = checkpoint['progress']

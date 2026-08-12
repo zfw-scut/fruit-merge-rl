@@ -13,6 +13,7 @@ from daxigua.rl.autoscale import AdaptiveScaleController
 from daxigua.rl.checkpoint import (
     initialize_learner_weights,
     load_checkpoint,
+    require_matching_physics_identity,
     restore_rng_state,
     save_checkpoint_atomic,
 )
@@ -57,7 +58,11 @@ from daxigua.rl.viewer import (
     load_viewer_model,
     viewer_simulator_config,
 )
-from daxigua.simulator import SimulatorConfig, TensorVectorSimulator
+from daxigua.simulator import (
+    PHYSICS_IDENTITY,
+    SimulatorConfig,
+    TensorVectorSimulator,
+)
 
 
 def _small_model_config():
@@ -391,8 +396,8 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
         )
         self.assertEqual(fast.physics_fps, 30)
         self.assertEqual(accurate.physics_fps, 120)
-        self.assertTrue(fast.drop_fast_forward)
-        self.assertTrue(accurate.drop_fast_forward)
+        self.assertFalse(fast.drop_fast_forward)
+        self.assertFalse(accurate.drop_fast_forward)
 
     def test_censored_stage_quantiles_use_the_pilot_window_quartiles(self):
         self.assertEqual(
@@ -487,9 +492,21 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
         self.assertEqual(viewer_model.progress['transitions'], 8)
         self.assertEqual(viewer_model.model_config, _small_model_config())
         self.assertEqual(viewer_model.device, torch.device('cpu'))
+        self.assertEqual(loaded['physics_identity'], PHYSICS_IDENTITY)
+        self.assertEqual(
+            require_matching_physics_identity(loaded), PHYSICS_IDENTITY
+        )
         self.assertFalse(
             loaded['replay_metadata']['replay_saved_in_checkpoint']
         )
+
+    def test_legacy_checkpoint_cannot_resume_across_physics_domain(self):
+        with self.assertRaisesRegex(ValueError, 'weights-only'):
+            require_matching_physics_identity({})
+        with self.assertRaisesRegex(ValueError, 'does not match'):
+            require_matching_physics_identity({
+                'physics_identity': 'tensor_cuda_v1_kinematic_rest',
+            })
 
     def test_weights_only_initialization_resets_training_state(self):
         model_config = _small_model_config()

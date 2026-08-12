@@ -36,6 +36,11 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
         'parameters': [
             {'id': 'device', 'label': '物理设备', 'type': 'select', 'default': 'cuda',
              'options': ['cuda', 'cpu']},
+            {'id': 'comparison', 'label': '双环境物理对照', 'type': 'select',
+             'default': 'on', 'options': ['on', 'off']},
+            {'id': 'comparison_preset', 'label': '对照预设', 'type': 'select',
+             'default': 'play_vs_training',
+             'options': ['play_vs_training', 'backend_parity']},
             {'id': 'model_device', 'label': '模型设备', 'type': 'select', 'default': 'auto',
              'options': ['auto', 'cuda', 'cpu']},
             {'id': 'port', 'label': '服务端口', 'type': 'number', 'default': 8769,
@@ -203,9 +208,26 @@ def build_tool_command(tool_id: str, params: dict[str, Any]) -> tuple[list[str],
         device = _choice(params, 'device', ('cuda', 'cpu'))
         model_device = _choice(params, 'model_device', ('auto', 'cuda', 'cpu'))
         reward_scale = _float_value(params, 'reward_scale', 0.1, 2.0)
+        comparison = params.get('comparison', 'on')
+        if comparison not in ('on', 'off'):
+            raise ValueError("comparison 只能是 ('on', 'off')")
+        comparison_preset = params.get(
+            'comparison_preset', 'play_vs_training'
+        )
+        if comparison_preset not in (
+                'play_vs_training', 'backend_parity'):
+            raise ValueError(
+                'comparison_preset 只能是 '
+                "('play_vs_training', 'backend_parity')"
+            )
         command = [python, 'tools/open_scenario_lab.py', '--host',
                    '127.0.0.1', '--port', str(port), '--device', device,
                    '--model-device', model_device, '--reward-scale', str(reward_scale)]
+        if comparison == 'on':
+            command.extend([
+                '--comparison',
+                '--comparison-preset', comparison_preset,
+            ])
         checkpoint = str(params.get('checkpoint') or '').strip()
         if checkpoint:
             command.extend(['--checkpoint', str(_inside(PROJECT_ROOT, checkpoint))])

@@ -269,4 +269,217 @@ class ScenarioModelController:
                 self._fail(error)
 
 
-__all__ = ['ScenarioModelController']
+class ScenarioComparisonModelController:
+    """在双环境对照的共同决策边界上持续执行同一个模型动作。"""
+
+    def __init__(
+            self,
+            comparison_session,
+            model_evaluator,
+            *,
+            max_decisions=1000):
+        if int(max_decisions) <= 0:
+            raise ValueError('max_decisions must be positive')
+        self.comparison_session = comparison_session
+        self.model_evaluator = model_evaluator
+        self.max_decisions = int(max_decisions)
+        self._shutdown = Event()
+        self._enabled = Event()
+        self._lock = Lock()
+        self._thread = None
+        self._status = {
+            'available': True,
+            'running': False,
+            'phase': 'idle',
+            'decision_count': 0,
+            'max_decisions': self.max_decisions,
+            'last_evaluation': None,
+            'last_drop': None,
+            'message': '等待启动双环境模型持续决策。',
+            'error': None,
+        }
+
+    def start_service(self):
+        if self._thread is None:
+            self._shutdown.clear()
+            self._thread = Thread(
+                target=self._run,
+                name='scenario-lab-comparison-model-controller',
+                daemon=True,
+            )
+            self._thread.start()
+        return self
+
+    def close(self):
+        self._enabled.clear()
+        self._shutdown.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+
+    def status(self):
+        with self._lock:
+            return deepcopy(self._status)
+
+    @property
+    def running(self):
+        return self._enabled.is_set()
+
+    def start(self):
+        if self._thread is None:
+            raise RuntimeError(
+                'comparison model controller service is not running'
+            )
+        snapshot = self.comparison_session.snapshot()
+        if snapshot['left']['done'] or snapshot['right']['done']:
+            raise RuntimeError('当前对局已结束，请先清空或切换预设')
+        if self._enabled.is_set():
+            return self.status()
+        with self._lock:
+            self._status.update({
+                'running': True,
+                'phase': 'waiting_boundary',
+                'decision_count': 0,
+                'last_evaluation': None,
+                'last_drop': None,
+                'message': '双环境持续决策已启动，等待共同决策边界。',
+                'error': None,
+            })
+        self._enabled.set()
+        self._refresh_comparison_state()
+        return self.status()
+
+    def stop(self, *, reason='user'):
+        was_running = self._enabled.is_set()
+        self._enabled.clear()
+        message = {
+            'user': '双环境持续决策已停止，当前局面保持不变。',
+            'manual_control': '检测到手工对照操作，持续决策已停止。',
+            'done': '任一对照环境已经结束，持续决策自动停止。',
+            'limit': '已达到持续决策次数上限，模型自动停止。',
+        }.get(reason, '双环境持续决策已停止。')
+        with self._lock:
+            self._status.update({
+                'running': False,
+                'phase': reason,
+                'message': message,
+            })
+        if was_running:
+            self._refresh_comparison_state()
+        return self.status()
+
+    def _refresh_comparison_state(self):
+        try:
+            self.comparison_session.execute(
+                {'type': 'refresh_state'}, timeout=1.0
+            )
+        except (RuntimeError, TimeoutError):
+            pass
+
+    def _set_waiting(self, phase, message):
+        with self._lock:
+            self._status.update({
+                'running': True,
+                'phase': phase,
+                'message': message,
+            })
+
+    def _fail(self, error):
+        self._enabled.clear()
+        with self._lock:
+            self._status.update({
+                'running': False,
+                'phase': 'error',
+                'message': '双环境持续决策因错误停止。',
+                'error': f'{type(error).__name__}: {error}',
+            })
+        self._refresh_comparison_state()
+
+    @staticmethod
+    def _topology(snapshot):
+        left = snapshot['left']
+        return (
+            int(left['step_count']),
+            tuple(int(level) for level in left['queue']),
+            tuple(sorted(
+                (int(fruit['id']), int(fruit['level']))
+                for fruit in left['fruits']
+            )),
+        )
+
+    def _run(self):
+        sequence = -1
+        last_decision_step = None
+        while not self._shutdown.is_set():
+            snapshot = self.comparison_session.wait_for_snapshot(
+                sequence, timeout=0.5
+            )
+            next_sequence = int(snapshot['sequence'])
+            if next_sequence == sequence:
+                continue
+            sequence = next_sequence
+            if not self._enabled.is_set():
+                last_decision_step = None
+                continue
+            if snapshot['left']['done'] or snapshot['right']['done']:
+                self.stop(reason='done')
+                continue
+            if snapshot['action_in_progress']:
+                self._set_waiting(
+                    'physics', '同一模型动作已投放，等待双环境轨迹结束。'
+                )
+                continue
+
+            step_count = int(snapshot['left']['step_count'])
+            if step_count == last_decision_step:
+                continue
+            topology = self._topology(snapshot)
+            try:
+                self._set_waiting('inference', '正在执行当前模型推理。')
+                evaluation = self.model_evaluator.evaluate(
+                    _scene_from_snapshot(snapshot['left']),
+                    danger_progress=snapshot['left'].get(
+                        'danger_progress', 0.0
+                    ),
+                    over_danger_line=snapshot['left'].get(
+                        'over_danger_line'
+                    ),
+                )
+                if not self._enabled.is_set():
+                    continue
+                latest = self.comparison_session.snapshot()
+                if (
+                        latest['action_in_progress']
+                        or latest['left']['done']
+                        or latest['right']['done']
+                        or self._topology(latest) != topology):
+                    continue
+                action = int(evaluation['action'])
+                drop = self.comparison_session.execute({
+                    'type': 'drop_action',
+                    'action': action,
+                })
+                last_decision_step = step_count
+                with self._lock:
+                    decision_count = self._status['decision_count'] + 1
+                    self._status.update({
+                        'running': True,
+                        'phase': 'physics',
+                        'decision_count': decision_count,
+                        'last_evaluation': evaluation,
+                        'last_drop': drop,
+                        'message': (
+                            f'已向两个环境同步执行 A{action}，等待轨迹结束。'
+                        ),
+                        'error': None,
+                    })
+                if decision_count >= self.max_decisions:
+                    self.stop(reason='limit')
+            except Exception as error:
+                self._fail(error)
+
+
+__all__ = [
+    'ScenarioComparisonModelController',
+    'ScenarioModelController',
+]

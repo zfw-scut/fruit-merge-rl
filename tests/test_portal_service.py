@@ -39,6 +39,8 @@ class PortalServiceTests(unittest.TestCase):
             'scenario_lab',
             {
                 'device': 'cuda',
+                'comparison': 'on',
+                'comparison_preset': 'play_vs_training',
                 'model_device': 'auto',
                 'port': 8769,
                 'reward_scale': 1.0,
@@ -51,6 +53,11 @@ class PortalServiceTests(unittest.TestCase):
         )
         self.assertEqual(command[command.index('--host') + 1], '127.0.0.1')
         self.assertEqual(command[command.index('--device') + 1], 'cuda')
+        self.assertIn('--comparison', command)
+        self.assertEqual(
+            command[command.index('--comparison-preset') + 1],
+            'play_vs_training',
+        )
         self.assertEqual(url, 'http://127.0.0.1:8769/')
 
     def test_tool_environment_includes_project_source_root(self):

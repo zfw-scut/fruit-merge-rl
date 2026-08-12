@@ -99,6 +99,9 @@ type LiveState = {
   step_count: number;
   queue: number[];
   fruits: Fruit[];
+  physics_frame?: number;
+  profile?: ComparisonProfile;
+  trace?: { record_index: number; record_count: number; semantic_frame: number; playback_complete: boolean; contains_fast_forward_gap: boolean };
   model_continuous?: { running?: boolean; decision_count?: number; message?: string; error?: string };
 };
 
@@ -111,7 +114,54 @@ type Health = {
   training_physics_equivalent?: boolean;
   model_available: boolean;
   model_continuous_available: boolean;
+  comparison_model_continuous_available?: boolean;
   model?: Record<string, unknown> | null;
+  comparison_available?: boolean;
+};
+
+type ComparisonProfile = {
+  role: string;
+  backend: string;
+  device: string;
+  physics_fps: number;
+  drop_fast_forward: boolean;
+  adaptive_collision_substeps: boolean;
+  max_collision_substeps: number;
+  position_correction: number;
+  execution: string;
+};
+
+type ComparisonDifference = {
+  shared_fruit_count: number;
+  left_only_fruit_ids: number[];
+  right_only_fruit_ids: number[];
+  level_mismatch_fruit_ids: number[];
+  queue_equal: boolean;
+  score_delta_right_minus_left: number;
+  fruit_count_delta_right_minus_left: number;
+  max_position_delta: number;
+  max_velocity_delta: number;
+  max_angle_delta: number;
+  max_angular_velocity_delta: number;
+  worst_position_fruit_id: number | null;
+  discrete_diverged: boolean;
+  continuous_diverged: boolean;
+  diverged: boolean;
+  first_divergence?: { comparison_tick: number; left_physics_frame: number; right_physics_frame: number; discrete: boolean; max_position_delta: number; max_velocity_delta: number } | null;
+};
+
+type ComparisonState = {
+  sequence: number;
+  preset: "backend_parity" | "play_vs_training";
+  paused: boolean;
+  comparison_tick: number;
+  profiles: { left: ComparisonProfile; right: ComparisonProfile };
+  left: LiveState;
+  right: LiveState;
+  difference: ComparisonDifference;
+  difference_comparable: boolean;
+  action_in_progress: boolean;
+  model_continuous?: { running?: boolean; decision_count?: number; message?: string; error?: string };
 };
 
 type Point = { x: number; y: number };
@@ -233,6 +283,22 @@ function settingLabel(label: string, checked: boolean, onChange: (value: boolean
   return <label className="lab-switch"><span>{label}</span><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /><i /></label>;
 }
 
+function ComparisonBoard({ state, geometry, textures, specs, label }: { state: LiveState; geometry: Geometry; textures: string[]; specs: FruitSpec[]; label: string }) {
+  const profile = state.profile;
+  return <article className="lab-comparison-lane">
+    <header><div><span>{label}</span><h3>{profile?.role ?? "物理环境"}</h3></div><div className="lab-comparison-badges"><b>{profile?.backend === "tensor_cuda" ? "CUDA" : "Tensor / CPU"}</b><b>{profile?.physics_fps ?? state.physics_fps} FPS</b><b>完整逐帧</b></div></header>
+    <div className="lab-comparison-board-wrap"><svg className="lab-board lab-comparison-board" viewBox={`0 0 ${geometry.board_width} ${geometry.board_height}`} aria-label={`${label}物理场景`}>
+      <rect width={geometry.board_width} height={geometry.board_height} className="lab-board-bg" />
+      {Array.from({ length: 10 }, (_, index) => <line key={`v${index}`} x1={(index + 1) * geometry.board_width / 11} x2={(index + 1) * geometry.board_width / 11} y1="0" y2={geometry.board_height} className="lab-grid-line" />)}
+      {Array.from({ length: 11 }, (_, index) => <line key={`h${index}`} y1={(index + 1) * geometry.board_height / 12} y2={(index + 1) * geometry.board_height / 12} x1="0" x2={geometry.board_width} className="lab-grid-line" />)}
+      <line x1={geometry.wall_width} x2={geometry.board_width - geometry.wall_width} y1={geometry.spawn_y} y2={geometry.spawn_y} className="lab-danger-line" />
+      {state.fruits.map((fruit) => { const radius = specs.find((item) => item.level === fruit.level)?.radius ?? fruit.physics_radius; return <g key={fruit.id} transform={`translate(${fruit.x} ${fruit.y}) rotate(${fruit.angle * 180 / Math.PI})`} className="lab-fruit"><circle r={radius + 4} /><image href={textures[fruit.level]} x={-radius} y={-radius} width={radius * 2} height={radius * 2} /><text y={4}>L{fruit.level}</text></g>; })}
+      <rect x="0" y={geometry.board_height - geometry.wall_width} width={geometry.board_width} height={geometry.wall_width} className="lab-wall" /><rect x="0" y="0" width={geometry.wall_width} height={geometry.board_height} className="lab-wall" /><rect x={geometry.board_width - geometry.wall_width} y="0" width={geometry.wall_width} height={geometry.board_height} className="lab-wall" />
+    </svg></div>
+    <footer><span>分数 <b>{state.score}</b></span><span>投放 <b>{state.step_count}</b></span><span>物理帧 <b>{state.physics_frame ?? 0}</b></span><span>水果 <b>{state.fruits.length}</b></span>{state.trace?.contains_fast_forward_gap && <span className="is-warning">快进缺口 · 语义帧 {state.trace.semantic_frame}</span>}</footer>
+  </article>;
+}
+
 export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const running = Boolean(tool?.process?.running && tool.process.url);
   const baseUrl = (tool?.process?.url ?? "").replace(/\/$/, "");
@@ -264,6 +330,8 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const [hoverPoint, setHoverPoint] = useState<Point | null>(null);
   const [history, setHistory] = useState<SceneSnapshot[]>([]);
   const [future, setFuture] = useState<SceneSnapshot[]>([]);
+  const [comparison, setComparison] = useState<ComparisonState | null>(null);
+  const [comparisonMode, setComparisonMode] = useState(false);
 
   const geometry = config?.geometry ?? DEFAULT_GEOMETRY;
   const specs = useMemo(() => config?.fruit_specs ?? [], [config?.fruit_specs]);
@@ -312,6 +380,9 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
           source = null;
           retry();
         };
+        if (nextHealth.comparison_available) {
+          try { setComparison(await api<ComparisonState>("/api/comparison/state")); } catch { setComparison(null); }
+        }
       } catch (reason) {
         if (!closed) { setError(String(reason)); setConnected(false); retry(); }
       }
@@ -323,6 +394,19 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
       source?.close();
     };
   }, [api, baseUrl, running]);
+
+  useEffect(() => {
+    if (!running || !baseUrl || !health?.comparison_available) return;
+    const source = new EventSource(`${baseUrl}/api/comparison/events`);
+    source.onmessage = (event) => { try { setComparison(JSON.parse(event.data) as ComparisonState); } catch { /* ignore */ } };
+    return () => source.close();
+  }, [baseUrl, health?.comparison_available, running]);
+
+  const sendComparisonCommand = useCallback(async (command: Record<string, unknown>) => {
+    const result = await api<Record<string, unknown>>("/api/comparison/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }) });
+    setComparison(await api<ComparisonState>("/api/comparison/state"));
+    return result;
+  }, [api]);
 
   const sendCommand = useCallback(async (command: Record<string, unknown>) => {
     const result = await api<Record<string, unknown>>("/api/live/command", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }) });
@@ -365,6 +449,17 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     setBusy("control");
     try {
       await api("/api/model/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: live?.model_continuous?.running ? "stop" : "start" }) });
+    } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
+  };
+
+  const comparisonModelControl = async () => {
+    if (!health?.comparison_model_continuous_available) return;
+    setBusy("comparison-control");
+    try {
+      const running = Boolean(comparison?.model_continuous?.running);
+      await api("/api/comparison/model/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command: running ? "stop" : "start" }) });
+      setComparison(await api<ComparisonState>("/api/comparison/state"));
+      setError(null);
     } catch (reason) { setError(String(reason)); } finally { setBusy(null); }
   };
 
@@ -812,12 +907,17 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     <section className="scenario-workspace">
       <div className="lab-commandbar">
         <div><span className={`training-live-indicator ${connected ? "is-online" : ""}`} /><b>{connected ? "实时物理已连接" : "正在重连"}</b><span>{health?.reward_version ?? "Reward V2.1"} · {health?.device ?? "—"}</span></div>
-        <div><button disabled={Boolean(gesture)} onClick={() => void togglePause()}>{live?.paused ? <CirclePlay size={15} /> : <CirclePause size={15} />}{live?.paused ? "恢复" : "暂停"}</button><button onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> 显示设置</button></div>
+        <div>{health?.comparison_available && <button className={comparisonMode ? "active" : ""} onClick={() => setComparisonMode((value) => !value)}><Boxes size={15} />{comparisonMode ? "返回普通场景" : "双环境对照"}</button>}<button disabled={Boolean(gesture)} onClick={() => comparisonMode ? void sendComparisonCommand({ type: comparison?.paused ? "resume" : "pause" }) : void togglePause()}>{(comparisonMode ? comparison?.paused : live?.paused) ? <CirclePlay size={15} /> : <CirclePause size={15} />}{(comparisonMode ? comparison?.paused : live?.paused) ? "恢复" : "暂停"}</button><button onClick={() => setSettingsOpen(true)}><Settings2 size={15} /> 显示设置</button></div>
       </div>
 
       {error && <div className="lab-error"><AlertCircle size={16} />{error}<button onClick={() => setError(null)}><X size={14} /></button></div>}
 
-      <div className="lab-layout">
+      {comparisonMode && comparison ? <div className="lab-comparison-mode">
+        <div className="lab-comparison-toolbar"><div><button className={comparison.preset === "play_vs_training" ? "active" : ""} disabled={comparison.model_continuous?.running} onClick={() => void sendComparisonCommand({ type: "set_preset", preset: "play_vs_training" })}>游玩 vs 训练</button><button className={comparison.preset === "backend_parity" ? "active" : ""} disabled={comparison.model_continuous?.running} onClick={() => void sendComparisonCommand({ type: "set_preset", preset: "backend_parity" })}>Tensor vs CUDA</button></div><span>同一命令同步驱动 · 按水果 ID 对齐 · {comparison.model_continuous?.running ? `模型持续决策 ${comparison.model_continuous.decision_count ?? 0} 次` : comparison.action_in_progress ? "训练轨迹回放中" : "等待操作"}</span></div>
+        <div className="lab-comparison-actions"><label>A{selectedAction}<input type="range" min="0" max={geometry.action_count - 1} value={selectedAction} disabled={comparison.model_continuous?.running} onChange={(event) => setSelectedAction(Number(event.target.value))} /></label><button className="primary-button compact" disabled={comparison.action_in_progress || comparison.model_continuous?.running} onClick={() => void sendComparisonCommand({ type: "drop_action", action: selectedAction })}><Play size={15} />同步执行 A{selectedAction}</button><button disabled={!health?.comparison_model_continuous_available || Boolean(busy)} onClick={() => void comparisonModelControl()}>{comparison.model_continuous?.running ? <Pause size={15} /> : <Activity size={15} />}{comparison.model_continuous?.running ? "停止模型持续决策" : "启动模型持续决策"}</button><button disabled={comparison.model_continuous?.running} onClick={() => void sendComparisonCommand({ type: "clear", queue: [1, 2, 3, 4] })}><RotateCcw size={14} />清空并重置差异</button></div>
+        <div className="lab-comparison-grid"><ComparisonBoard state={comparison.left} geometry={geometry} textures={textures} specs={specs} label="LEFT" /><ComparisonBoard state={comparison.right} geometry={geometry} textures={textures} specs={specs} label="RIGHT" /></div>
+        <section className={`lab-difference-panel${comparison.difference.diverged ? " is-diverged" : ""}`}><header><div><span>LIVE PHYSICS DIFF</span><h3>{!comparison.difference_comparable ? "等待同一物理时刻" : comparison.difference.diverged ? "轨迹已经分歧" : "当前状态一致"}</h3></div><b>{comparison.preset === "play_vs_training" ? "实际配置差异" : "后端实现校验"}</b></header><div><span>最大位置差<b>{comparison.difference_comparable ? `${number(comparison.difference.max_position_delta, 3)} px` : "—"}</b></span><span>最大速度差<b>{comparison.difference_comparable ? `${number(comparison.difference.max_velocity_delta, 3)} px/s` : "—"}</b></span><span>最大角度差<b>{comparison.difference_comparable ? `${number(comparison.difference.max_angle_delta, 6)} rad` : "—"}</b></span><span>最大角速度差<b>{comparison.difference_comparable ? `${number(comparison.difference.max_angular_velocity_delta, 6)} rad/s` : "—"}</b></span><span>分数差（右−左）<b>{comparison.difference_comparable ? comparison.difference.score_delta_right_minus_left : "—"}</b></span><span>离散状态<b>{comparison.difference_comparable ? comparison.difference.discrete_diverged ? "已分歧" : "一致" : "未对齐"}</b></span></div>{comparison.difference.first_divergence && <p>首次分歧：对照 tick {comparison.difference.first_divergence.comparison_tick} · 左帧 {comparison.difference.first_divergence.left_physics_frame} / 右帧 {comparison.difference.first_divergence.right_physics_frame} · 当时位置差 {number(comparison.difference.first_divergence.max_position_delta, 3)} px、速度差 {number(comparison.difference.first_divergence.max_velocity_delta, 3)} px/s。</p>}</section>
+      </div> : <div className="lab-layout">
         <aside className="lab-palette">
           <div className="lab-section-title"><span>FRUIT PALETTE</span><h3>投放水果</h3></div>
           <div className="lab-fruit-grid">
@@ -876,7 +976,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景与模型身份</summary><div className="lab-identity"><span>实时物理<b>{live?.physics_backend === "tensor_cuda" ? "Tensor / CUDA" : live?.physics_backend === "tensor_cpu" ? "Tensor / CPU" : "—"}</b></span><span>物理帧率<b>{live?.physics_fps ?? "—"} FPS</b></span><span>训练物理同源<b>{live?.training_physics_equivalent ? "是" : "—"}</b></span><span>场上水果<b>{live?.fruits.length ?? 0} / {geometry.max_fruits}</b></span><span>模型checkpoint<b>{String(health?.model?.checkpoint ?? "未加载")}</b></span><span>模型训练量<b>{number(health?.model?.training_transitions, 0)}</b></span></div></details>
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景文件与编辑</summary><div className="lab-file-actions"><button onClick={exportScene}><Download size={14} />导出JSON</button><label><Import size={14} />导入JSON<input type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importScene(file); }} /></label><button disabled={selectedFruit === null} onClick={() => void removeSelected()}><Trash2 size={14} />删除选中水果</button></div><p className="lab-muted">从水果栏拖到画布，松开即放置；场上水果可拖动，右键删除，滚轮切级。暂停后支持擦除、撤销与重做；触摸端可拖动或长按删除。</p></details>
         </aside>
-      </div>
+      </div>}
 
       <AnimatePresence>
         {settingsOpen && <motion.div className="lab-settings-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><motion.aside className="lab-settings-drawer" initial={{ x: 36, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 36, opacity: 0 }}><div className="lab-settings-head"><div><span>VISUAL LAYERS</span><h2>场景显示设置</h2><p>只勾选当前诊断需要的图层，避免预测、真实效果和几何辅助相互遮挡。</p></div><button onClick={() => setSettingsOpen(false)}><X size={17} /></button></div><div className="lab-settings-groups"><section><h3>基础画布</h3>{settingLabel("空间网格", settings.showGrid, (value) => setSettings((current) => ({ ...current, showGrid: value })))}{settingLabel("危险线", settings.showDanger, (value) => setSettings((current) => ({ ...current, showDanger: value })))}{settingLabel("21个动作锚点", settings.showAnchors, (value) => setSettings((current) => ({ ...current, showAnchors: value })))}{settingLabel("水果速度向量", settings.showVelocity, (value) => setSettings((current) => ({ ...current, showVelocity: value })))}</section><section><h3>辅助动作预测</h3>{settingLabel("稳定场景实时预测", settings.realtimePrediction, (value) => setSettings((current) => ({ ...current, realtimePrediction: value })))}{settingLabel("预测接触与生成位置", settings.showPrediction, (value) => setSettings((current) => ({ ...current, showPrediction: value })))}{settingLabel("真实动作效果", settings.showActual, (value) => setSettings((current) => ({ ...current, showActual: value })))}{settingLabel("接触法向量", settings.showNormal, (value) => setSettings((current) => ({ ...current, showNormal: value })))}</section></div><button className="ghost-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RefreshCw size={14} />恢复默认图层</button></motion.aside></motion.div>}

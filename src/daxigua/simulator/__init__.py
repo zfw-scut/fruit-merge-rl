@@ -4,7 +4,7 @@
 需要 PyTorch。
 """
 
-from .config import SimulatorConfig
+from .config import PHYSICS_IDENTITY, SimulatorConfig
 from .reward import GameScoreReward, RewardComputer, ZeroReward
 from .spatial_reward import (
     AccessibleSpaceBatch,
@@ -30,6 +30,7 @@ from .replay import (
 )
 from .scenario_lab import fruit_specs
 from .scenario_lab_server import ScenarioLabServer
+from .scenario_lab_comparison import ScenarioLabComparisonSession
 from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import ScenarioLabEvaluator, validate_scenario
 from .types import (
@@ -56,12 +57,14 @@ __all__ = [
     'AccessibleSpaceBatch',
     'AccessibleSpaceCalculator',
     'NoMergeReferenceBatch',
+    'PHYSICS_IDENTITY',
     'GameScoreReward',
     'DEFAULT_FRUIT_TEXTURE_DIR',
     'load_fruit_texture_data_urls',
     'load_trace_archive',
     'RewardComputer',
     'ScenarioLabEvaluator',
+    'ScenarioLabComparisonSession',
     'ScenarioLabLiveSession',
     'ScenarioLabServer',
     'SimulatorConfig',

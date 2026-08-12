@@ -3,6 +3,9 @@
 from dataclasses import dataclass
 
 
+PHYSICS_IDENTITY = 'tensor_cuda_v3_full_fall'
+
+
 @dataclass(frozen=True, slots=True)
 class SimulatorConfig:
     """会影响批量游戏演化的全部配置。
@@ -24,6 +27,8 @@ class SimulatorConfig:
     max_physics_frames: int = 720
     stable_frames: int = 15
     solver_iterations: int = 4
+    # 仅为读取旧配置和旧回放保留。自由落体快进已退出当前物理域，
+    # 即使旧调用方传入 True，也会在 __post_init__ 中统一归一化为 False。
     drop_fast_forward: bool = False
     adaptive_collision_substeps: bool = False
     max_collision_substeps: int = 4
@@ -37,10 +42,6 @@ class SimulatorConfig:
 
     stable_velocity_epsilon: float = 35.0
     stable_angular_velocity_epsilon: float = 4.0
-    kinematic_rest_frames: int = 4
-    # 兼容旧配置名：该数值定义在 120 FPS 参考时间步上，运行时会先
-    # 换算为速度，再乘当前 dt，避免低帧率反而更难进入静止修正。
-    kinematic_rest_displacement_epsilon: float = 0.10
     collision_substep_motion_fraction: float = 0.25
     collision_substep_penetration_threshold: float = 1.0
     danger_seconds: float = 2.0
@@ -66,7 +67,6 @@ class SimulatorConfig:
             'stable_frames',
             'solver_iterations',
             'max_collision_substeps',
-            'kinematic_rest_frames',
             'sync_interval_frames',
             'cuda_threads_per_block',
         )
@@ -104,10 +104,6 @@ class SimulatorConfig:
             raise ValueError('wall_width leaves no playable board width')
         if self.action_count < 2:
             raise ValueError('action_count must be at least 2')
-        if self.kinematic_rest_frames < 0:
-            raise ValueError('kinematic_rest_frames must be non-negative')
-        if self.kinematic_rest_frames > 255:
-            raise ValueError('kinematic_rest_frames must be <= 255')
         if not 1 <= self.max_collision_substeps <= 4:
             raise ValueError('max_collision_substeps must be in [1, 4]')
         for name in (
@@ -118,6 +114,8 @@ class SimulatorConfig:
         ):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f'{name} must be bool')
+        if self.drop_fast_forward:
+            object.__setattr__(self, 'drop_fast_forward', False)
         if self.cuda_threads_per_block > 1024:
             raise ValueError('cuda_threads_per_block must be <= 1024')
 
@@ -137,7 +135,6 @@ class SimulatorConfig:
             'gravity_y',
             'stable_velocity_epsilon',
             'stable_angular_velocity_epsilon',
-            'kinematic_rest_displacement_epsilon',
             'restitution_velocity_threshold',
             'collision_substep_motion_fraction',
             'collision_substep_penetration_threshold',
@@ -162,12 +159,6 @@ class SimulatorConfig:
     def danger_frame_limit(self):
         return int(self.physics_fps * self.danger_seconds)
 
-    @property
-    def kinematic_rest_speed_epsilon(self):
-        """返回与物理帧率无关的静止修正速度阈值。"""
-
-        return self.kinematic_rest_displacement_epsilon * 120.0
-
     @classmethod
     def training_fast(cls, **overrides):
         """返回面向最大吞吐的大批量训练 30 FPS 配置。
@@ -180,10 +171,9 @@ class SimulatorConfig:
             'physics_fps': 30,
             'max_physics_frames': 180,
             'stable_frames': 4,
-            'drop_fast_forward': True,
+            'drop_fast_forward': False,
             'adaptive_collision_substeps': True,
             'max_collision_substeps': 2,
-            'kinematic_rest_frames': 1,
             'position_correction': 0.90,
         }
         values.update(overrides)
@@ -191,8 +181,11 @@ class SimulatorConfig:
 
     @classmethod
     def high_fidelity_fast(cls, **overrides):
-        """返回保留 120 FPS 离散语义、仅跳过自由下落的加速配置。"""
+        """返回保留 120 FPS 离散语义的兼容配置预设。
 
-        values = {'drop_fast_forward': True}
+        方法名为兼容既有调用保留；当前物理域始终逐帧模拟自由下落。
+        """
+
+        values = {'drop_fast_forward': False}
         values.update(overrides)
         return cls(**values)

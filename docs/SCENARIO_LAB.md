@@ -74,9 +74,11 @@
 的增量路径与完整训练`step()`在172/135物理帧后逐位得到相同位置、速度、等级、ID、队列、
 得分、RNG和物理计数。
 
-实时画面关闭自由下落快进，以便显示完整落下过程；训练的快进只跳过可证明无碰撞的自由
-下落段，不改变后续碰撞求解。浏览器最终可见帧率仍受显示器刷新率、JSON解析和React/SVG
-渲染成本限制。API的`physics_backend`、`physics_device`和
+2026-08-13 的固定种子 CUDA 对照证明，原自由落体快进虽然只处理首次接触前的下落，
+却不是轨迹等价优化：它会改变首次接触状态，继而改变合成轨迹和分数。该机制现已从
+Python/Tensor 与 CUDA 执行路径删除，训练、评估和场景实验室统一逐帧模拟完整下落过程。
+浏览器最终可见帧率仍受显示器刷新率、JSON解析和
+React/SVG渲染成本限制。API的`physics_backend`、`physics_device`和
 `training_physics_equivalent`字段明确报告当前身份，界面不再用模糊的CUDA标签代替实时
 物理后端名称。
 `/api/evaluate`与`/api/model/evaluate`都读取请求时的场景快照；前者执行真实物理，
@@ -101,6 +103,42 @@ conda run -n python-torch python tools/open_scenario_lab.py `
     --model-device cuda
 
 conda run -n python-torch python tools/open_project_portal.py
+```
+
+## 双环境物理对照
+
+从门户工具中心启动场景实验室时，默认同时启用“双环境物理对照”。进入场景实验室后点击
+右上角“**双环境对照**”，可以在两个预设之间即时切换：
+
+- **游玩 vs 训练**：左侧为场景实验室当前实时游玩环境（120 FPS、完整逐帧），右侧为
+  CUDA大规模训练环境（30 FPS、完整 `step()`、完整逐帧下落）。训练完整步通过逐帧 trace
+  回放；两边仍可能因为 120/30 FPS、碰撞子步和位置修正参数不同而出现轨迹差异。
+- **Tensor vs CUDA**：左右均使用120 FPS、关闭快进和相同物理参数；左侧运行Tensor/CPU，
+  右侧运行CUDA Kernel，用于检查两份物理后端实现是否漂移。如果CUDA不可用，右侧明确
+  标为CPU fallback，此时只能验证同步会话，不能作为后端一致性证据。
+
+两边共享同一个seed、队列和A0～A20投放命令。差异面板按`fruit_id`而不是槽位对齐，实时
+报告最大位置差、速度差、角度差、角速度差、离散状态差异及第一次分歧所在帧。切换预设或
+点击“清空并重置差异”会清除首次分歧记录。每次同步投放结束后，对照会自动停在两边相同
+的物理时刻，保留端点供观察；执行下一次同步投放时会自动恢复。
+
+加载checkpoint后可点击“启动模型持续决策”。控制器使用左侧游玩场景作为当前模型的输入，
+每次选择一个A0～A20动作并把同一个动作同步投放到左右环境；轨迹结束后自动继续下一次决策。
+这样两边动作和队列保持一致，后续差异只来自物理执行路径。任一环境终局、手工停止、达到
+1000次决策上限或推理错误时会停止。
+
+“游玩 vs 训练”中的训练侧只对正常的动作投放使用真实完整训练 `step()`。任意等级手工放置、
+拖动和删除属于实验室调试操作，不是训练动作；这些操作会同步修改两边场景，但不应被用作
+训练路径等价结论。
+
+命令行显式启用方式：
+
+```powershell
+$env:PYTHONPATH = 'src'
+conda run -n python-torch python tools/open_scenario_lab.py `
+    --device cuda `
+    --comparison `
+    --comparison-preset play_vs_training
 ```
 
 无CUDA的开发机可使用同一Tensor算法的`--device cpu --model-device cpu`回退路径。不指定`--checkpoint`时仍可编辑

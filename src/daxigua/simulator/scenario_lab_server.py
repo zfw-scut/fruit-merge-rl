@@ -20,16 +20,20 @@ class ScenarioLabServer:
             *,
             model_evaluator=None,
             model_controller=None,
+            comparison_model_controller=None,
             live_session=None,
+            comparison_session=None,
             host='127.0.0.1',
             port=8769,
             title='合成大西瓜 · Reward V2.1场景实验室'):
         self.evaluator = evaluator
         self.model_evaluator = model_evaluator
         self.model_controller = model_controller
+        self.comparison_model_controller = comparison_model_controller
         self.live_session = live_session or ScenarioLabLiveSession(
             device=evaluator.device
         )
+        self.comparison_session = comparison_session
         geometry = self.live_session.config
         self.ui_config = {
             'format_version': 1,
@@ -112,10 +116,16 @@ class ScenarioLabServer:
                         'live_physics_backend': owner.live_session.backend,
                         'live_physics_device': str(owner.live_session.device),
                         'training_physics_equivalent': True,
+                        'comparison_available': (
+                            owner.comparison_session is not None
+                        ),
                         'model_available': model_identity is not None,
                         'model': model_identity,
                         'model_continuous_available': (
                             owner.model_controller is not None
+                        ),
+                        'comparison_model_continuous_available': (
+                            owner.comparison_model_controller is not None
                         ),
                     })
                     return
@@ -159,6 +169,57 @@ class ScenarioLabServer:
                             ConnectionResetError):
                         pass
                     return
+                if self.path == '/api/comparison/state':
+                    if owner.comparison_session is None:
+                        self._json(404, {
+                            'error': '双环境物理对照尚未启用',
+                        })
+                        return
+                    self._json(
+                        200, owner._comparison_payload(
+                            owner.comparison_session.snapshot()
+                        )
+                    )
+                    return
+                if self.path == '/api/comparison/events':
+                    if owner.comparison_session is None:
+                        self._json(404, {
+                            'error': '双环境物理对照尚未启用',
+                        })
+                        return
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.send_header('Cache-Control', 'no-store')
+                    self.send_header('Connection', 'keep-alive')
+                    self._cors()
+                    self.end_headers()
+                    sequence = -1
+                    try:
+                        while not owner._closing.is_set():
+                            payload = (
+                                owner.comparison_session.wait_for_snapshot(
+                                    sequence, timeout=5.0
+                                )
+                            )
+                            payload = owner._comparison_payload(payload)
+                            next_sequence = int(payload['sequence'])
+                            if next_sequence == sequence:
+                                self.wfile.write(b': keep-alive\n\n')
+                            else:
+                                body = json.dumps(
+                                    payload,
+                                    ensure_ascii=False,
+                                    separators=(',', ':'),
+                                ).encode('utf-8')
+                                self.wfile.write(b'data: ' + body + b'\n\n')
+                                sequence = next_sequence
+                            self.wfile.flush()
+                    except (
+                            BrokenPipeError,
+                            ConnectionAbortedError,
+                            ConnectionResetError):
+                        pass
+                    return
                 self._json(404, {'error': '路径不存在'})
 
             def do_POST(self):
@@ -166,7 +227,9 @@ class ScenarioLabServer:
                         '/api/evaluate',
                         '/api/model/evaluate',
                         '/api/model/control',
-                        '/api/live/command'):
+                        '/api/comparison/model/control',
+                        '/api/live/command',
+                        '/api/comparison/command'):
                     self._json(404, {'error': '路径不存在'})
                     return
                 try:
@@ -193,6 +256,41 @@ class ScenarioLabServer:
                                 command.get('scene')
                             )
                         payload = owner.live_session.execute(command)
+                    elif self.path == '/api/comparison/command':
+                        if owner.comparison_session is None:
+                            raise RuntimeError('双环境物理对照尚未启用')
+                        command = request.get('command')
+                        if not isinstance(command, dict):
+                            raise TypeError('command must be an object')
+                        if (
+                                owner.comparison_model_controller is not None
+                                and owner.comparison_model_controller.running
+                                and command.get('type') != 'refresh_state'):
+                            owner.comparison_model_controller.stop(
+                                reason='manual_control'
+                            )
+                        if command.get('type') == 'load_scene':
+                            command = dict(command)
+                            command['scene'] = validate_scenario(
+                                command.get('scene')
+                            )
+                        payload = owner.comparison_session.execute(command)
+                    elif self.path == '/api/comparison/model/control':
+                        controller = owner.comparison_model_controller
+                        if controller is None:
+                            raise RuntimeError(
+                                '双环境模型持续决策控制器尚未加载'
+                            )
+                        command = request.get('command')
+                        if command == 'start':
+                            payload = controller.start()
+                        elif command == 'stop':
+                            payload = controller.stop()
+                        else:
+                            raise ValueError(
+                                'comparison model control command must be '
+                                'start or stop'
+                            )
                     elif self.path == '/api/model/control':
                         if owner.model_controller is None:
                             raise RuntimeError('模型持续决策控制器尚未加载')
@@ -241,12 +339,23 @@ class ScenarioLabServer:
             payload['model_continuous'] = self.model_controller.status()
         return payload
 
+    def _comparison_payload(self, payload):
+        if self.comparison_model_controller is not None:
+            payload['model_continuous'] = (
+                self.comparison_model_controller.status()
+            )
+        return payload
+
     def start(self):
         if self._thread is None:
             self._closing.clear()
             self.live_session.start()
+            if self.comparison_session is not None:
+                self.comparison_session.start()
             if self.model_controller is not None:
                 self.model_controller.start_service()
+            if self.comparison_model_controller is not None:
+                self.comparison_model_controller.start_service()
             self._thread = Thread(
                 target=self.httpd.serve_forever,
                 name='scenario-lab-server',
@@ -258,8 +367,12 @@ class ScenarioLabServer:
     def serve_forever(self):
         self._closing.clear()
         self.live_session.start()
+        if self.comparison_session is not None:
+            self.comparison_session.start()
         if self.model_controller is not None:
             self.model_controller.start_service()
+        if self.comparison_model_controller is not None:
+            self.comparison_model_controller.start_service()
         self.httpd.serve_forever()
 
     def close(self):
@@ -269,7 +382,11 @@ class ScenarioLabServer:
         self.httpd.server_close()
         if self.model_controller is not None:
             self.model_controller.close()
+        if self.comparison_model_controller is not None:
+            self.comparison_model_controller.close()
         self.live_session.close()
+        if self.comparison_session is not None:
+            self.comparison_session.close()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None

@@ -152,10 +152,12 @@ const METRICS: Record<MetricId, { label: string; unit: string; title: string; su
   },
 };
 
-const fadeUp = {
-  hidden: { opacity: 0, y: 18 },
-  show: { opacity: 1, y: 0, transition: { duration: 0.55, ease: [0.22, 1, 0.36, 1] } },
+const pageEnter = {
+  opacity: [0.82, 1],
+  y: [8, 0],
 };
+
+const pageTransition = { duration: 0.32, ease: [0.22, 1, 0.36, 1] };
 
 function number(value: number | null | undefined, digits = 0) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
@@ -601,8 +603,8 @@ export function PortalShell() {
       <main className="main-stage">
         <AnimatePresence mode="wait">
           {activeView === "overview" && (
-            <motion.section key="overview" className="page overview-page" initial="hidden" animate="show" exit={{ opacity: 0, y: -10 }} variants={{ show: { transition: { staggerChildren: .07 } } }}>
-              <motion.div className="hero" variants={fadeUp}>
+            <motion.section key="overview" className="page overview-page" animate={pageEnter} exit={{ opacity: 0, y: -10 }} transition={pageTransition}>
+              <div className="hero">
                 <div className="hero-copy">
                   <div className="eyebrow"><Sparkles size={14} /> MODEL INTELLIGENCE / LIVE KNOWLEDGE</div>
                   <h1>让每一次训练<br /><span>成为可读的证据。</span></h1>
@@ -620,16 +622,16 @@ export function PortalShell() {
                   <div className="orbit-node node-b">1.22M</div>
                   <div className="orbit-node node-c">4096×2</div>
                 </div>
-              </motion.div>
+              </div>
 
-              <motion.div className="stat-grid" variants={fadeUp}>
+              <div className="stat-grid">
                 <StatCard icon={Gauge} label="新物理120FPS最佳" value="7,568.18" note="结构化辅助迁移 · 相对来源 +15.51%" tone="cyan" />
                 <StatCard icon={Sparkles} label="新物理30FPS最佳" value="8,006.41" note="同一迁移模型 · 4096局" tone="green" />
                 <StatCard icon={Database} label="完整训练谱系" value="156M" note="128M父 + 12M旁路 + 16M适应" tone="violet" />
                 <StatCard icon={FileText} label="可检索知识" value={String(documents.length || "—")} note="设计、评估与工程记录" tone="amber" />
-              </motion.div>
+              </div>
 
-              <motion.div className="dashboard-grid" variants={fadeUp}>
+              <div className="dashboard-grid">
                 <section className="panel chart-stage">
                   <div className="panel-head chart-head">
                     <div>
@@ -668,12 +670,12 @@ export function PortalShell() {
                     <div className="evidence-tags"><span>事实</span><span>观察</span><span>假设</span><span>决策</span></div>
                   </section>
                 </aside>
-              </motion.div>
+              </div>
             </motion.section>
           )}
 
           {activeView === "models" && (
-            <motion.section key="models" className="page" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+            <motion.section key="models" className="page" animate={pageEnter} exit={{ opacity: 0 }} transition={pageTransition}>
               <PageHeader eyebrow="MODEL EVIDENCE MAP" title="模型性能，不只看一个最高分。" description="同时审视训练规模、模型容量、双帧率得分、L11事件与物理身份。所有点均可追溯到正式评估报告。" />
               <section className="panel latest-model-evidence">
                 <div className="panel-head latest-evidence-head">
@@ -748,7 +750,7 @@ export function PortalShell() {
           )}
 
           {activeView === "documents" && (
-            <motion.section key="documents" className="documents-page" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <motion.section key="documents" className="documents-page" animate={{ opacity: [0.82, 1] }} exit={{ opacity: 0 }} transition={pageTransition}>
               <aside className="document-browser">
                 <div className="document-browser-head">
                   <span className="panel-kicker">KNOWLEDGE INDEX</span>
@@ -806,7 +808,7 @@ export function PortalShell() {
           )}
 
           {activeView === "tools" && (
-            <motion.section key="tools" className="page" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+            <motion.section key="tools" className="page" animate={pageEnter} exit={{ opacity: 0 }} transition={pageTransition}>
               <PageHeader eyebrow="LOCAL TOOL LAUNCHPAD" title="把复杂命令，收进一个按钮。" description="白名单工具、参数校验、进程状态与实时日志都在同一处完成。门户不会执行任意命令，也不会保存服务器密码。" />
               {!backendOnline && <div className="offline-banner"><AlertCircle size={18} /><span><b>控制服务未连接</b>当前可以预览界面，但需要通过项目门户启动器打开后才能执行工具。</span></div>}
               <div className="tool-grid">
@@ -853,14 +855,14 @@ export function PortalShell() {
           )}
 
           {activeView === "live" && (
-            <motion.section key="live" className="page live-page" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+            <motion.section key="live" className="page live-page" animate={pageEnter} exit={{ opacity: 0 }} transition={pageTransition}>
               <PageHeader eyebrow="LIVE TRAINING TELEMETRY" title="训练发生时，证据也在生长。" description="云端遥测、训练队列、资源曲线和细分损失已经原生进入项目门户；所有高密度信息按诊断语义折叠。" />
               <TrainingWorkspace dashboard={dashboard} onRefresh={() => void loadDashboard()} onOpenTools={() => navigate("tools")} />
             </motion.section>
           )}
 
           {activeView === "lab" && (
-            <motion.section key="lab" className="page lab-page" initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+            <motion.section key="lab" className="page lab-page" animate={pageEnter} exit={{ opacity: 0 }} transition={pageTransition}>
               <PageHeader eyebrow="INTERACTIVE PHYSICS LAB" title="让预测直接落在物理场景里。" description="实时场景编辑、21动作预测、辅助效果对照与可视化图层共用一套门户布局；低频设置集中在右侧抽屉。" />
               <ScenarioWorkspace tool={tools.find((tool) => tool.id === "scenario_lab")} onConfigure={() => {
                 const tool = tools.find((item) => item.id === "scenario_lab");

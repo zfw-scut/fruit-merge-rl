@@ -6,8 +6,6 @@ void vector_step_cuda(
     bool perform_drop,
     torch::Tensor positions,
     torch::Tensor velocities,
-    torch::Tensor frame_start_positions,
-    torch::Tensor incremental_quiet_frames,
     torch::Tensor incremental_stable_count,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
@@ -93,11 +91,8 @@ void vector_step_cuda(
     int64_t stable_frames,
     int64_t solver_iterations,
     bool track_action_effects,
-    bool drop_fast_forward,
     bool adaptive_collision_substeps,
     int64_t max_collision_substeps,
-    int64_t kinematic_rest_frames,
-    double kinematic_rest_speed_epsilon,
     double gravity_y,
     double damping,
     double fruit_elasticity,
@@ -123,8 +118,6 @@ void vector_step(
     bool perform_drop,
     torch::Tensor positions,
     torch::Tensor velocities,
-    torch::Tensor frame_start_positions,
-    torch::Tensor incremental_quiet_frames,
     torch::Tensor incremental_stable_count,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
@@ -210,11 +203,8 @@ void vector_step(
     int64_t stable_frames,
     int64_t solver_iterations,
     bool track_action_effects,
-    bool drop_fast_forward,
     bool adaptive_collision_substeps,
     int64_t max_collision_substeps,
-    int64_t kinematic_rest_frames,
-    double kinematic_rest_speed_epsilon,
     double gravity_y,
     double damping,
     double fruit_elasticity,
@@ -234,16 +224,11 @@ void vector_step(
   CHECK_CONTIGUOUS(actions);
   CHECK_CUDA(enabled);
   CHECK_CONTIGUOUS(enabled);
-  CHECK_CUDA(incremental_quiet_frames);
-  CHECK_CONTIGUOUS(incremental_quiet_frames);
   CHECK_CUDA(incremental_stable_count);
   CHECK_CONTIGUOUS(incremental_stable_count);
   CHECK_CONTIGUOUS(positions);
-  CHECK_CONTIGUOUS(frame_start_positions);
   TORCH_CHECK(actions.scalar_type() == torch::kInt64, "actions must be int64");
   TORCH_CHECK(enabled.scalar_type() == torch::kBool, "enabled must be bool");
-  TORCH_CHECK(incremental_quiet_frames.scalar_type() == torch::kUInt8,
-              "incremental_quiet_frames must be uint8");
   TORCH_CHECK(incremental_stable_count.scalar_type() == torch::kInt64,
               "incremental_stable_count must be int64");
   TORCH_CHECK(enabled.numel() == actions.numel(),
@@ -262,8 +247,7 @@ void vector_step(
   }
   vector_step_cuda(
       actions, enabled, perform_drop,
-      positions, velocities, frame_start_positions,
-      incremental_quiet_frames, incremental_stable_count,
+      positions, velocities, incremental_stable_count,
       angles, angular_velocities, levels,
       physics_radii, masses, inverse_masses, inverse_inertias, fruit_ids,
       age_frames, active, fruit_queue, score, last_score, step_count,
@@ -289,10 +273,8 @@ void vector_step(
       board_width, board_height, spawn_y, wall_width, action_count,
       max_fruits, queue_length, physics_fps, max_physics_frames,
       stable_frames, solver_iterations, track_action_effects,
-      drop_fast_forward,
       adaptive_collision_substeps, max_collision_substeps,
-      kinematic_rest_frames,
-      kinematic_rest_speed_epsilon, gravity_y, damping,
+      gravity_y, damping,
       fruit_elasticity, restitution_velocity_threshold,
       fruit_friction, wall_friction,
       stable_velocity_epsilon, stable_angular_velocity_epsilon,

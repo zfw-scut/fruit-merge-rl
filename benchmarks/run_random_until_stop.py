@@ -16,6 +16,7 @@ import torch
 
 from daxigua.simulator import (
     BatchSimulationTrace,
+    PHYSICS_IDENTITY,
     save_trace_archive,
     SimulatorConfig,
     TensorVectorSimulator,
@@ -35,7 +36,6 @@ def parse_args():
     parser.add_argument('--max-physics-frames', type=int, default=720)
     parser.add_argument('--stable-frames', type=int, default=15)
     parser.add_argument('--solver-iterations', type=int, default=4)
-    parser.add_argument('--drop-fast-forward', action='store_true')
     parser.add_argument('--adaptive-collision-substeps', action='store_true')
     parser.add_argument('--max-collision-substeps', type=int, default=4)
     parser.add_argument(
@@ -44,8 +44,6 @@ def parse_args():
     parser.add_argument(
         '--collision-substep-penetration-threshold', type=float, default=1.0
     )
-    parser.add_argument('--kinematic-rest-frames', type=int, default=4)
-    parser.add_argument('--kinematic-rest-epsilon', type=float, default=0.1)
     parser.add_argument(
         '--restitution-velocity-threshold', type=float, default=35.0
     )
@@ -609,6 +607,13 @@ def main():
 
     if args.replay_from_plan is not None:
         plan = json.loads(args.replay_from_plan.read_text(encoding='utf-8'))
+        plan_identity = plan.get('physics_identity')
+        if plan_identity != PHYSICS_IDENTITY:
+            rendered = plan_identity or 'legacy_unspecified'
+            raise ValueError(
+                'replay plan physics identity does not match current '
+                f'simulator: {rendered!r} != {PHYSICS_IDENTITY!r}'
+            )
         args.seed = int(plan['seed'])
         args.num_envs = int(plan['source_num_envs'])
         args.replay_frame_stride = int(plan['frame_stride'])
@@ -636,7 +641,6 @@ def main():
         max_physics_frames=args.max_physics_frames,
         stable_frames=args.stable_frames,
         solver_iterations=args.solver_iterations,
-        drop_fast_forward=args.drop_fast_forward,
         adaptive_collision_substeps=args.adaptive_collision_substeps,
         max_collision_substeps=args.max_collision_substeps,
         collision_substep_motion_fraction=(
@@ -645,8 +649,6 @@ def main():
         collision_substep_penetration_threshold=(
             args.collision_substep_penetration_threshold
         ),
-        kinematic_rest_frames=args.kinematic_rest_frames,
-        kinematic_rest_displacement_epsilon=args.kinematic_rest_epsilon,
         restitution_velocity_threshold=args.restitution_velocity_threshold,
         position_correction=args.position_correction,
     )
@@ -745,6 +747,7 @@ def main():
         / step_counts.clamp_min(1).to(torch.float32)
     )
     report = {
+        'physics_identity': PHYSICS_IDENTITY,
         'device': str(simulator.device),
         'num_envs': args.num_envs,
         'max_drops': args.max_drops,
@@ -822,10 +825,6 @@ def main():
             'collision_substep_penetration_threshold': (
                 config.collision_substep_penetration_threshold
             ),
-            'kinematic_rest_frames': config.kinematic_rest_frames,
-            'kinematic_rest_displacement_epsilon': (
-                config.kinematic_rest_displacement_epsilon
-            ),
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -867,6 +866,7 @@ def main():
             }
         args.replay_output_dir.mkdir(parents=True, exist_ok=True)
         replay_plan = {
+            'physics_identity': PHYSICS_IDENTITY,
             'seed': args.seed,
             'source_num_envs': args.num_envs,
             'frame_stride': args.replay_frame_stride,
@@ -894,10 +894,6 @@ def main():
                 ),
                 'collision_substep_penetration_threshold': (
                     config.collision_substep_penetration_threshold
-                ),
-                'kinematic_rest_frames': config.kinematic_rest_frames,
-                'kinematic_rest_displacement_epsilon': (
-                    config.kinematic_rest_displacement_epsilon
                 ),
             },
         }

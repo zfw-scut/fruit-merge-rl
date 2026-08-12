@@ -25,28 +25,37 @@ class ScenarioLabLiveSession:
             physics_fps=120,
             publish_fps=120,
             seed=20260806,
-            device='cpu'):
-        if physics_fps not in (30, 120):
-            raise ValueError('physics_fps must be 30 or 120')
-        if not 1 <= int(publish_fps) <= int(physics_fps):
-            raise ValueError('publish_fps must be in [1, physics_fps]')
+            device='cpu',
+            config=None):
         self.device = torch.device(device)
         if self.device.type == 'cuda' and not torch.cuda.is_available():
             raise RuntimeError('CUDA is not available')
-        factory = (
-            SimulatorConfig.training_fast
-            if int(physics_fps) == 30
-            else SimulatorConfig.high_fidelity_fast
-        )
-        self.config = factory(
-            max_fruits=64,
-            action_count=21,
-            queue_length=4,
-            use_cuda_extension=self.device.type == 'cuda',
-            track_action_effects=False,
-            # 实时画面不能跳过自由下落；该优化不改变碰撞后的训练物理。
-            drop_fast_forward=False,
-        )
+        if config is None:
+            if physics_fps not in (30, 120):
+                raise ValueError('physics_fps must be 30 or 120')
+            factory = (
+                SimulatorConfig.training_fast
+                if int(physics_fps) == 30
+                else SimulatorConfig.high_fidelity_fast
+            )
+            config = factory(
+                max_fruits=64,
+                action_count=21,
+                queue_length=4,
+                use_cuda_extension=self.device.type == 'cuda',
+                track_action_effects=False,
+                # 实时画面必须保留完整下落过程。
+                drop_fast_forward=False,
+            )
+        elif not isinstance(config, SimulatorConfig):
+            raise TypeError('config must be SimulatorConfig')
+        if config.physics_fps not in (30, 120):
+            raise ValueError('config.physics_fps must be 30 or 120')
+        if config.use_cuda_extension != (self.device.type == 'cuda'):
+            raise ValueError('config CUDA backend must match device')
+        if not 1 <= int(publish_fps) <= int(config.physics_fps):
+            raise ValueError('publish_fps must be in [1, physics_fps]')
+        self.config = config
         self.publish_fps = int(publish_fps)
         self.seed = int(seed)
         self.simulator = TensorVectorSimulator(

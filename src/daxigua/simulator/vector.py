@@ -111,10 +111,6 @@ class TensorVectorSimulator:
             device=self.device,
         )
         self.velocities = torch.zeros_like(self.positions)
-        self._frame_start_positions = torch.empty_like(self.positions)
-        self._incremental_quiet_frames = torch.zeros(
-            (batch, capacity), dtype=torch.uint8, device=self.device
-        )
         self._incremental_stable_count = torch.zeros(
             batch, dtype=torch.int64, device=self.device
         )
@@ -334,7 +330,6 @@ class TensorVectorSimulator:
                 self._last_drop_id,
                 self._last_queue_before,
                 self._last_queue_after,
-                self._incremental_quiet_frames,
                 self._incremental_stable_count):
             self._reset_rows(tensor, mask)
         self.next_fruit_id[mask] = 1
@@ -478,89 +473,6 @@ class TensorVectorSimulator:
             self._q0_final_fruit_id.copy_(fruit_id)
             self._q0_final_level.copy_(level)
             self._q0_final_slot.copy_(slots)
-
-    def _drop_fast_forward_eligibility(self):
-        """判断投放前各环境能否安全跳过新水果的无碰撞下落。"""
-
-        if not self.config.drop_fast_forward:
-            return torch.zeros_like(self.needs_reset)
-        stable_linear = self.velocities.square().sum(dim=-1) <= (
-            self.config.stable_velocity_epsilon ** 2
-        )
-        stable_angular = self.angular_velocities.abs() <= (
-            self.config.stable_angular_velocity_epsilon
-        )
-        all_stable = ((stable_linear & stable_angular) | ~self.active).all(dim=1)
-        # 投放后，原来的最新水果也会参与顶线失败计时。该情况下跳帧会
-        # 漏掉 fail_frames 的逐帧演化，因此保守地退回完整模拟。
-        clear_of_danger_line = ~(
-            self.active
-            & (self.positions[..., 1] < float(self.config.spawn_y))
-        ).any(dim=1)
-        return all_stable & clear_of_danger_line
-
-    def _fast_forward_new_drop(self, eligible):
-        """把新水果推进到首次接触前一帧，返回跳过的语义帧数。"""
-
-        skipped = torch.zeros_like(self.score)
-        if not self.config.drop_fast_forward or not bool(eligible.any().item()):
-            return skipped
-
-        new_mask = self.active & (
-            self.fruit_ids == self._last_drop_id[:, None]
-        )
-        new_slots = new_mask.to(torch.int8).argmax(dim=1)
-        env_ids = self._env_indices
-        drop_x = self.positions[env_ids, new_slots, 0]
-        drop_y = self.positions[env_ids, new_slots, 1]
-        drop_radius = self.physics_radii[env_ids, new_slots]
-        drop_velocity_y = self.velocities[env_ids, new_slots, 1]
-
-        floor_contact_y = (
-            float(self.config.board_height - self.config.wall_width)
-            - drop_radius
-        )
-        dx = drop_x[:, None] - self.positions[..., 0]
-        radius_sum = drop_radius[:, None] + self.physics_radii
-        collision_mask = self.active & ~new_mask & (dx.abs() < radius_sum)
-        vertical_offset = (
-            radius_sum.square() - dx.square()
-        ).clamp_min(0.0).sqrt()
-        candidate_y = self.positions[..., 1] - vertical_offset
-        collision_mask &= candidate_y > drop_y[:, None]
-        candidate_y = torch.where(
-            collision_mask,
-            candidate_y,
-            torch.full_like(candidate_y, float('inf')),
-        )
-        contact_y = torch.minimum(floor_contact_y, candidate_y.min(dim=1).values)
-
-        dt = self.config.dt
-        frame_damping = float(self.config.damping) ** dt
-        advancing = eligible.clone()
-        for _ in range(self.config.max_physics_frames):
-            next_velocity_y = (
-                drop_velocity_y + self.config.gravity_y * dt
-            ) * frame_damping
-            next_y = drop_y + next_velocity_y * dt
-            can_skip = advancing & (next_y < contact_y)
-            drop_velocity_y = torch.where(
-                can_skip, next_velocity_y, drop_velocity_y
-            )
-            drop_y = torch.where(can_skip, next_y, drop_y)
-            skipped += can_skip.to(torch.int64)
-            advancing = can_skip
-            if not bool(advancing.any().item()):
-                break
-
-        self.positions[env_ids, new_slots, 1] = drop_y
-        self.velocities[env_ids, new_slots, 1] = drop_velocity_y
-        self.age_frames += self.active.to(torch.int64) * skipped[:, None]
-        self.physics_frame += skipped
-        self.fail_frames = torch.where(
-            skipped > 0, torch.zeros_like(self.fail_frames), self.fail_frames
-        )
-        return skipped
 
     def _integrate(self, running, *, dt=None, increment_age=True):
         active = self.active & running[:, None]
@@ -1114,45 +1026,6 @@ class TensorVectorSimulator:
         ) | ~self.active
         return fruit_stable.all(dim=1)
 
-    def _correct_kinematic_rest_velocity(
-            self, running, frame_start_positions, quiet_frame_count):
-        """让连续静止环境的线速度与真实逐帧位移保持一致。"""
-
-        required_frames = self.config.kinematic_rest_frames
-        if required_frames == 0:
-            return
-        displacement = self.positions - frame_start_positions
-        already_resting = quiet_frame_count >= required_frames
-        displacement_epsilon = torch.where(
-            already_resting,
-            torch.full_like(
-                quiet_frame_count,
-                self.config.stable_velocity_epsilon * self.config.dt,
-                dtype=self.float_dtype,
-            ),
-            torch.full_like(
-                quiet_frame_count,
-                self.config.kinematic_rest_speed_epsilon * self.config.dt,
-                dtype=self.float_dtype,
-            ),
-        )
-        quiet_slots = (
-            displacement.square().sum(dim=-1)
-            <= displacement_epsilon.square()
-        ) & self.active & (self.age_frames > 0) & running[:, None]
-        quiet_frame_count.copy_(torch.where(
-            quiet_slots,
-            quiet_frame_count + 1,
-            torch.zeros_like(quiet_frame_count),
-        ))
-        correct = (
-            self.active
-            & running[:, None]
-            & (quiet_frame_count >= required_frames)
-        )
-        if bool(correct.any().item()):
-            self.velocities[correct] = 0.0
-
     def _collision_substep_counts(self, running):
         """按预测运动和接触拥挤度选择每个环境的碰撞子步数。"""
 
@@ -1701,8 +1574,6 @@ class TensorVectorSimulator:
             bool(perform_drop),
             self.positions,
             self.velocities,
-            self._frame_start_positions,
-            self._incremental_quiet_frames,
             self._incremental_stable_count,
             self.angles,
             self.angular_velocities,
@@ -1788,11 +1659,8 @@ class TensorVectorSimulator:
             self.config.stable_frames,
             self.config.solver_iterations,
             self.config.track_action_effects,
-            self.config.drop_fast_forward,
             self.config.adaptive_collision_substeps,
             self.config.max_collision_substeps,
-            self.config.kinematic_rest_frames,
-            self.config.kinematic_rest_speed_epsilon,
             self.config.gravity_y,
             self.config.damping,
             self.config.fruit_elasticity,
@@ -1872,7 +1740,6 @@ class TensorVectorSimulator:
         """重置实时逐帧推进状态，不修改任何游戏状态。"""
 
         mask = self._normalize_mask(mask)
-        self._incremental_quiet_frames[mask] = 0
         self._incremental_stable_count[mask] = (
             self.config.stable_frames if stable else 0
         )
@@ -1918,15 +1785,9 @@ class TensorVectorSimulator:
         stable_result = torch.zeros_like(running)
         done_result = torch.zeros_like(running)
         if bool(running.any().item()):
-            frame_start_positions = self.positions.clone()
             substep_counts = self._advance_collision_substeps(running)
             collision_substeps = torch.where(
                 running, substep_counts, collision_substeps
-            )
-            self._correct_kinematic_rest_velocity(
-                running,
-                frame_start_positions,
-                self._incremental_quiet_frames,
             )
             self.physics_frame += running.to(torch.int64)
             newly_done = self._update_termination(running)
@@ -1990,34 +1851,23 @@ class TensorVectorSimulator:
             return self._step_cuda_extension(actions)
         score_before = self.score.clone()
         self._clear_event_buffers()
-        fast_forward_eligible = self._drop_fast_forward_eligibility()
         self._drop(actions)
 
-        fast_forwarded_frames = self._fast_forward_new_drop(
-            fast_forward_eligible
-        )
-        frames_simulated = fast_forwarded_frames.clone()
+        fast_forwarded_frames = torch.zeros_like(self.score)
+        frames_simulated = torch.zeros_like(self.score)
         collision_substeps = torch.zeros_like(frames_simulated)
         running = frames_simulated < self.config.max_physics_frames
         budget_exhausted = ~running
         stable_count = torch.zeros_like(self.score)
-        kinematic_quiet_count = torch.zeros_like(self.levels)
         stable_result = torch.zeros_like(running)
         done_result = torch.zeros_like(running)
 
         for frame_index in range(self.config.max_physics_frames):
-            frame_start_positions = self.positions.clone()
             frame_event_count = self._event_count.clone()
             substep_counts = self._advance_collision_substeps(running)
             collision_substeps += torch.where(
                 running, substep_counts, torch.zeros_like(substep_counts)
             )
-            self._correct_kinematic_rest_velocity(
-                running,
-                frame_start_positions,
-                kinematic_quiet_count,
-            )
-
             frames_simulated += running.to(torch.int64)
             self.physics_frame += running.to(torch.int64)
             newly_done = self._update_termination(running)

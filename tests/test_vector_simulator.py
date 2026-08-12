@@ -152,37 +152,6 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         ))
         self.assertTrue(torch.equal(source.observe().positions, before.positions))
 
-    def test_kinematic_rest_correction_is_per_fruit(self):
-        simulator = TensorVectorSimulator(
-            1,
-            config=self._config(
-                kinematic_rest_frames=4,
-                kinematic_rest_displacement_epsilon=0.1,
-            ),
-            device='cpu',
-        )
-        self._install_fruit(simulator, 0, 0, 1, 100, 300, 1)
-        self._install_fruit(simulator, 0, 1, 2, 200, 300, 2)
-        simulator.age_frames[0, :2] = 1
-        simulator.velocities[0, 0, 1] = 43.0
-        simulator.velocities[0, 1, 1] = 43.0
-        running = torch.tensor([True])
-        quiet_frames = torch.zeros_like(simulator.levels)
-
-        for _ in range(4):
-            frame_start = simulator.positions.clone()
-            simulator.positions[0, 1, 0] += 1.0
-            simulator._correct_kinematic_rest_velocity(
-                running, frame_start, quiet_frames
-            )
-
-        self.assertTrue(torch.equal(
-            simulator.velocities[0, 0], torch.zeros(2)
-        ))
-        self.assertEqual(float(simulator.velocities[0, 1, 1]), 43.0)
-        self.assertEqual(int(quiet_frames[0, 0]), 4)
-        self.assertEqual(int(quiet_frames[0, 1]), 0)
-
     def test_angular_velocity_uses_same_time_damping_as_linear_velocity(self):
         config = self._config(
             physics_fps=30,
@@ -204,44 +173,52 @@ class TensorVectorSimulatorTest(unittest.TestCase):
             float(simulator.angular_velocities[0, 0]), expected, places=5
         )
 
-    def test_kinematic_rest_threshold_has_frame_rate_independent_speed(self):
-        for physics_fps in (30, 120):
-            config = self._config(
-                physics_fps=physics_fps,
-                kinematic_rest_frames=4,
-                kinematic_rest_displacement_epsilon=0.1,
-            )
-            simulator = TensorVectorSimulator(1, config=config, device='cpu')
-            self._install_fruit(simulator, 0, 0, 1, 100, 200, 1)
-            simulator.age_frames[0, 0] = 1
-            simulator.velocities[0, 0, 0] = 10.0
-            running = torch.tensor([True])
-            quiet_frames = torch.zeros_like(simulator.levels)
-            for _ in range(4):
-                frame_start = simulator.positions.clone()
-                simulator.positions[0, 0, 0] += 10.0 * config.dt
-                simulator._correct_kinematic_rest_velocity(
-                    running, frame_start, quiet_frames
-                )
-            self.assertEqual(int(quiet_frames[0, 0]), 4)
-            self.assertTrue(torch.equal(
-                simulator.velocities[0, 0], torch.zeros(2)
-            ))
-
-    def test_newly_merged_fruit_is_not_frozen_in_creation_frame(self):
-        config = self._config(kinematic_rest_frames=1)
+    def test_unsupported_fruit_keeps_accelerating_under_gravity(self):
+        config = self._config(
+            physics_fps=120,
+            stable_frames=15,
+            gravity_y=1800.0,
+        )
         simulator = TensorVectorSimulator(1, config=config, device='cpu')
         self._install_fruit(simulator, 0, 0, 1, 100, 200, 1)
-        simulator.velocities[0, 0, 0] = 10.0
-        frame_start = simulator.positions.clone()
-        quiet_frames = torch.zeros_like(simulator.levels)
+        start_y = float(simulator.positions[0, 0, 1])
+        velocities = []
 
-        simulator._correct_kinematic_rest_velocity(
-            torch.tensor([True]), frame_start, quiet_frames
+        for _ in range(3):
+            physics = simulator.advance_incremental_frame()
+            velocities.append(float(simulator.velocities[0, 0, 1]))
+
+        self.assertGreater(velocities[0], 0.0)
+        self.assertGreater(velocities[1], velocities[0])
+        self.assertGreater(velocities[2], velocities[1])
+        self.assertGreater(float(simulator.positions[0, 0, 1]), start_y)
+        self.assertFalse(bool(physics.stable[0]))
+
+    def test_fruit_accelerates_after_support_disappears_mid_action(self):
+        config = self._config(
+            physics_fps=120,
+            stable_frames=15,
+            gravity_y=1800.0,
         )
+        simulator = TensorVectorSimulator(1, config=config, device='cpu')
+        self._install_fruit(simulator, 0, 0, 3, 100, 360, 1)
+        self._install_fruit(simulator, 0, 1, 2, 100, 290, 2)
+        for _ in range(12):
+            simulator.advance_incremental_frame()
+        simulator.reset_incremental_progress(stable=True)
+        simulator.active[0, 0] = False
+        start_y = float(simulator.positions[0, 1, 1])
+        velocities = []
 
-        self.assertEqual(int(quiet_frames[0, 0]), 0)
-        self.assertEqual(float(simulator.velocities[0, 0, 0]), 10.0)
+        for _ in range(3):
+            physics = simulator.advance_incremental_frame()
+            velocities.append(float(simulator.velocities[0, 1, 1]))
+
+        self.assertGreater(velocities[0], 0.0)
+        self.assertGreater(velocities[1], velocities[0])
+        self.assertGreater(velocities[2], velocities[1])
+        self.assertGreater(float(simulator.positions[0, 1, 1]), start_y)
+        self.assertFalse(bool(physics.stable[0]))
 
     def test_low_speed_contact_does_not_apply_restitution(self):
         config = self._config(restitution_velocity_threshold=35.0)
@@ -396,10 +373,9 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         self.assertEqual(config.physics_fps, 30)
         self.assertEqual(config.max_physics_frames, 180)
         self.assertEqual(config.stable_frames, 4)
-        self.assertTrue(config.drop_fast_forward)
+        self.assertFalse(config.drop_fast_forward)
         self.assertTrue(config.adaptive_collision_substeps)
         self.assertEqual(config.max_collision_substeps, 2)
-        self.assertEqual(config.kinematic_rest_frames, 1)
         self.assertAlmostEqual(config.position_correction, 0.9)
         self.assertAlmostEqual(
             config.max_physics_frames / config.physics_fps, 6.0
@@ -407,9 +383,9 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         high_fidelity = SimulatorConfig.high_fidelity_fast(max_fruits=8)
         self.assertEqual(high_fidelity.physics_fps, 120)
         self.assertEqual(high_fidelity.max_physics_frames, 720)
-        self.assertTrue(high_fidelity.drop_fast_forward)
+        self.assertFalse(high_fidelity.drop_fast_forward)
 
-    def test_drop_fast_forward_skips_only_stable_free_fall(self):
+    def test_legacy_drop_fast_forward_flag_cannot_enable_skipping(self):
         config = self._config(
             physics_fps=30,
             max_physics_frames=180,
@@ -428,12 +404,13 @@ class TensorVectorSimulatorTest(unittest.TestCase):
 
         result = simulator.step(torch.tensor([3, 6]))
 
-        self.assertGreater(int(result.physics.fast_forwarded_frames[0]), 0)
-        self.assertEqual(int(result.physics.fast_forwarded_frames[1]), 0)
-        self.assertTrue(torch.all(
-            result.physics.fast_forwarded_frames
-            <= result.physics.frames_simulated
-        ).item())
+        self.assertFalse(config.drop_fast_forward)
+        self.assertTrue(
+            torch.equal(
+                result.physics.fast_forwarded_frames,
+                torch.zeros_like(result.physics.fast_forwarded_frames),
+            )
+        )
 
     def test_single_environment_adapter_preserves_python_contracts(self):
         simulator = TensorVectorSimulator(
@@ -525,7 +502,59 @@ class CudaVectorSimulatorTest(unittest.TestCase):
             )
         )
 
-    def test_cuda_drop_fast_forward_reports_skipped_semantic_frames(self):
+    def test_cuda_unsupported_fruit_keeps_accelerating_under_gravity(self):
+        config = SimulatorConfig.high_fidelity_fast(
+            max_fruits=8,
+            use_cuda_extension=True,
+            drop_fast_forward=False,
+        )
+        simulator = TensorVectorSimulator(1, config=config, device='cuda')
+        simulator.reset(seeds=1)
+        self._install_fruit(simulator, 0, 1, 280, 500, 1)
+        start_y = float(simulator.positions[0, 0, 1])
+        velocities = []
+
+        for _ in range(3):
+            physics = simulator.advance_incremental_frame()
+            velocities.append(float(simulator.velocities[0, 0, 1]))
+        torch.cuda.synchronize()
+
+        self.assertGreater(velocities[0], 0.0)
+        self.assertGreater(velocities[1], velocities[0])
+        self.assertGreater(velocities[2], velocities[1])
+        self.assertGreater(float(simulator.positions[0, 0, 1]), start_y)
+        self.assertFalse(bool(physics.stable[0]))
+
+    def test_cuda_fruit_accelerates_after_support_disappears_mid_action(self):
+        config = SimulatorConfig.high_fidelity_fast(
+            max_fruits=8,
+            use_cuda_extension=True,
+            drop_fast_forward=False,
+        )
+        simulator = TensorVectorSimulator(1, config=config, device='cuda')
+        simulator.reset(seeds=7, fruit_queue=[1, 2, 3, 4])
+        self._install_fruit(simulator, 0, 3, 120, 1058, 1)
+        self._install_fruit(simulator, 1, 2, 120, 986, 2)
+        simulator.begin_incremental_action(torch.tensor([20], device='cuda'))
+        for _ in range(12):
+            simulator.advance_incremental_frame()
+        simulator.reset_incremental_progress(stable=True)
+        simulator.active[0, 0] = False
+        start_y = float(simulator.positions[0, 1, 1])
+        velocities = []
+
+        for _ in range(3):
+            physics = simulator.advance_incremental_frame()
+            velocities.append(float(simulator.velocities[0, 1, 1]))
+        torch.cuda.synchronize()
+
+        self.assertGreater(velocities[0], 0.0)
+        self.assertGreater(velocities[1], velocities[0])
+        self.assertGreater(velocities[2], velocities[1])
+        self.assertGreater(float(simulator.positions[0, 1, 1]), start_y)
+        self.assertFalse(bool(physics.stable[0]))
+
+    def test_cuda_training_profile_simulates_every_free_fall_frame(self):
         config = SimulatorConfig.training_fast(max_fruits=8)
         simulator = TensorVectorSimulator(8, config=config, device='cuda')
         simulator.reset(
@@ -540,17 +569,11 @@ class CudaVectorSimulatorTest(unittest.TestCase):
         )
         torch.cuda.synchronize()
 
+        self.assertFalse(config.drop_fast_forward)
         self.assertTrue(
-            (result.physics.fast_forwarded_frames > 0).all().item()
+            (result.physics.fast_forwarded_frames == 0).all().item()
         )
-        self.assertTrue(torch.all(
-            result.physics.fast_forwarded_frames
-            <= result.physics.frames_simulated
-        ).item())
-        executed = (
-            result.physics.frames_simulated
-            - result.physics.fast_forwarded_frames
-        )
+        executed = result.physics.frames_simulated
         self.assertTrue(torch.all(
             result.physics.collision_substeps >= executed
         ).item())
@@ -905,6 +928,50 @@ class CudaVectorSimulatorTest(unittest.TestCase):
                     name,
                 )
         self.assertEqual(1, int(full.score[0].item()))
+
+    def test_cuda_training_step_without_fast_forward_matches_lab_path(self):
+        config = SimulatorConfig.training_fast(
+            max_fruits=64,
+            use_cuda_extension=True,
+            drop_fast_forward=False,
+        )
+        full = TensorVectorSimulator(1, config=config, device='cuda')
+        incremental = TensorVectorSimulator(1, config=config, device='cuda')
+        full.reset(seeds=20260813)
+        incremental.reset(seeds=20260813)
+        actions = (2, 2, 12, 1, 14, 8, 6, 11, 18, 13)
+
+        for action_index in actions:
+            action = torch.tensor(
+                [action_index], dtype=torch.int64, device='cuda'
+            )
+            expected = full.step(action)
+            incremental.begin_incremental_action(action)
+            frames = 0
+            stable = False
+            done = False
+            while (
+                    frames < config.max_physics_frames
+                    and not stable
+                    and not done):
+                physics = incremental.advance_incremental_frame()
+                frames += 1
+                stable = bool(physics.stable[0].item())
+                done = bool(physics.done[0].item())
+
+            self.assertEqual(
+                int(expected.physics.frames_simulated[0].item()), frames
+            )
+            for name in (
+                    'positions', 'velocities', 'angles', 'angular_velocities',
+                    'levels', 'physics_radii', 'fruit_ids', 'age_frames',
+                    'active', 'fruit_queue', 'score', 'step_count',
+                    'physics_frame', 'fail_frames', 'next_fruit_id',
+                    'rng_state'):
+                self.assertTrue(
+                    torch.equal(getattr(full, name), getattr(incremental, name)),
+                    f'{name} after action {action_index}',
+                )
 
 
 if __name__ == '__main__':

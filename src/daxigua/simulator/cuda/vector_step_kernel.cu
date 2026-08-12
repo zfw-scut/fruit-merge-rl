@@ -499,8 +499,6 @@ __global__ void vector_step_kernel(
     bool perform_drop,
     float* positions,
     float* velocities,
-    float* frame_start_positions,
-    unsigned char* incremental_quiet_frames,
     int64_t* incremental_stable_count,
     float* angles,
     float* angular_velocities,
@@ -587,11 +585,8 @@ __global__ void vector_step_kernel(
     int stable_frames,
     int solver_iterations,
     bool track_action_effects,
-    bool drop_fast_forward,
     bool adaptive_collision_substeps,
     int max_collision_substeps,
-    int kinematic_rest_frames,
-    float kinematic_rest_speed_epsilon,
     float gravity_y,
     float damping,
     float fruit_elasticity,
@@ -615,17 +610,9 @@ __global__ void vector_step_kernel(
       fruit_ids, age_frames, active, env, max_fruits};
 
   unsigned char claimed[kMaxFruits];
-  unsigned char kinematic_quiet_frames[kMaxFruits];
-  int quiet_base = env * max_fruits;
-  for (int slot = 0; slot < max_fruits; ++slot) {
-    kinematic_quiet_frames[slot] = perform_drop
-        ? 0
-        : incremental_quiet_frames[quiet_base + slot];
-  }
   int trace_row = -1;
   int queue_base = env * queue_length;
   int event_base = env * max_fruits;
-  int64_t score_before = score[env];
   event_count[env] = 0;
   if (track_action_effects) {
     first_contact_type_mask[env] = 0;
@@ -652,28 +639,17 @@ __global__ void vector_step_kernel(
   truncated_result[env] = false;
 
   int free_slot = -1;
-  bool fast_forward_eligible = perform_drop && drop_fast_forward;
   int active_slot_upper_bound = 0;
   for (int slot = 0; slot < max_fruits; ++slot) {
     int index = state.slot_index(slot);
     if (!active[index]) {
       if (perform_drop && free_slot < 0) {
         free_slot = slot;
-        if (!drop_fast_forward) break;
+        break;
       }
       continue;
     }
     active_slot_upper_bound = slot + 1;
-    if (perform_drop && drop_fast_forward) {
-      Vec2 velocity = state.velocity(slot);
-      if (dot(velocity, velocity)
-              > stable_velocity_epsilon * stable_velocity_epsilon
-          || fabsf(angular_velocities[index])
-              > stable_angular_velocity_epsilon
-          || state.position(slot).y < static_cast<float>(spawn_y)) {
-        fast_forward_eligible = false;
-      }
-    }
   }
   if (perform_drop && free_slot < 0) {
     truncated_result[env] = true;
@@ -761,71 +737,16 @@ __global__ void vector_step_kernel(
   int consecutive_stable = perform_drop
       ? 0
       : static_cast<int>(incremental_stable_count[env]);
-  int skipped_frames = 0;
-  if (perform_drop && fast_forward_eligible) {
-    float contact_y = static_cast<float>(board_height - wall_width)
-        - drop_radius;
-    for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
-      int index = state.slot_index(slot);
-      if (!active[index] || slot == free_slot) continue;
-      Vec2 other_position = state.position(slot);
-      float dx = drop_x - other_position.x;
-      float radius_sum = drop_radius + physics_radii[index];
-      if (fabsf(dx) >= radius_sum) continue;
-      float vertical_offset = sqrtf(fmaxf(
-          radius_sum * radius_sum - dx * dx, 0.0f));
-      float candidate_y = other_position.y - vertical_offset;
-      if (candidate_y > static_cast<float>(spawn_y)
-          && candidate_y < contact_y) {
-        contact_y = candidate_y;
-      }
-    }
-
-    Vec2 drop_position = state.position(free_slot);
-    Vec2 drop_velocity = state.velocity(free_slot);
-    while (skipped_frames < max_physics_frames) {
-      float next_velocity_y =
-          (drop_velocity.y + gravity_y * dt) * frame_damping;
-      float next_y = drop_position.y + next_velocity_y * dt;
-      if (next_y >= contact_y) break;
-      drop_velocity.y = next_velocity_y;
-      drop_position.y = next_y;
-      ++skipped_frames;
-    }
-    state.set_position(free_slot, drop_position);
-    state.set_velocity(free_slot, drop_velocity);
-    for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
-      int index = state.slot_index(slot);
-      if (active[index]) age_frames[index] += skipped_frames;
-    }
-    physics_frame[env] += skipped_frames;
-    if (skipped_frames > 0) fail_frames[env] = 0;
-    frames_simulated[env] = skipped_frames;
-    fast_forwarded_frames[env] = skipped_frames;
-  }
-
   int trace_record_index = 1;
-  if (skipped_frames > 0 && trace_row >= 0 && trace_row < trace_count) {
-    record_trace_frame(
-        state, trace_row, trace_record_index++, skipped_frames, trace_capacity,
-        trace_positions, trace_velocities, trace_angles,
-        trace_angular_velocities, trace_levels, trace_physics_radii,
-        trace_fruit_ids, trace_active, trace_scores, trace_merge_counts,
-        trace_frame_numbers, trace_record_counts, score[env], 0);
-  }
-  bool running = skipped_frames < max_physics_frames;
+  bool running = max_physics_frames > 0;
 
-  for (int frame = skipped_frames;
+  for (int frame = 0;
        frame < max_physics_frames && running;
        ++frame) {
     int64_t frame_event_count = event_count[env];
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
       int index = state.slot_index(slot);
       if (!active[index]) continue;
-      int vector_index = state.vector_index(slot);
-      Vec2 frame_start = state.position(slot);
-      frame_start_positions[vector_index] = frame_start.x;
-      frame_start_positions[vector_index + 1] = frame_start.y;
       age_frames[index] += 1;
     }
 
@@ -945,7 +866,6 @@ __global__ void vector_step_kernel(
         last_score[env] = score[env];
         score[env] += delta_score;
         active[index_j] = false;
-        kinematic_quiet_frames[slot_j] = 0;
         levels[index_j] = 0;
         fruit_ids[index_j] = 0;
         physics_radii[index_j] = 0.0f;
@@ -953,13 +873,11 @@ __global__ void vector_step_kernel(
 
         if (target_level == 0) {
           active[index_i] = false;
-          kinematic_quiet_frames[slot_i] = 0;
           levels[index_i] = 0;
           fruit_ids[index_i] = 0;
           physics_radii[index_i] = 0.0f;
           state.set_velocity(slot_i, {0.0f, 0.0f});
         } else {
-          kinematic_quiet_frames[slot_i] = 0;
           levels[index_i] = target_level;
           fruit_ids[index_i] = new_id;
           age_frames[index_i] = 0;
@@ -982,41 +900,6 @@ __global__ void vector_step_kernel(
            && !active[state.slot_index(active_slot_upper_bound - 1)]) {
       --active_slot_upper_bound;
     }
-    }
-
-    if (kinematic_rest_frames > 0) {
-      for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
-        int index = state.slot_index(slot);
-        if (!active[index]) {
-          kinematic_quiet_frames[slot] = 0;
-          continue;
-        }
-        if (age_frames[index] == 0) {
-          kinematic_quiet_frames[slot] = 0;
-          continue;
-        }
-        int vector_index = state.vector_index(slot);
-        Vec2 position = state.position(slot);
-        Vec2 displacement = {
-            position.x - frame_start_positions[vector_index],
-            position.y - frame_start_positions[vector_index + 1]};
-        bool already_resting =
-            kinematic_quiet_frames[slot] >= kinematic_rest_frames;
-        float displacement_epsilon = already_resting
-            ? stable_velocity_epsilon * dt
-            : kinematic_rest_speed_epsilon * dt;
-        if (dot(displacement, displacement)
-            <= displacement_epsilon * displacement_epsilon) {
-          if (kinematic_quiet_frames[slot] < 255) {
-            ++kinematic_quiet_frames[slot];
-          }
-        } else {
-          kinematic_quiet_frames[slot] = 0;
-        }
-        if (kinematic_quiet_frames[slot] >= kinematic_rest_frames) {
-          state.set_velocity(slot, {0.0f, 0.0f});
-        }
-      }
     }
 
     frames_simulated[env] += 1;
@@ -1082,14 +965,9 @@ __global__ void vector_step_kernel(
 
   // max_physics_frames is only the wait budget between decisions. Preserve
   // motion so the next drop can continue; only technical boundaries truncate.
-  for (int slot = 0; slot < max_fruits; ++slot) {
-    incremental_quiet_frames[quiet_base + slot] =
-        kinematic_quiet_frames[slot];
-  }
   incremental_stable_count[env] = consecutive_stable;
   terminated[env] = done_result[env];
   needs_reset[env] = done_result[env] || truncated_result[env];
-  (void)score_before;
 }
 
 }  // namespace
@@ -1100,8 +978,6 @@ void vector_step_cuda(
     bool perform_drop,
     torch::Tensor positions,
     torch::Tensor velocities,
-    torch::Tensor frame_start_positions,
-    torch::Tensor incremental_quiet_frames,
     torch::Tensor incremental_stable_count,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
@@ -1187,11 +1063,8 @@ void vector_step_cuda(
     int64_t stable_frames,
     int64_t solver_iterations,
     bool track_action_effects,
-    bool drop_fast_forward,
     bool adaptive_collision_substeps,
     int64_t max_collision_substeps,
-    int64_t kinematic_rest_frames,
-    double kinematic_rest_speed_epsilon,
     double gravity_y,
     double damping,
     double fruit_elasticity,
@@ -1215,8 +1088,7 @@ void vector_step_cuda(
   vector_step_kernel<<<blocks, threads, 0, stream>>>(
       actions.data_ptr<int64_t>(), enabled.data_ptr<bool>(), perform_drop,
       positions.data_ptr<float>(),
-      velocities.data_ptr<float>(), frame_start_positions.data_ptr<float>(),
-      incremental_quiet_frames.data_ptr<unsigned char>(),
+      velocities.data_ptr<float>(),
       incremental_stable_count.data_ptr<int64_t>(),
       angles.data_ptr<float>(),
       angular_velocities.data_ptr<float>(), levels.data_ptr<int64_t>(),
@@ -1276,11 +1148,8 @@ void vector_step_cuda(
       static_cast<int>(max_physics_frames), static_cast<int>(stable_frames),
       static_cast<int>(solver_iterations),
       track_action_effects,
-      drop_fast_forward,
       adaptive_collision_substeps,
       static_cast<int>(max_collision_substeps),
-      static_cast<int>(kinematic_rest_frames),
-      static_cast<float>(kinematic_rest_speed_epsilon),
       static_cast<float>(gravity_y),
       static_cast<float>(damping), static_cast<float>(fruit_elasticity),
       static_cast<float>(restitution_velocity_threshold),

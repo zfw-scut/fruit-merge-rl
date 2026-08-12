@@ -11,6 +11,8 @@ import random
 
 import torch
 
+from daxigua.simulator.config import PHYSICS_IDENTITY
+
 
 def _json_safe(value):
     if isinstance(value, float) and not math.isfinite(value):
@@ -57,6 +59,7 @@ def save_checkpoint_atomic(
     temporary = path.with_suffix(path.suffix + '.tmp')
     payload = {
         'format_version': 1,
+        'physics_identity': PHYSICS_IDENTITY,
         'learner': learner.state_dict(),
         'training_config': training_config.to_dict(),
         'progress': dict(progress),
@@ -73,6 +76,20 @@ def load_checkpoint(path, *, map_location='cpu'):
     return torch.load(
         Path(path), map_location=map_location, weights_only=False
     )
+
+
+def require_matching_physics_identity(checkpoint):
+    """阻止完整恢复跨越不兼容的模拟器物理域。"""
+
+    source_identity = checkpoint.get('physics_identity')
+    if source_identity != PHYSICS_IDENTITY:
+        rendered = source_identity or 'legacy_unspecified'
+        raise ValueError(
+            'checkpoint physics identity does not match current simulator: '
+            f'{rendered!r} != {PHYSICS_IDENTITY!r}; start a new run with '
+            'weights-only initialization instead of resume'
+        )
+    return source_identity
 
 
 def initialize_learner_weights(
@@ -135,6 +152,10 @@ def initialize_learner_weights(
         'source_training_physics_fps': int(
             source_training_config.get('training_physics_fps', 30)
         ),
+        'source_physics_identity': checkpoint.get(
+            'physics_identity', 'legacy_unspecified'
+        ),
+        'target_physics_identity': PHYSICS_IDENTITY,
         'source_progress': source_progress,
         'source_model_config': source_model_config,
         'reset_components': [

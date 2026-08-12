@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import torch
 
 
 def parse_args(argv=None):
@@ -45,6 +46,17 @@ def parse_args(argv=None):
         default='auto',
         help='模型推理设备，默认 auto。',
     )
+    parser.add_argument(
+        '--comparison',
+        action='store_true',
+        help='启用场景实验室双环境物理对照模式。',
+    )
+    parser.add_argument(
+        '--comparison-preset',
+        choices=('backend_parity', 'play_vs_training'),
+        default='play_vs_training',
+        help='双环境对照预设。',
+    )
     return parser.parse_args(argv)
 
 
@@ -52,6 +64,9 @@ def main(argv=None):
     args = parse_args(argv)
     from daxigua.simulator.scenario_lab_server import ScenarioLabServer
     from daxigua.simulator.scenario_lab_live import ScenarioLabLiveSession
+    from daxigua.simulator.scenario_lab_comparison import (
+        ScenarioLabComparisonSession,
+    )
     from daxigua.simulator.scenario_lab_service import ScenarioLabEvaluator
 
     evaluator = ScenarioLabEvaluator(
@@ -60,9 +75,21 @@ def main(argv=None):
     )
     model_evaluator = None
     model_controller = None
+    comparison_model_controller = None
     live_session = ScenarioLabLiveSession(device=args.device)
+    comparison_session = (
+        ScenarioLabComparisonSession(
+            preset=args.comparison_preset,
+            play_device=args.device,
+            accelerated_device=(
+                'cuda' if torch.cuda.is_available() else args.device
+            ),
+        )
+        if args.comparison else None
+    )
     if args.checkpoint:
         from daxigua.rl.scenario_model_controller import (
+            ScenarioComparisonModelController,
             ScenarioModelController,
         )
         from daxigua.rl.scenario_model_evaluator import (
@@ -77,11 +104,17 @@ def main(argv=None):
         model_controller = ScenarioModelController(
             live_session, model_evaluator
         )
+        if comparison_session is not None:
+            comparison_model_controller = ScenarioComparisonModelController(
+                comparison_session, model_evaluator
+            )
     server = ScenarioLabServer(
         evaluator,
         model_evaluator=model_evaluator,
         model_controller=model_controller,
+        comparison_model_controller=comparison_model_controller,
         live_session=live_session,
+        comparison_session=comparison_session,
         host=args.host,
         port=args.port,
     )
