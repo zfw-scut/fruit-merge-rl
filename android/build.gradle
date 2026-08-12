@@ -1,0 +1,8 @@
+plugins {
+    id "com.android.application" version "8.8.2" apply false
+}
+
+ext {
+    gdxVersion = "1.13.1"
+    onnxRuntimeVersion = "1.22.0"
+}

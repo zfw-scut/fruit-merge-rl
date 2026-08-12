@@ -166,6 +166,8 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         simulator.age_frames[0, :2] = 1
         simulator.velocities[0, 0, 1] = 43.0
         simulator.velocities[0, 1, 1] = 43.0
+        simulator.angular_velocities[0, 0] = 3.0
+        simulator.angular_velocities[0, 1] = 3.0
         running = torch.tensor([True])
         quiet_frames = torch.zeros_like(simulator.levels)
 
@@ -180,6 +182,8 @@ class TensorVectorSimulatorTest(unittest.TestCase):
             simulator.velocities[0, 0], torch.zeros(2)
         ))
         self.assertEqual(float(simulator.velocities[0, 1, 1]), 43.0)
+        self.assertEqual(float(simulator.angular_velocities[0, 0]), 0.0)
+        self.assertEqual(float(simulator.angular_velocities[0, 1]), 3.0)
         self.assertEqual(int(quiet_frames[0, 0]), 4)
         self.assertEqual(int(quiet_frames[0, 1]), 0)
 
@@ -628,6 +632,34 @@ class CudaVectorSimulatorTest(unittest.TestCase):
             actual_velocity, torch.zeros_like(actual_velocity)
         ))
         self.assertEqual(float(actual_angular_velocity), 0.0)
+
+    def test_cuda_kinematic_rest_stops_residual_rotation(self):
+        config = SimulatorConfig(
+            board_width=320,
+            board_height=420,
+            spawn_y=80,
+            action_count=7,
+            max_fruits=8,
+            physics_fps=60,
+            max_physics_frames=4,
+            stable_frames=2,
+            solver_iterations=2,
+            gravity_y=0.0,
+            kinematic_rest_frames=1,
+        )
+        simulator = TensorVectorSimulator(1, config=config, device='cuda')
+        simulator.reset(seeds=1, fruit_queue=[1, 1, 1, 1])
+        self._install_fruit(simulator, 0, 2, 100, 250, 1)
+        simulator.age_frames[0, 0] = 1
+        simulator.angular_velocities[0, 0] = 0.1
+
+        result = simulator.step(torch.tensor([6], device='cuda'))
+        torch.cuda.synchronize()
+
+        self.assertEqual(
+            float(result.observation.angular_velocities[0, 0]),
+            0.0,
+        )
 
     def test_cuda_masked_step_leaves_disabled_environments_unchanged(self):
         config = SimulatorConfig(

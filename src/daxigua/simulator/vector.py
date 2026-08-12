@@ -1152,6 +1152,7 @@ class TensorVectorSimulator:
         )
         if bool(correct.any().item()):
             self.velocities[correct] = 0.0
+            self.angular_velocities[correct] = 0.0
 
     def _collision_substep_counts(self, running):
         """按预测运动和接触拥挤度选择每个环境的碰撞子步数。"""

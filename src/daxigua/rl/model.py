@@ -164,9 +164,7 @@ class QueueMessageLayer(nn.Module):
         positions = torch.arange(queue_length, device=hidden.device)
         relative = positions[None, :] - positions[:, None] + 3
         relation = self.relative_position(relative).unsqueeze(0)
-        mask = ~torch.eye(
-            queue_length, dtype=torch.bool, device=hidden.device
-        ).unsqueeze(0)
+        mask = (positions[None, :] != positions[:, None]).unsqueeze(0)
         messages = F.silu(self.message(source) + relation)
         messages = messages * mask.unsqueeze(-1).to(messages.dtype)
         summary = messages.sum(dim=2) / math.sqrt(max(1, queue_length - 1))
@@ -387,8 +385,9 @@ class BaselineGnnDqn(nn.Module):
         radius_sum = radii.unsqueeze(1) + radii.unsqueeze(2)
         gap = distance - radius_sum
         pair_valid = active.unsqueeze(1) & active.unsqueeze(2)
-        pair_valid &= ~torch.eye(
-            fruits, dtype=torch.bool, device=position.device
+        fruit_indices = torch.arange(fruits, device=position.device)
+        pair_valid = pair_valid & (
+            fruit_indices[:, None] != fruit_indices[None, :]
         ).unsqueeze(0)
 
         contact_limit = torch.maximum(
@@ -402,8 +401,10 @@ class BaselineGnnDqn(nn.Module):
             ~pair_valid, float('inf')
         ).topk(nearest_count, dim=2, largest=False).indices
         nearest = torch.zeros_like(pair_valid)
-        nearest.scatter_(2, nearest_indices, True)
-        nearest &= pair_valid
+        nearest.scatter_(
+            2, nearest_indices, torch.ones_like(nearest_indices, dtype=torch.bool)
+        )
+        nearest = nearest & pair_valid
 
         speed_squared = relative_velocity.square().sum(dim=-1).clamp_min(1e-6)
         ttc = -(
@@ -422,8 +423,10 @@ class BaselineGnnDqn(nn.Module):
             ~motion_candidate, float('inf')
         ).topk(motion_count, dim=2, largest=False).indices
         motion = torch.zeros_like(pair_valid)
-        motion.scatter_(2, motion_indices, True)
-        motion &= motion_candidate
+        motion.scatter_(
+            2, motion_indices, torch.ones_like(motion_indices, dtype=torch.bool)
+        )
+        motion = motion & motion_candidate
 
         horizontal_overlap = relative[..., 0].abs() <= radius_sum * 1.5
         vertical_base = pair_valid & horizontal_overlap
@@ -439,8 +442,10 @@ class BaselineGnnDqn(nn.Module):
                 ~candidates, float('inf')
             ).topk(per_direction, dim=2, largest=False).indices
             selected = torch.zeros_like(pair_valid)
-            selected.scatter_(2, indices, True)
-            vertical |= selected & candidates
+            selected.scatter_(
+                2, indices, torch.ones_like(indices, dtype=torch.bool)
+            )
+            vertical = vertical | (selected & candidates)
 
         normalized_gap = gap / radius_sum.clamp_min(1.0)
         priority = torch.full_like(gap, float('inf'))

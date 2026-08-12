@@ -1,0 +1,70 @@
+plugins {
+    id "application"
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    implementation project(":core")
+    implementation "com.badlogicgames.gdx:gdx-backend-lwjgl3:$gdxVersion"
+    runtimeOnly "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-desktop"
+}
+
+tasks.register("evaluateSabT120", JavaExec) {
+    group = "verification"
+    description = "Runs greedy SAB-T120 games against the Android tensor-style rules."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = "com.fruitmerge.ai.preview.SabT120RolloutEvaluator"
+    systemProperty "fruitMerge.model", rootProject.layout.projectDirectory
+            .dir("../runs/mobile_export/sab-t120")
+            .file("sab_t120.onnx")
+            .asFile
+            .absolutePath
+    systemProperty "fruitMerge.games", providers.gradleProperty("games")
+            .orElse("32").get()
+    systemProperty "fruitMerge.seedBase", providers.gradleProperty("seedBase")
+            .orElse("42000000").get()
+    systemProperty "fruitMerge.seedStride", providers.gradleProperty("seedStride")
+            .orElse("1000003").get()
+    systemProperty "fruitMerge.python", providers.gradleProperty("python")
+            .orElse("python").get()
+    systemProperty "fruitMerge.inferenceServer", rootProject.layout
+            .projectDirectory
+            .dir("../tools")
+            .file("android_onnx_inference_server.py")
+            .asFile
+            .absolutePath
+}
+
+application {
+    mainClass = "com.fruitmerge.ai.preview.DesktopPreviewLauncher"
+}
+
+tasks.withType(JavaExec).configureEach {
+    // core 继续按 Android 的内部资源路径读取 fruits/01.png～11.png；桌面预览只把
+    // 工作目录指向同一份 canonical assets，不复制或修改任何水果素材。
+    workingDir = rootProject.file("../assets")
+    jvmArgs "-DfruitMerge.previewWidth=${providers.gradleProperty("previewWidth").orElse("560").get()}"
+    jvmArgs "-DfruitMerge.previewHeight=${providers.gradleProperty("previewHeight").orElse("1120").get()}"
+    jvmArgs "-DfruitMerge.previewShowcase=${providers.gradleProperty("previewShowcase").orElse("false").get()}"
+    jvmArgs "-DfruitMerge.previewScreen=${providers.gradleProperty("previewScreen").orElse("default").get()}"
+    jvmArgs "-DfruitMerge.previewCaptureFrames=${providers.gradleProperty("previewCaptureFrames").orElse("12").get()}"
+}
+
+tasks.register("capturePreview", JavaExec) {
+    group = "fruit merge"
+    description = "Renders the real libGDX UI locally and writes a PNG screenshot."
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = application.mainClass
+
+    def configuredOutput = providers.gradleProperty("previewOutput")
+            .orElse(rootProject.layout.projectDirectory
+                    .dir("../runs/mobile_ui_preview")
+                    .file("current.png")
+                    .asFile
+                    .absolutePath)
+    jvmArgs "-DfruitMerge.previewOutput=${configuredOutput.get()}"
+}

@@ -1015,6 +1015,7 @@ __global__ void vector_step_kernel(
         }
         if (kinematic_quiet_frames[slot] >= kinematic_rest_frames) {
           state.set_velocity(slot, {0.0f, 0.0f});
+          angular_velocities[index] = 0.0f;
         }
       }
     }

@@ -1,0 +1,140 @@
+plugins {
+    id "com.android.application"
+}
+
+configurations {
+    natives
+}
+
+android {
+    namespace "com.fruitmerge.ai"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.fruitmerge.ai"
+        minSdk 24
+        targetSdk 35
+        versionCode 2
+        versionName "0.2.0-sab-t120"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs = ["src/main/assets"]
+            jniLibs.srcDirs = ["src/main/jniLibs"]
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+        resources {
+            excludes += ["META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*"]
+        }
+    }
+}
+
+dependencies {
+    implementation project(":core")
+    implementation "com.badlogicgames.gdx:gdx-backend-android:$gdxVersion"
+    implementation "com.microsoft.onnxruntime:onnxruntime-android:$onnxRuntimeVersion"
+
+    natives "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-arm64-v8a"
+}
+
+def generatedFruitAssets = layout.projectDirectory.dir("src/main/assets/fruits")
+def generatedFontAssets = layout.projectDirectory.dir("src/main/assets/fonts")
+def generatedAudioAssets = layout.projectDirectory.dir("src/main/assets/audio")
+def generatedModelAssets = layout.projectDirectory.dir("src/main/assets/model")
+def generatedNativeLibs = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
+def mobileExport = rootProject.layout.projectDirectory.dir("../runs/mobile_export/sab-t120")
+
+tasks.register("syncFruitAssets", Sync) {
+    from(rootProject.layout.projectDirectory.dir("../assets/fruits"))
+    into(generatedFruitAssets)
+    include("*.png")
+}
+
+tasks.register("syncUiFontAssets", Sync) {
+    from(rootProject.layout.projectDirectory.dir(".generated-assets/fonts"))
+    into(generatedFontAssets)
+    include("ui-cute.fnt", "ui-cute.png")
+    doLast {
+        ["ui-cute.fnt", "ui-cute.png"].each { name ->
+            if (!generatedFontAssets.file(name).asFile.isFile()) {
+                throw new GradleException(
+                        "Generated UI font is missing; run android/scripts/build-debug-apk.ps1"
+                )
+            }
+        }
+    }
+}
+
+tasks.register("syncGameAudioAssets", Sync) {
+    from(rootProject.layout.projectDirectory.dir("../assets/audio"))
+    into(generatedAudioAssets)
+    include("merge-pop.ogg", "merge-soft.ogg", "score-collect.ogg")
+    doLast {
+        ["merge-pop.ogg", "merge-soft.ogg", "score-collect.ogg"].each { name ->
+            if (!generatedAudioAssets.file(name).asFile.isFile()) {
+                throw new GradleException("Game audio asset is missing: ${name}")
+            }
+        }
+    }
+}
+
+tasks.register("syncMobileModel", Sync) {
+    from(mobileExport) {
+        include("sab_t120.onnx", "sab_t120.metadata.json")
+    }
+    into(generatedModelAssets)
+    doLast {
+        def modelFile = generatedModelAssets.file("sab_t120.onnx").asFile
+        def metadataFile = generatedModelAssets.file("sab_t120.metadata.json").asFile
+        if (!modelFile.isFile() || !metadataFile.isFile()) {
+            throw new GradleException(
+                    "SAB-T120 mobile export is missing; run tools/export_android_model.py"
+            )
+        }
+        def metadata = new groovy.json.JsonSlurper().parse(metadataFile)
+        if (metadata.model_alias != "SAB-T120"
+                || metadata.checkpoint_sha256
+                != "fc05e5653981c600ecf313fe51c8e28d8cd033ebc419dd40d008a8d895a03ec2") {
+            throw new GradleException("Unexpected SAB-T120 metadata identity")
+        }
+        def actual = java.security.MessageDigest
+                .getInstance("SHA-256")
+                .digest(modelFile.bytes)
+                .encodeHex()
+                .toString()
+        if (actual != metadata.onnx_sha256) {
+            throw new GradleException("SAB-T120 ONNX checksum mismatch: ${actual}")
+        }
+    }
+}
+
+tasks.register("extractLibGdxAndroidNatives", Sync) {
+    dependsOn(configurations.natives)
+    into(generatedNativeLibs)
+    from({ configurations.natives.collect { archive -> zipTree(archive) } })
+    include("*.so")
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(
+            "syncFruitAssets",
+            "syncUiFontAssets",
+            "syncGameAudioAssets",
+            "syncMobileModel",
+            "extractLibGdxAndroidNatives"
+    )
+}
