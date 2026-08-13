@@ -22,7 +22,7 @@ from daxigua.simulator import TensorVectorSimulator  # noqa: E402
 RUN = (
     ROOT
     / 'runs'
-    / 'cloud_rtx5090_auxiliary_action_structured_128m_to_120fps_seed20260812_16m'
+    / 'sab-full-fall-t120-16m-r1_seed20260813'
 )
 INPUT_NAMES = (
     'positions', 'velocities', 'angular_velocities', 'levels',
@@ -52,7 +52,7 @@ def ort_inputs(observation):
 
 @torch.inference_mode()
 def main():
-    loaded = load_viewer_model(RUN / 'checkpoints' / 'best.pt', device='cuda')
+    loaded = load_viewer_model(RUN / 'checkpoints' / 'final.pt', device='cuda')
     config = replace(
         viewer_simulator_config(120, loaded.model_config, loaded.device),
         drop_fast_forward=False,
@@ -60,7 +60,7 @@ def main():
     simulator = TensorVectorSimulator(1, config=config, device=loaded.device)
     simulator.reset(seeds=42_000_000)
     session = ort.InferenceSession(
-        str(ROOT / 'runs/mobile_export/sab-t120/sab_t120.onnx'),
+        str(ROOT / 'runs/mobile_export/sab-ff120/sab_ff120.onnx'),
         providers=('CPUExecutionProvider',),
     )
     mismatch_steps = []

@@ -37,11 +37,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 
-/** SAB-T120 定长状态张量的 Android ONNX Runtime 实现。 */
+/** 无旁路 SAB-FF120 定长状态张量的 Android ONNX Runtime 实现。 */
 public final class AndroidAiRuntime implements AiService, AutoCloseable {
-    private static final String MODEL_ASSET = "model/sab_t120.onnx";
+    private static final String MODEL_ASSET = "model/sab_ff120.onnx";
     private static final String MODEL_SHA256 =
-            "bfe359ce5935873fc38a3ecdf3eca9f227781bef2052e809c1d9ef39d39b21af";
+            "b10b8fbf853e07397e9a1774b1b7fd394e42502d41ff7700cfb76cbf5a4a4475";
     private static final int MAX_FRUITS = 64;
 
     private static final Set<String> REQUIRED_INPUTS = Collections.unmodifiableSet(
@@ -61,7 +61,7 @@ public final class AndroidAiRuntime implements AiService, AutoCloseable {
 
     private final Context applicationContext;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "sab-t120-onnx");
+        Thread thread = new Thread(runnable, "sab-ff120-onnx");
         thread.setDaemon(true);
         return thread;
     });
@@ -69,7 +69,7 @@ public final class AndroidAiRuntime implements AiService, AutoCloseable {
     private volatile OrtSession session;
     private volatile boolean ready;
     private volatile boolean closed;
-    private volatile String status = "正在载入 SAB-T120";
+    private volatile String status = "正在载入 SAB-FF120";
 
     public AndroidAiRuntime(Context context) {
         applicationContext = context.getApplicationContext();
@@ -109,7 +109,7 @@ public final class AndroidAiRuntime implements AiService, AutoCloseable {
             }
             session = loadedSession;
             ready = true;
-            status = "SAB-T120 已就绪";
+            status = "SAB-FF120 已就绪";
         } catch (Exception error) {
             ready = false;
             status = "安全策略：" + conciseError(error);
@@ -155,7 +155,7 @@ public final class AndroidAiRuntime implements AiService, AutoCloseable {
                 callback.onSuccess(toDecision(qValues));
                 status = String.format(
                         Locale.ROOT,
-                        "SAB-T120 已就绪 · %d fruits",
+                        "SAB-FF120 已就绪 · %d fruits",
                         snapshot.fruits.size()
                 );
             }
@@ -255,7 +255,7 @@ public final class AndroidAiRuntime implements AiService, AutoCloseable {
                 qValues[best],
                 qValues[second],
                 qValues,
-                "SAB-T120 ONNX"
+                "SAB-FF120 ONNX"
         );
     }
 

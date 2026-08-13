@@ -14,8 +14,8 @@ android {
         applicationId "com.fruitmerge.ai"
         minSdk 24
         targetSdk 35
-        versionCode 2
-        versionName "0.2.0-sab-t120"
+        versionCode 3
+        versionName "0.3.0-sab-ff120"
         ndk {
             abiFilters "arm64-v8a"
         }
@@ -56,7 +56,7 @@ def generatedFontAssets = layout.projectDirectory.dir("src/main/assets/fonts")
 def generatedAudioAssets = layout.projectDirectory.dir("src/main/assets/audio")
 def generatedModelAssets = layout.projectDirectory.dir("src/main/assets/model")
 def generatedNativeLibs = layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a")
-def mobileExport = rootProject.layout.projectDirectory.dir("../runs/mobile_export/sab-t120")
+def mobileExport = rootProject.layout.projectDirectory.dir("../runs/mobile_export/sab-ff120")
 
 tasks.register("syncFruitAssets", Sync) {
     from(rootProject.layout.projectDirectory.dir("../assets/fruits"))
@@ -94,22 +94,26 @@ tasks.register("syncGameAudioAssets", Sync) {
 
 tasks.register("syncMobileModel", Sync) {
     from(mobileExport) {
-        include("sab_t120.onnx", "sab_t120.metadata.json")
+        include("sab_ff120.onnx", "sab_ff120.metadata.json")
     }
     into(generatedModelAssets)
     doLast {
-        def modelFile = generatedModelAssets.file("sab_t120.onnx").asFile
-        def metadataFile = generatedModelAssets.file("sab_t120.metadata.json").asFile
+        def modelFile = generatedModelAssets.file("sab_ff120.onnx").asFile
+        def metadataFile = generatedModelAssets.file("sab_ff120.metadata.json").asFile
         if (!modelFile.isFile() || !metadataFile.isFile()) {
             throw new GradleException(
-                    "SAB-T120 mobile export is missing; run tools/export_android_model.py"
+                    "SAB-FF120 mobile export is missing; run tools/export_android_model.py"
             )
         }
         def metadata = new groovy.json.JsonSlurper().parse(metadataFile)
-        if (metadata.model_alias != "SAB-T120"
+        if (metadata.model_alias != "SAB-FF120"
+                || metadata.formal_model_id != "sab-full-fall-t120-16m-r1"
+                || metadata.checkpoint_role != "final"
+                || metadata.physics_identity != "tensor_cuda_v3_full_fall"
+                || metadata.branch_learning_enabled != false
                 || metadata.checkpoint_sha256
-                != "fc05e5653981c600ecf313fe51c8e28d8cd033ebc419dd40d008a8d895a03ec2") {
-            throw new GradleException("Unexpected SAB-T120 metadata identity")
+                != "a09d0683edc2e061d93cbc7f8ad8a64ba50e33af7f38cd8bf40d3a78f2e6d211") {
+            throw new GradleException("Unexpected SAB-FF120 metadata identity")
         }
         def actual = java.security.MessageDigest
                 .getInstance("SHA-256")
@@ -117,7 +121,7 @@ tasks.register("syncMobileModel", Sync) {
                 .encodeHex()
                 .toString()
         if (actual != metadata.onnx_sha256) {
-            throw new GradleException("SAB-T120 ONNX checksum mismatch: ${actual}")
+            throw new GradleException("SAB-FF120 ONNX checksum mismatch: ${actual}")
         }
     }
 }

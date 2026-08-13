@@ -13,14 +13,14 @@ dependencies {
     runtimeOnly "com.badlogicgames.gdx:gdx-platform:$gdxVersion:natives-desktop"
 }
 
-tasks.register("evaluateSabT120", JavaExec) {
+tasks.register("evaluateSabFf120", JavaExec) {
     group = "verification"
-    description = "Runs greedy SAB-T120 games against the Android tensor-style rules."
+    description = "Runs greedy SAB-FF120 games against the Android tensor-style rules."
     classpath = sourceSets.main.runtimeClasspath
     mainClass = "com.fruitmerge.ai.preview.SabT120RolloutEvaluator"
     systemProperty "fruitMerge.model", rootProject.layout.projectDirectory
-            .dir("../runs/mobile_export/sab-t120")
-            .file("sab_t120.onnx")
+            .dir("../runs/mobile_export/sab-ff120")
+            .file("sab_ff120.onnx")
             .asFile
             .absolutePath
     systemProperty "fruitMerge.games", providers.gradleProperty("games")

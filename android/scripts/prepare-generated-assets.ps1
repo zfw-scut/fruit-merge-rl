@@ -40,7 +40,7 @@ if ($LASTEXITCODE -ne 0) {
 
 & $BuildPython (Join-Path $ProjectRoot "tools\export_android_model.py")
 if ($LASTEXITCODE -ne 0) {
-    throw "SAB-T120 ONNX export failed with exit code $LASTEXITCODE"
+    throw "SAB-FF120 ONNX export failed with exit code $LASTEXITCODE"
 }
 
 Write-Host "Generated Android assets are ready."

@@ -8,8 +8,8 @@ import java.util.Set;
 /**
  * 训练 Tensor/CUDA 求解器的单环境 Java 实现。
  *
- * <p>保持固定 64 槽、120 FPS、4 次顺序冲量迭代、低速回正和确定性合成配对，
- * 让 Android 游戏的权威状态与 SAB-T120 的训练物理处于同一算法域。画面直接读取
+ * <p>保持固定 64 槽、120 FPS、4 次顺序冲量迭代和确定性合成配对，
+ * 让 Android 游戏的权威状态与 SAB-FF120 的训练物理处于同一算法域。画面直接读取
  * 这些圆形状态，不再让 Box2D 的接触求解结果反向进入模型。</p>
  */
 public final class FruitPhysicsWorld {
@@ -25,8 +25,7 @@ public final class FruitPhysicsWorld {
     private static final float CONTACT_SLOP = 0.05f;
     private static final float POSITION_CORRECTION = 0.75f;
     private static final float MERGE_TOLERANCE = 0.25f;
-    private static final int KINEMATIC_REST_FRAMES = 4;
-    private static final float KINEMATIC_REST_SPEED = 12f;
+
     private static final float RADIUS_EPSILON = 0.001f;
 
     private final FruitBody[] slots = new FruitBody[MAX_FRUITS];
@@ -44,9 +43,7 @@ public final class FruitPhysicsWorld {
         if (slot < 0) {
             throw new IllegalStateException("fruit capacity 64 is exhausted");
         }
-        // CUDA 在 perform_drop=true 时会把整场的 quiet-frame 缓存清零。
-        // 新水果可能撞开旧支撑，旧水果必须随之唤醒。
-        wakeAllBodies();
+
         FruitBody fruit = new FruitBody(
                 slot,
                 nextFruitId++,
@@ -199,15 +196,13 @@ public final class FruitPhysicsWorld {
 
     private void advanceFrame() {
         mergeOccurredLastFrame = false;
-        float[] startX = new float[MAX_FRUITS];
-        float[] startY = new float[MAX_FRUITS];
+
         for (int slot = 0; slot < MAX_FRUITS; slot++) {
             FruitBody fruit = slots[slot];
             if (fruit == null) {
                 continue;
             }
-            startX[slot] = fruit.x;
-            startY[slot] = fruit.y;
+
             fruit.ageFrames += 1;
             fruit.vy += FruitRules.GRAVITY_PIXELS_PER_SECOND_SQUARED
                     * FIXED_STEP;
@@ -237,7 +232,7 @@ public final class FruitPhysicsWorld {
             resolveWalls(slots[slot]);
         }
         resolveMerges();
-        applyKinematicRest(startX, startY);
+
         rebuildFruitView();
     }
 
@@ -478,34 +473,6 @@ public final class FruitPhysicsWorld {
                 <= radiusSum * radiusSum;
     }
 
-    private void applyKinematicRest(float[] startX, float[] startY) {
-        float restingDisplacement =
-                FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND * FIXED_STEP;
-        float initialDisplacement = KINEMATIC_REST_SPEED * FIXED_STEP;
-        for (int slot = 0; slot < MAX_FRUITS; slot++) {
-            FruitBody fruit = slots[slot];
-            if (fruit == null || fruit.ageFrames == 0) {
-                if (fruit != null) {
-                    fruit.quietFrames = 0;
-                }
-                continue;
-            }
-            float deltaX = fruit.x - startX[slot];
-            float deltaY = fruit.y - startY[slot];
-            float epsilon = fruit.quietFrames >= KINEMATIC_REST_FRAMES
-                    ? restingDisplacement : initialDisplacement;
-            if (dot(deltaX, deltaY, deltaX, deltaY) <= epsilon * epsilon) {
-                fruit.quietFrames = Math.min(255, fruit.quietFrames + 1);
-            } else {
-                fruit.quietFrames = 0;
-            }
-            if (fruit.quietFrames >= KINEMATIC_REST_FRAMES) {
-                fruit.vx = 0f;
-                fruit.vy = 0f;
-                fruit.angularVelocity = 0f;
-            }
-        }
-    }
 
     public void clear() {
         for (int slot = 0; slot < MAX_FRUITS; slot++) {
@@ -522,13 +489,6 @@ public final class FruitPhysicsWorld {
         clear();
     }
 
-    private void wakeAllBodies() {
-        for (FruitBody fruit : slots) {
-            if (fruit != null) {
-                fruit.quietFrames = 0;
-            }
-        }
-    }
 
     private int firstFreeSlot() {
         for (int slot = 0; slot < MAX_FRUITS; slot++) {
@@ -773,7 +733,7 @@ public final class FruitPhysicsWorld {
         private float angle;
         private float angularVelocity;
         private int ageFrames;
-        private int quietFrames;
+
 
         private FruitBody(
                 int slot,

@@ -182,7 +182,7 @@ public final class FruitPhysicsWorldSnapshotTest {
     }
 
     @Test
-    public void kinematicRestStopsResidualSlowRotation() {
+    public void residualSlowRotationIsNotKinematicallyCleared() {
         int level = 3;
         float radius = FruitRules.droppedPhysicsRadius(level);
         FruitPhysicsWorld world = new FruitPhysicsWorld();
@@ -209,17 +209,13 @@ public final class FruitPhysicsWorldSnapshotTest {
 
             world.step(2f);
             FruitPhysicsWorld.FruitBody rested = world.fruits().first();
-            float restedAngle = rested.angle();
-            assertEquals(0f, rested.vx(), FLOAT_EPSILON);
-            assertEquals(0f, rested.vy(), FLOAT_EPSILON);
-            assertEquals(0f, rested.angularVelocity(), FLOAT_EPSILON);
+            float angleBeforeMoreFrames = rested.angle();
+            assertTrue(Math.abs(rested.angularVelocity()) > FLOAT_EPSILON);
 
             world.step(1f);
-            assertEquals(
-                    restedAngle,
-                    world.fruits().first().angle(),
-                    FLOAT_EPSILON
-            );
+            assertTrue(Math.abs(
+                    world.fruits().first().angle() - angleBeforeMoreFrames
+            ) > FLOAT_EPSILON);
         } finally {
             world.dispose();
         }

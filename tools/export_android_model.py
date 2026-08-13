@@ -26,9 +26,9 @@ from daxigua.rl.viewer import load_viewer_model  # noqa: E402
 DEFAULT_CHECKPOINT = (
     PROJECT_ROOT
     / 'runs'
-    / 'cloud_rtx5090_auxiliary_action_structured_128m_to_120fps_seed20260812_16m'
+    / 'sab-full-fall-t120-16m-r1_seed20260813'
     / 'checkpoints'
-    / 'best.pt'
+    / 'final.pt'
 )
 INPUT_NAMES = (
     'positions',
@@ -81,12 +81,12 @@ class AndroidPolicy(torch.nn.Module):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='将 SAB-T120 checkpoint 导出并校验为 Android ONNX。'
+        description='将无旁路 SAB-FF120 final checkpoint 导出并校验为 Android ONNX。'
     )
     parser.add_argument('--checkpoint', type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument(
         '--output-dir', type=Path,
-        default=PROJECT_ROOT / 'runs' / 'mobile_export' / 'sab-t120',
+        default=PROJECT_ROOT / 'runs' / 'mobile_export' / 'sab-ff120',
     )
     parser.add_argument('--opset', type=int, default=18)
     return parser.parse_args()
@@ -147,8 +147,8 @@ def sha256_file(path):
 def export(checkpoint, output_dir, *, opset=18):
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / 'sab_t120.onnx'
-    metadata_path = output_dir / 'sab_t120.metadata.json'
+    model_path = output_dir / 'sab_ff120.onnx'
+    metadata_path = output_dir / 'sab_ff120.metadata.json'
 
     loaded = load_viewer_model(checkpoint, device='cpu')
     policy = AndroidPolicy(loaded.model).eval()
@@ -188,8 +188,11 @@ def export(checkpoint, output_dir, *, opset=18):
 
     metadata = {
         'format_version': 1,
-        'model_alias': 'SAB-T120',
-        'formal_model_id': 'structured-128m-to-120fps-transfer-r1',
+        'model_alias': 'SAB-FF120',
+        'formal_model_id': 'sab-full-fall-t120-16m-r1',
+        'checkpoint_role': 'final',
+        'physics_identity': 'tensor_cuda_v3_full_fall',
+        'branch_learning_enabled': False,
         'checkpoint': str(loaded.checkpoint_path),
         'checkpoint_sha256': loaded.checkpoint_sha256,
         'onnx_file': model_path.name,

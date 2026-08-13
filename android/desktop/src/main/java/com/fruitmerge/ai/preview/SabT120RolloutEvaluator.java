@@ -14,7 +14,7 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Locale;
 
-/** 一次性验证 SAB-T120 在 Android 单环境训练同算法规则上的长局表现。 */
+/** 一次性验证 SAB-FF120 在 Android 单环境训练同算法规则上的长局表现。 */
 public final class SabT120RolloutEvaluator {
     private static final int MAX_FRUITS = 64;
     private static final int MAX_DROPS = 1000;

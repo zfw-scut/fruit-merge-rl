@@ -44,7 +44,7 @@ if (-not (Test-Path -LiteralPath $ApkPath)) {
     throw "Gradle succeeded but APK was not found at $ApkPath"
 }
 $ReleaseDirectory = Join-Path $AndroidRoot "release"
-$ReleaseApk = Join-Path $ReleaseDirectory "FruitMergeAI-SAB-T120-debug.apk"
+$ReleaseApk = Join-Path $ReleaseDirectory "FruitMergeAI-SAB-FF120-debug.apk"
 New-Item -ItemType Directory -Force -Path $ReleaseDirectory | Out-Null
 Copy-Item -LiteralPath $ApkPath -Destination $ReleaseApk -Force
 Write-Host "APK: $ReleaseApk"

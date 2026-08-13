@@ -7,7 +7,7 @@ import java.util.List;
 /**
  * 一次稳定边界上的移动端只读局面。
  *
- * <p>该对象只包含普通 Java 数值，Android 层会直接构造 SAB-T120 的定长 ONNX
+ * <p>该对象只包含普通 Java 数值，Android 层会直接构造 SAB-FF120 的定长 ONNX
  * 输入；物理对象和 libGDX 类型都不会越过推理边界。</p>
  */
 public final class GameSnapshot {
