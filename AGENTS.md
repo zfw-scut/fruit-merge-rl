@@ -14,6 +14,7 @@
 | 水果规则、领域状态 | `src/daxigua/core/AGENTS.md` |
 | 物理、CUDA、奖励、回放、场景实验室后端 | `src/daxigua/simulator/AGENTS.md` |
 | 模型、Replay、loss、训练、评估 | `src/daxigua/rl/AGENTS.md` |
+| 云端正式训练、训练队列、自动接力 | `docs/CLOUD_TRAINING_RUNBOOK.md`、本机 `docs/CLOUD_SERVER_LOCAL.md` |
 | 模型命名、短称登记 | `docs/model_naming/NAMING_CONVENTION.md`、`docs/model_naming/MODEL_REGISTRY.md` |
 | 门户、场景实验室前端 | `portal/AGENTS.md` |
 | 文档、正式实验结论 | `docs/AGENTS.md` |
@@ -24,6 +25,7 @@
 
 - Python 默认使用 conda 的 `python-torch` 环境。
 - 云服务器、SSH 隧道或训练面板转发前，读取本机 `docs/CLOUD_SERVER_LOCAL.md`；不得使用未登记实例。
+- 云端正式训练、排队或接力前必须读取 `docs/CLOUD_TRAINING_RUNBOOK.md`，先检查现有训练进程、`runs/training_queue.json` 和云端接力状态；已有训练时优先复用串行队列，不得因 `training_queue.py` 本身不负责启动任务而判断项目没有队列机制。
 - 旧分支只可用 `git show` 等只读命令审计，不得作为运行依赖或整批迁移。
 - 只有新模型、新奖励、新训练方法、正式训练或有决策价值的评估，才按 `docs/AGENTS.md` 阅读历史证据并更新报告。已有参数的小幅调整、修复、UI 和工具修改不触发这套阅读。
 - 不得把单次训练、loss 下降或吞吐达标写成策略提升结论。

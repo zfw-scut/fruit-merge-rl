@@ -7,6 +7,7 @@
 | 任务 | 读取 |
 | --- | --- |
 | 门户、场景实验室 | `PROJECT_PORTAL.md`、`SCENARIO_LAB.md` |
+| 云端正式训练、训练队列、自动接力 | `CLOUD_TRAINING_RUNBOOK.md`，连接信息另读本机 `CLOUD_SERVER_LOCAL.md` |
 | 模型或训练设计 | `model/AGENTS.md` 后选一份专项文档 |
 | 模型命名或短称 | `model_naming/NAMING_CONVENTION.md`、`model_naming/MODEL_REGISTRY.md` |
 | 正式效果 | `model_evaluations/AGENTS.md` 后选比较矩阵相关行和一份报告 |
