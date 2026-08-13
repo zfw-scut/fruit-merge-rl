@@ -33,14 +33,12 @@ import java.util.Random;
  * Android 版《合成大西瓜》的完整游戏循环。
  *
  * <p>画面采用 560×1120 固定逻辑坐标，FitViewport 在不同手机上只增加留边，不改变
- * 训练时的几何。手动模式允许拖动并抬手投放；AI 模式只在连续稳定 0.2 秒后请求一次
- * 模型，并把离散动作包装成停顿、试探、回拉和轻微颤动的拟人轨迹。</p>
+ * 训练时的几何。手动模式允许拖动并抬手投放；AI 模式在连续稳定边界上请求一次
+ * 模型，并在决策返回后立即投放。</p>
  */
 public final class FruitMergeApplication extends ApplicationAdapter
         implements InputProcessor {
-    private static final float PREVIEW_GAP = 12f;
     private static final float MANUAL_DROP_COOLDOWN_SECONDS = 0.14f;
-    private static final float AI_DROP_COOLDOWN_SECONDS = 0.36f;
     private static final float MANUAL_INPUT_TOP = 144f;
     private static final float AI_LOADING_FALLBACK_SECONDS = 12f;
     private static final float AUTOSAVE_INTERVAL_SECONDS = 1.5f;
@@ -57,9 +55,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private static final float SETTINGS_BUTTON_LEFT = 490f;
     private static final float UTILITY_BUTTON_TOP = 18f;
     private static final float UTILITY_BUTTON_SIZE = 42f;
-    private static final float AI_TOGGLE_LEFT = 410f;
+    private static final float AI_TOGGLE_LEFT = 418f;
     private static final float AI_TOGGLE_TOP = 18f;
-    private static final float AI_TOGGLE_WIDTH = 70f;
+    private static final float AI_TOGGLE_WIDTH = 60f;
     private static final float AI_TOGGLE_HEIGHT = 42f;
     private static final float HOME_CARD_LEFT = 54f;
     private static final float HOME_CARD_WIDTH = 452f;
@@ -133,6 +131,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private static final float HEADER_COMPACT_HEIGHT = 52f;
     private static final float POPUP_FONT_SCALE = 0.50f;
     private static final int HISTORY_RECORDS_PER_PAGE = 4;
+    private static final float[] QUEUE_SLOT_X = {302f, 333f, 364f, 395f};
+    private static final float QUEUE_SLOT_CENTER_Y = 38f;
+    private static final float QUEUE_FRUIT_MAX_SIZE = 22f;
 
     /*
      * “暖色果园”主题只负责外围表现。水果仍从原来的 01.png～11.png 加载，
@@ -203,12 +204,11 @@ public final class FruitMergeApplication extends ApplicationAdapter
 
     private final AiService aiService;
     /*
-     * 内容随机、拟人手势和纯表现随机必须相互独立。否则多画几颗爆浆粒子就会改变
+     * 内容随机和纯表现随机必须相互独立。否则多画几颗爆浆粒子就会改变
      * 后续水果队列，表现层会意外影响游戏规则与模型输入。
      */
     private final StatefulQueueRandom queueRandom =
             new StatefulQueueRandom();
-    private final Random motionRandom = new Random();
     private final Random effectRandom = new Random();
     private final Random dialogueRandom = new Random();
     private final IntArray queue = new IntArray();
@@ -286,12 +286,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private boolean inMemorySession;
     private boolean soloResultRecorded;
     private boolean discardNextWallDelta;
-    private MotionPlan motionPlan;
     private ScoreSequence activeScoreSequence;
     private ScoreSequence rollingScoreSequence;
     private DuelMatch duelMatch;
     private DuelMatch.Side duelForeground = DuelMatch.Side.PLAYER;
-    private MotionPlan duelAiMotionPlan;
     private boolean duelAiRequestInFlight;
     private boolean duelAiArmed;
     private float duelAiArmedX;
@@ -448,7 +446,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         disposed = true;
         decisionEpoch += 1;
         aiRequestInFlight = false;
-        motionPlan = null;
         activeDragPointer = -1;
         uiMotion.cancelAll();
         Gdx.input.setCatchKey(Input.Keys.BACK, false);
@@ -1226,7 +1223,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         currentWatermelons = state.watermelonCount();
         previewX = state.previewX();
         previewAnchorX = state.previewAnchorX();
-        dropCooldown = state.dropCooldownSeconds();
+        dropCooldown = aiEnabled ? 0f : state.dropCooldownSeconds();
         stableSeconds = state.stableSeconds();
         dangerSeconds = state.dangerSeconds();
         physicsDecisionClock.restore(
@@ -1242,7 +1239,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         soloPercentile = state.resultPercentile();
         decisionEpoch += 1L;
         aiRequestInFlight = false;
-        motionPlan = null;
         aiState = alive
                 ? (aiEnabled ? AiState.OBSERVING : AiState.MANUAL)
                 : AiState.GAME_OVER;
@@ -1287,7 +1283,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 && !duelMatch.aiLane().submittedThisRound();
         duelAiArmedX = state.aiArmedX();
         duelAiRequestInFlight = false;
-        duelAiMotionPlan = null;
         duelPlayerReactionRound = -1;
         duelAiReactionRound = -1;
         activeDragPointer = -1;
@@ -1337,7 +1332,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private void resetGame() {
         decisionEpoch += 1;
         aiRequestInFlight = false;
-        motionPlan = null;
         activeDragPointer = -1;
         physics.clear();
         resetAdaptiveScoreLayout();
@@ -1354,7 +1348,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         physicsDecisionClock.resetGame();
         aiDangerReactionArmed = true;
         aiLoadingSeconds = 0f;
-        dropCooldown = 0.18f;
+        dropCooldown = aiEnabled ? 0f : 0.18f;
         previewX = FruitRules.BOARD_WIDTH / 2f;
         previewAnchorX = previewX;
         alive = true;
@@ -1447,7 +1441,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private void invalidateDuelDecision() {
         duelDecisionEpoch += 1L;
         duelAiRequestInFlight = false;
-        duelAiMotionPlan = null;
     }
 
     private void updateDuelGame(float realDelta, float gameDelta) {
@@ -1661,19 +1654,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return;
         }
         float remaining = duelMatch.roundRemainingSeconds();
-        if (duelAiMotionPlan != null) {
-            MotionSample sample = duelAiMotionPlan.update(realDelta);
-            duelMatch.setAiPreviewX(sample.x);
-            if (sample.finished) {
-                float x = FruitRules.actionDropX(
-                        duelAiMotionPlan.decision.actionIndex,
-                        duelMatch.currentLevel()
-                );
-                duelAiMotionPlan = null;
-                armOrDropDuelAi(x);
-            }
-            return;
-        }
         if (duelAiArmed) {
             return;
         }
@@ -1700,19 +1680,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
             AiDecision fallback = fallbackDecision(
                     createDuelSnapshot(duelMatch.aiLane())
             );
-            if (remaining > 1.25f) {
-                duelAiMotionPlan = MotionPlan.create(
-                        fallback,
-                        duelMatch.aiLane().previewX(),
-                        duelMatch.currentLevel(),
-                        motionRandom
-                );
-            } else {
-                armOrDropDuelAi(FruitRules.actionDropX(
-                        fallback.actionIndex,
-                        duelMatch.currentLevel()
-                ));
-            }
+            armOrDropDuelAi(FruitRules.actionDropX(
+                    fallback.actionIndex,
+                    duelMatch.currentLevel()
+            ));
             return;
         }
         requestDuelAiDecision();
@@ -1795,19 +1766,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
                         3
                 );
             }
-            if (match.roundRemainingSeconds() > 1.25f) {
-                duelAiMotionPlan = MotionPlan.create(
-                        selected,
-                        match.aiLane().previewX(),
-                        match.currentLevel(),
-                        motionRandom
-                );
-            } else {
-                armOrDropDuelAi(FruitRules.actionDropX(
-                        selected.actionIndex,
-                        match.currentLevel()
-                ));
-            }
+            armOrDropDuelAi(FruitRules.actionDropX(
+                    selected.actionIndex,
+                    match.currentLevel()
+            ));
         });
     }
 
@@ -2351,17 +2313,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void updateAi(float delta) {
-        if (motionPlan != null) {
-            updateMotionPlan(delta);
-            return;
-        }
         if (aiRequestInFlight) {
             aiState = AiState.THINKING;
-            return;
-        }
-        if (!isScorePresentationReady()) {
-            aiState = AiState.OBSERVING;
-            aiDetail = "等待连锁结算";
             return;
         }
         if (!modelDecisionBoundaryReady()) {
@@ -2396,17 +2349,12 @@ public final class FruitMergeApplication extends ApplicationAdapter
         aiRequestInFlight = true;
         aiState = AiState.THINKING;
         aiDetail = aiService.isAiReady() ? "正在观察局面" : "安全策略";
-        showAiReaction(
-                AiMood.THINKING,
-                1.6f,
-                2
-        );
         long ticket = ++decisionEpoch;
         GameSnapshot snapshot = createSnapshot();
 
         if (!aiService.isAiReady()) {
             // 构图或模型初始化失败时仍保持游戏可玩；UI 会明确标注 safe fallback。
-            startMotionPlan(fallbackDecision(snapshot));
+            applyAiDecision(fallbackDecision(snapshot));
             aiRequestInFlight = false;
             return;
         }
@@ -2429,9 +2377,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     aiRequestInFlight = false;
                     if (decision == null) {
                         aiDetail = "安全策略：模型无决定";
-                        startMotionPlan(fallbackDecision(createSnapshot()));
+                        applyAiDecision(fallbackDecision(createSnapshot()));
                     } else {
-                        startMotionPlan(decision);
+                        applyAiDecision(decision);
                     }
                 });
             }
@@ -2452,7 +2400,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     decisionEpoch += 1;
                     aiRequestInFlight = false;
                     aiDetail = "安全策略：" + sanitizeStatus(message);
-                    startMotionPlan(fallbackDecision(createSnapshot()));
+                    applyAiDecision(fallbackDecision(createSnapshot()));
                 });
             }
         });
@@ -2547,52 +2495,19 @@ public final class FruitMergeApplication extends ApplicationAdapter
         );
     }
 
-    private void startMotionPlan(AiDecision decision) {
-        motionPlan = MotionPlan.create(
-                decision,
-                previewX,
-                currentLevel,
-                motionRandom
-        );
-        aiState = AiState.THINKING;
-        aiDetail = "正在考虑位置 " + (decision.actionIndex + 1) + "/21";
-        float margin = decision.normalizedChoiceMargin();
-        showAiReaction(
-                margin < 0.08f ? AiMood.HESITATING : AiMood.READY,
-                margin < 0.08f ? 2.0f : 1.5f,
-                margin < 0.08f ? 3 : 2
-        );
-    }
-
-    private void updateMotionPlan(float delta) {
-        if (motionPlan == null) {
-            return;
-        }
-        MotionSample sample = motionPlan.update(delta);
-        previewX = FruitRules.clampDropX(sample.x, currentLevel);
-        aiState = sample.state;
-        aiDetail = sample.detail;
-        if (!sample.finished) {
-            return;
-        }
-
-        // 颤动只影响观察轨迹，真实投放必须回到模型选中的规范动作列。
-        previewX = FruitRules.actionDropX(
-                motionPlan.decision.actionIndex,
-                currentLevel
-        );
-        motionPlan = null;
+    private void applyAiDecision(AiDecision decision) {
+        // 稳定局面上的模型决策直接投放，不再追加停顿、试探或回拉轨迹。
+        previewX = FruitRules.actionDropX(decision.actionIndex, currentLevel);
+        aiState = AiState.COMMITTING;
+        aiDetail = "投放";
         dropCurrent(previewX);
     }
 
+
     private void cancelPendingDecision(String detail) {
-        if (motionPlan == null && !aiRequestInFlight) {
+        if (!aiRequestInFlight) {
             return;
         }
-        /*
-         * 取消只停止“继续向目标列移动”，不能把悬浮水果瞬移回旧锚点。
-         * 后续观察抖动应当从玩家刚刚看到的位置自然接续。
-         */
         if (waiting) {
             previewAnchorX = FruitRules.clampDropX(
                     previewX,
@@ -2600,7 +2515,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
         }
         decisionEpoch += 1;
-        motionPlan = null;
         aiRequestInFlight = false;
         aiState = aiEnabled ? AiState.OBSERVING : AiState.MANUAL;
         aiDetail = detail;
@@ -2626,9 +2540,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         fillQueue();
         stepCount += 1;
-        dropCooldown = aiEnabled
-                ? AI_DROP_COOLDOWN_SECONDS
-                : MANUAL_DROP_COOLDOWN_SECONDS;
+        dropCooldown = aiEnabled ? 0f : MANUAL_DROP_COOLDOWN_SECONDS;
         if (aiEnabled) {
             waiting = false;
         } else {
@@ -2644,7 +2556,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         physicsDecisionClock.resetForDrop();
         decisionEpoch += 1;
         aiRequestInFlight = false;
-        motionPlan = null;
         aiState = aiEnabled ? AiState.OBSERVING : AiState.MANUAL;
         previewAnchorX = previewX;
         markSessionDirty();
@@ -2658,11 +2569,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         return alive && waiting && dropCooldown <= 0f;
     }
 
-    private boolean isScorePresentationReady() {
-        return activeScoreSequence == null
-                || !activeScoreSequence.hasMerges
-                || activeScoreSequence.released;
-    }
 
     private boolean canManualDropCurrent() {
         return !aiEnabled && isBaseDropReady();
@@ -2675,8 +2581,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private boolean canAiDropCurrent() {
         return aiEnabled
                 && isBaseDropReady()
-                && modelDecisionBoundaryReady()
-                && isScorePresentationReady();
+                && modelDecisionBoundaryReady();
     }
 
     private boolean modelDecisionBoundaryReady() {
@@ -2685,9 +2590,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private float previewY(int level) {
-        return FruitRules.SPAWN_Y
-                - FruitRules.displayRadius(level)
-                - PREVIEW_GAP;
+        // 与物理水果的实际生成中心一致，让拖动到下落只发生状态切换而不瞬移。
+        return FruitRules.SPAWN_Y;
     }
 
     private float tremor(float amplitude) {
@@ -4187,6 +4091,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                             : AI_TINT_SOFT
             );
         }
+        drawQueueSlots();
 
         // 棋盘几何保持不变；HUD 重排绝不移动训练/推理使用的 spawn_y。
         float sceneOffset = sceneOffsetY();
@@ -4301,6 +4206,33 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     40
             );
         }
+    }
+
+    private void drawQueueSlots() {
+        for (float slotX : QUEUE_SLOT_X) {
+            shapes.setColor(CARD_SHADOW);
+            shapes.circle(
+                    slotX,
+                    toRenderY(QUEUE_SLOT_CENTER_Y + 2.5f),
+                    14f,
+                    28
+            );
+            shapes.setColor(BOARD_FRAME_SOFT);
+            shapes.circle(
+                    slotX,
+                    toRenderY(QUEUE_SLOT_CENTER_Y),
+                    14f,
+                    28
+            );
+            shapes.setColor(SCORE_CARD);
+            shapes.circle(
+                    slotX,
+                    toRenderY(QUEUE_SLOT_CENTER_Y),
+                    12.2f,
+                    28
+            );
+        }
+        drawQueueFocusReticle(QUEUE_SLOT_X[0], QUEUE_SLOT_CENTER_Y);
     }
 
     private void drawScorePanels() {
@@ -4497,15 +4429,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         drawLeaf(181f, 31f, 19f, 8f, 28f, LEAF_ACCENT);
         shapes.setColor(DANGER.r, DANGER.g, DANGER.b, 0.68f);
         shapes.circle(180f, toRenderY(40f), 3.4f, 16);
-        float[] queueSlots = {354f, 408f, 462f};
-        for (float slotX : queueSlots) {
-            shapes.setColor(CARD_SHADOW);
-            shapes.circle(slotX, toRenderY(106f), 20f, 28);
-            shapes.setColor(BOARD_FRAME_SOFT);
-            shapes.circle(slotX, toRenderY(103f), 20f, 28);
-            shapes.setColor(SCORE_CARD);
-            shapes.circle(slotX, toRenderY(103f), 17.8f, 28);
-        }
+        drawQueueSlots();
 
         roundedRectTop(
                 MODE_BUTTON_LEFT,
@@ -4972,12 +4896,22 @@ public final class FruitMergeApplication extends ApplicationAdapter
             );
         }
 
-        // 后续队列位于命令行；大分数卡因此能完整独占第二行。
-        float[] queueX = {302f, 346f, 390f};
-        for (int index = 1; index < Math.min(queue.size, 4); index++) {
+        // q0 也显示在队列中；动态准星明确标记它就是当前正在投放的水果。
+        for (int index = 0;
+                index < Math.min(queue.size, FruitRules.QUEUE_LENGTH);
+                index++) {
             int level = queue.get(index);
-            float size = Math.min(28f, FruitRules.displayRadius(level) * 0.92f);
-            drawFruit(level, queueX[index - 1], 38f, size, 0.90f);
+            float size = Math.min(
+                    QUEUE_FRUIT_MAX_SIZE,
+                    FruitRules.displayRadius(level) * 0.82f
+            );
+            drawFruit(
+                    level,
+                    QUEUE_SLOT_X[index],
+                    QUEUE_SLOT_CENTER_Y,
+                    size,
+                    index == 0 ? 1f : 0.88f
+            );
         }
     }
 
@@ -5066,25 +5000,65 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     0.96f
             );
         }
-        float[] queueX = {302f, 346f, 390f};
-        for (int index = 1;
+        for (int index = 0;
                 index < FruitRules.QUEUE_LENGTH;
                 index++) {
             int queuedLevel = duelMatch.queuedLevel(index);
             float size = Math.min(
-                    28f,
-                    FruitRules.displayRadius(queuedLevel) * 0.92f
+                    QUEUE_FRUIT_MAX_SIZE,
+                    FruitRules.displayRadius(queuedLevel) * 0.82f
             );
             drawFruit(
                     queuedLevel,
-                    queueX[index - 1],
-                    38f,
+                    QUEUE_SLOT_X[index],
+                    QUEUE_SLOT_CENTER_Y,
                     size,
-                    0.90f
+                    index == 0 ? 1f : 0.88f
             );
         }
     }
 
+    /** 用呼吸、轻摆与环绕光点标记队列中的当前水果。 */
+    private void drawQueueFocusReticle(float centerX, float centerTopY) {
+        float phase = elapsedSeconds * 2.75f;
+        float radius = 15.6f + MathUtils.sin(phase) * 1.05f;
+        float arm = 5.6f + MathUtils.sin(phase * 0.68f + 0.9f) * 0.65f;
+        float rotation = MathUtils.sin(phase * 0.43f) * 0.10f;
+        float cosine = MathUtils.cos(rotation);
+        float sine = MathUtils.sin(rotation);
+        float centerY = toRenderY(centerTopY);
+        float alpha = 0.72f + MathUtils.sin(phase) * 0.15f;
+        scratchColor.set(ACCENT.r, ACCENT.g, ACCENT.b, alpha);
+        shapes.setColor(scratchColor);
+        for (int xSign = -1; xSign <= 1; xSign += 2) {
+            for (int ySign = -1; ySign <= 1; ySign += 2) {
+                float localX = xSign * radius;
+                float localY = ySign * radius;
+                float cornerX = centerX + localX * cosine - localY * sine;
+                float cornerY = centerY + localX * sine + localY * cosine;
+                float xArmX = cornerX - xSign * arm * cosine;
+                float xArmY = cornerY - xSign * arm * sine;
+                float yArmX = cornerX + ySign * arm * sine;
+                float yArmY = cornerY - ySign * arm * cosine;
+                shapes.rectLine(cornerX, cornerY, xArmX, xArmY, 1.8f);
+                shapes.rectLine(cornerX, cornerY, yArmX, yArmY, 1.8f);
+            }
+        }
+        float orbit = phase * 0.62f;
+        float orbitRadius = radius + 2.7f;
+        shapes.circle(
+                centerX + MathUtils.cos(orbit) * orbitRadius,
+                centerY + MathUtils.sin(orbit) * orbitRadius,
+                1.65f,
+                12
+        );
+        shapes.circle(
+                centerX - MathUtils.cos(orbit) * orbitRadius,
+                centerY - MathUtils.sin(orbit) * orbitRadius,
+                1.05f,
+                12
+        );
+    }
     private void drawFruit(int level, float centerX, float centerY, float size, float alpha) {
         drawFruit(level, centerX, centerY, size, 0f, alpha);
     }
@@ -5163,10 +5137,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
         smallFont.setColor(TEXT_MUTED);
         drawTextInBox(
                 smallFont,
-                "下一颗",
-                222f,
+                "投放序列",
+                218f,
                 18f,
-                68f,
+                66f,
                 40f,
                 Align.center
         );
@@ -5205,9 +5179,9 @@ public final class FruitMergeApplication extends ApplicationAdapter
             drawTextInBox(
                     smallFont,
                     aiState.label,
-                    410f,
-                    18f,
-                    70f,
+                    AI_TOGGLE_LEFT,
+                    AI_TOGGLE_TOP,
+                    AI_TOGGLE_WIDTH,
                     42f,
                     Align.center
             );
@@ -5441,7 +5415,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 20f,
                 Align.center
         );
-        drawTextInBox(smallFont, "下一颗", 284f, 68f, 62f, 20f, Align.left);
+        drawTextInBox(smallFont, "投放序列", 284f, 68f, 78f, 20f, Align.left);
 
         normalFont.setColor(TEXT_PRIMARY);
         normalFont.getData().setScale(0.38f * (1f + scorePulse * 0.10f));
@@ -6773,6 +6747,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         previewAnchorX = previewX;
         if (enabled) {
             aiLoadingSeconds = 0f;
+            dropCooldown = 0f;
         } else if (!waiting && queue.size > 0) {
             /*
              * AI 刚投下水果后切换人工模式时，也立即提供下一颗的预摆入口。
@@ -6959,7 +6934,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         activeDragPointer = -1;
         decisionEpoch += 1;
         aiRequestInFlight = false;
-        motionPlan = null;
         if (gameMode == GameMode.CLASSIC) {
             gameMode = GameMode.DUEL;
             resetDuelGame();
@@ -7746,7 +7720,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         MANUAL("手动"),
         OBSERVING("观察中"),
         THINKING("思考中"),
-        TESTING("试探中"),
         COMMITTING("投放中"),
         GAME_OVER("已结束");
 
@@ -7779,213 +7752,6 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
     }
 
-    /** 一段不使用光滑贝塞尔曲线的拟人拖动轨迹。 */
-    private static final class MotionPlan {
-        private final AiDecision decision;
-        private final Array<MotionSegment> segments;
-        private final Random random;
-        private int segmentIndex;
-        private float segmentTime;
-        private float holdTime;
-        private float startX;
-        private float currentX;
-        private float jitter;
-        private float jitterTarget;
-        private float renderJitter;
-        private float jitterRefresh;
-        private float gestureTime;
-        private final float wavePhase;
-
-        private MotionPlan(
-                AiDecision decision,
-                Array<MotionSegment> segments,
-                float startX,
-                Random random) {
-            this.decision = decision;
-            this.segments = segments;
-            this.startX = startX;
-            this.currentX = startX;
-            this.random = random;
-            this.wavePhase = random.nextFloat() * MathUtils.PI2;
-        }
-
-        private static MotionPlan create(
-                AiDecision decision,
-                float currentX,
-                int level,
-                Random random) {
-            Array<MotionSegment> segments = new Array<>();
-            float margin = MathUtils.clamp(decision.normalizedChoiceMargin(), 0f, 0.12f);
-            float uncertainty = 1f - margin / 0.12f;
-
-            // 模型前两名接近时先探向备选列；差距明显时只做一次短促修正。
-            if (uncertainty > 0.34f
-                    && decision.alternativeActionIndex >= 0
-                    && decision.alternativeActionIndex < FruitRules.ACTION_COUNT) {
-                float alternative = FruitRules.actionDropX(
-                        decision.alternativeActionIndex,
-                        level
-                );
-                segments.add(new MotionSegment(
-                        FruitRules.clampDropX(
-                                alternative + signedRandom(random, 2.4f),
-                                level
-                        ),
-                        0.24f + uncertainty * 0.18f,
-                        0.10f + uncertainty * 0.11f,
-                        AiState.TESTING,
-                        "尝试其他位置"
-                ));
-            }
-
-            float selected = FruitRules.actionDropX(decision.actionIndex, level);
-            float approachDirection = Math.signum(selected - currentX);
-            if (approachDirection == 0f) {
-                approachDirection = random.nextBoolean() ? 1f : -1f;
-            }
-            segments.add(new MotionSegment(
-                    FruitRules.clampDropX(
-                            selected + approachDirection
-                                    * (2f + random.nextFloat() * 4.5f),
-                            level
-                    ),
-                    0.22f + random.nextFloat() * 0.16f,
-                    0.09f + random.nextFloat() * 0.08f,
-                    AiState.TESTING,
-                    "微调位置"
-            ));
-            segments.add(new MotionSegment(
-                    selected,
-                    0.18f + random.nextFloat() * 0.12f,
-                    0.10f + uncertainty * 0.08f,
-                    AiState.COMMITTING,
-                    "决定完成"
-            ));
-            return new MotionPlan(decision, segments, currentX, random);
-        }
-
-        private MotionSample update(float delta) {
-            gestureTime += delta;
-            if (holdTime > 0f) {
-                MotionSegment heldSegment = segments.get(
-                        Math.max(0, segmentIndex - 1)
-                );
-                holdTime = Math.max(0f, holdTime - delta);
-                refreshJitter(
-                        delta,
-                        heldSegment.state == AiState.COMMITTING ? 0.18f : 0.55f
-                );
-                return new MotionSample(
-                        currentX + renderJitter,
-                        heldSegment.state,
-                        holdTime <= 0f && segmentIndex >= segments.size
-                                ? "投放"
-                                : heldSegment.detail,
-                        holdTime <= 0f && segmentIndex >= segments.size
-                );
-            }
-
-            if (segmentIndex >= segments.size) {
-                return new MotionSample(
-                        currentX,
-                        AiState.COMMITTING,
-                        "投放",
-                        true
-                );
-            }
-
-            MotionSegment segment = segments.get(segmentIndex);
-            segmentTime += delta;
-            float progress = MathUtils.clamp(segmentTime / segment.duration, 0f, 1f);
-            /*
-             * 拖动主体采用轻微 ease-out；手部误差来自低通后的相关噪声和低频波，
-             * 不再每隔几十毫秒瞬移到一个全新偏移。
-             */
-            float eased = 1f - (float) Math.pow(1f - progress, 2.15f);
-            float baseX = startX + (segment.targetX - startX) * eased;
-            refreshJitter(
-                    delta,
-                    segment.state == AiState.COMMITTING ? 0.14f : 0.45f
-            );
-            currentX = baseX;
-            if (progress < 1f) {
-                return new MotionSample(
-                        currentX + renderJitter,
-                        segment.state,
-                        segment.detail,
-                        false
-                );
-            }
-
-            currentX = segment.targetX;
-            holdTime = segment.hold;
-            segmentTime = 0f;
-            startX = currentX;
-            segmentIndex += 1;
-            return new MotionSample(
-                    currentX + renderJitter,
-                    segment.state,
-                    segment.detail,
-                    segmentIndex >= segments.size && holdTime <= 0f
-            );
-        }
-
-        private void refreshJitter(float delta, float amplitude) {
-            jitterRefresh -= delta;
-            if (jitterRefresh <= 0f) {
-                jitterTarget = signedRandom(random, amplitude);
-                jitterRefresh = 0.12f + random.nextFloat() * 0.10f;
-            }
-            float response = 1f - (float) Math.exp(-delta * 8.5f);
-            jitter += (jitterTarget - jitter) * response;
-            renderJitter = jitter
-                    + MathUtils.sin(gestureTime * 6.4f + wavePhase)
-                    * amplitude * 0.13f;
-        }
-
-        private static float signedRandom(Random random, float amplitude) {
-            return (random.nextFloat() * 2f - 1f) * amplitude;
-        }
-    }
-
-    private static final class MotionSegment {
-        private final float targetX;
-        private final float duration;
-        private final float hold;
-        private final AiState state;
-        private final String detail;
-
-        private MotionSegment(
-                float targetX,
-                float duration,
-                float hold,
-                AiState state,
-                String detail) {
-            this.targetX = targetX;
-            this.duration = duration;
-            this.hold = hold;
-            this.state = state;
-            this.detail = detail;
-        }
-    }
-
-    private static final class MotionSample {
-        private final float x;
-        private final AiState state;
-        private final String detail;
-        private final boolean finished;
-
-        private MotionSample(
-                float x,
-                AiState state,
-                String detail,
-                boolean finished) {
-            this.x = x;
-            this.state = state;
-            this.detail = detail;
-            this.finished = finished;
-        }
-    }
 
     private static final class MergeCue {
         private final float x;
