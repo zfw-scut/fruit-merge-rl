@@ -222,6 +222,51 @@ public final class FruitPhysicsWorldSnapshotTest {
     }
 
     @Test
+    public void stabilityUsesSolvedFrameDisplacementNotResidualVelocity() {
+        int level = 1;
+        float radius = FruitRules.droppedPhysicsRadius(level);
+        float floorY = FruitRules.FLOOR_Y - radius;
+        FruitPhysicsWorld world = new FruitPhysicsWorld();
+        try {
+            world.restore(new FruitPhysicsWorld.Snapshot(
+                    2,
+                    0f,
+                    new FruitPhysicsWorld.FruitState[]{
+                            new FruitPhysicsWorld.FruitState(
+                                    1,
+                                    level,
+                                    FruitRules.displayRadius(level),
+                                    radius,
+                                    FruitRules.BOARD_WIDTH * 0.5f,
+                                    floorY,
+                                    0f,
+                                    300f,
+                                    0f,
+                                    0f,
+                                    30
+                            )
+                    }
+            ));
+
+            world.step(1f / FruitRules.PHYSICS_FPS);
+
+            FruitPhysicsWorld.FruitBody fruit = world.fruits().first();
+            float frameDisplacement = Math.abs(fruit.y() - floorY);
+            float speed = (float) Math.sqrt(
+                    fruit.vx() * fruit.vx() + fruit.vy() * fruit.vy()
+            );
+            assertTrue(frameDisplacement
+                    <= FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND
+                    / FruitRules.PHYSICS_FPS);
+            assertTrue(speed
+                    > FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND);
+            assertTrue(world.isStable());
+        } finally {
+            world.dispose();
+        }
+    }
+
+    @Test
     public void restoreDropsOldEventsAndRejectsCorruptionBeforeClearing() {
         FruitPhysicsWorld world = new FruitPhysicsWorld();
         try {

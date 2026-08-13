@@ -14,7 +14,7 @@ class FullFallTransferConfigTest(unittest.TestCase):
         )
         simulator = training_simulator_config(config, 'cpu')
 
-        self.assertEqual(PHYSICS_IDENTITY, 'tensor_cuda_v3_full_fall')
+        self.assertEqual(PHYSICS_IDENTITY, 'tensor_cuda_v4_solved_motion_stability')
         self.assertEqual(config.training_physics_fps, 120)
         self.assertEqual(config.total_transitions, 16_000_000)
         self.assertEqual(config.seed, 20260813)

@@ -7,6 +7,7 @@ void vector_step_cuda(
     torch::Tensor positions,
     torch::Tensor velocities,
     torch::Tensor incremental_stable_count,
+    torch::Tensor motion_reference_positions,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
     torch::Tensor levels,
@@ -119,6 +120,7 @@ void vector_step(
     torch::Tensor positions,
     torch::Tensor velocities,
     torch::Tensor incremental_stable_count,
+    torch::Tensor motion_reference_positions,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
     torch::Tensor levels,
@@ -227,6 +229,10 @@ void vector_step(
   CHECK_CUDA(incremental_stable_count);
   CHECK_CONTIGUOUS(incremental_stable_count);
   CHECK_CONTIGUOUS(positions);
+  CHECK_CUDA(motion_reference_positions);
+  CHECK_CONTIGUOUS(motion_reference_positions);
+  TORCH_CHECK(motion_reference_positions.scalar_type() == torch::kFloat32,
+              "motion_reference_positions must be float32");
   TORCH_CHECK(actions.scalar_type() == torch::kInt64, "actions must be int64");
   TORCH_CHECK(enabled.scalar_type() == torch::kBool, "enabled must be bool");
   TORCH_CHECK(incremental_stable_count.scalar_type() == torch::kInt64,
@@ -248,7 +254,7 @@ void vector_step(
   vector_step_cuda(
       actions, enabled, perform_drop,
       positions, velocities, incremental_stable_count,
-      angles, angular_velocities, levels,
+      motion_reference_positions, angles, angular_velocities, levels,
       physics_radii, masses, inverse_masses, inverse_inertias, fruit_ids,
       age_frames, active, fruit_queue, score, last_score, step_count,
       physics_frame, fail_frames, next_fruit_id, rng_state, terminated,

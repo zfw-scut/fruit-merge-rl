@@ -72,7 +72,8 @@ class TensorVectorSimulator:
     _RNG_MASK = 0x7FFFFFFF
     _SEED_STRIDE = 747796405
     _CLONE_STATE_FIELDS = (
-        'positions', 'velocities', 'angles', 'angular_velocities', 'levels',
+        'positions', 'velocities', '_motion_reference_positions',
+        'angles', 'angular_velocities', 'levels',
         'physics_radii', 'masses', 'inverse_masses', 'inverse_inertias',
         'fruit_ids', 'age_frames', 'active', 'fruit_queue', 'score',
         'last_score', 'step_count', 'physics_frame', 'fail_frames',
@@ -110,6 +111,7 @@ class TensorVectorSimulator:
             dtype=self.float_dtype,
             device=self.device,
         )
+        self._motion_reference_positions = torch.zeros_like(self.positions)
         self.velocities = torch.zeros_like(self.positions)
         self._incremental_stable_count = torch.zeros(
             batch, dtype=torch.int64, device=self.device
@@ -312,6 +314,7 @@ class TensorVectorSimulator:
                 self.velocities,
                 self.angles,
                 self.angular_velocities,
+                self._motion_reference_positions,
                 self.levels,
                 self.physics_radii,
                 self.masses,
@@ -1016,9 +1019,13 @@ class TensorVectorSimulator:
         )
 
     def _stable_environments(self):
-        speed = self.velocities.square().sum(dim=-1).sqrt()
+        displacement = self.positions - self._motion_reference_positions
+        maximum_displacement = (
+            self.config.stable_velocity_epsilon * self.config.dt
+        )
         fruit_stable = (
-            (speed <= self.config.stable_velocity_epsilon)
+            (displacement.square().sum(dim=-1)
+                <= maximum_displacement * maximum_displacement)
             & (
                 self.angular_velocities.abs()
                 <= self.config.stable_angular_velocity_epsilon
@@ -1575,6 +1582,7 @@ class TensorVectorSimulator:
             self.positions,
             self.velocities,
             self._incremental_stable_count,
+            self._motion_reference_positions,
             self.angles,
             self.angular_velocities,
             self.levels,
@@ -1743,6 +1751,7 @@ class TensorVectorSimulator:
         self._incremental_stable_count[mask] = (
             self.config.stable_frames if stable else 0
         )
+        self._motion_reference_positions[mask] = self.positions[mask]
 
     @torch.no_grad()
     def begin_incremental_action(self, actions):
@@ -1785,6 +1794,7 @@ class TensorVectorSimulator:
         stable_result = torch.zeros_like(running)
         done_result = torch.zeros_like(running)
         if bool(running.any().item()):
+            self._motion_reference_positions[running] = self.positions[running]
             substep_counts = self._advance_collision_substeps(running)
             collision_substeps = torch.where(
                 running, substep_counts, collision_substeps
@@ -1864,6 +1874,7 @@ class TensorVectorSimulator:
 
         for frame_index in range(self.config.max_physics_frames):
             frame_event_count = self._event_count.clone()
+            self._motion_reference_positions[running] = self.positions[running]
             substep_counts = self._advance_collision_substeps(running)
             collision_substeps += torch.where(
                 running, substep_counts, torch.zeros_like(substep_counts)
@@ -2189,9 +2200,12 @@ class TensorVectorSimulator:
             angular_velocity = float(
                 self.angular_velocities[env_index, slot].item()
             )
+            displacement = self.positions[env_index, slot] - (
+                self._motion_reference_positions[env_index, slot]
+            )
             stable = (
-                math.hypot(vx, vy)
-                <= self.config.stable_velocity_epsilon
+                float(displacement.square().sum())
+                <= (self.config.stable_velocity_epsilon * self.config.dt) ** 2
                 and abs(angular_velocity)
                 <= self.config.stable_angular_velocity_epsilon
             )

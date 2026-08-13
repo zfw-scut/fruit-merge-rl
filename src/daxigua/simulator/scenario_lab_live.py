@@ -392,7 +392,14 @@ class ScenarioLabLiveSession:
         simulator.score[0] = int(scene['score'])
         simulator.last_score[0] = int(scene['score'])
         simulator.step_count[0] = int(scene['step_count'])
-        quiet = bool(simulator._stable_environments()[0].item())
+        linear_quiet = (
+            simulator.velocities.square().sum(dim=-1)
+            <= simulator.config.stable_velocity_epsilon ** 2
+        )
+        angular_quiet = simulator.angular_velocities.abs() <= (
+            simulator.config.stable_angular_velocity_epsilon
+        )
+        quiet = bool(((linear_quiet & angular_quiet) | ~simulator.active).all())
         simulator.reset_incremental_progress(stable=quiet)
         self._pending_events.clear()
 

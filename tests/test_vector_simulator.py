@@ -220,6 +220,35 @@ class TensorVectorSimulatorTest(unittest.TestCase):
         self.assertGreater(float(simulator.positions[0, 1, 1]), start_y)
         self.assertFalse(bool(physics.stable[0]))
 
+    def test_stability_uses_solved_frame_displacement_not_residual_velocity(self):
+        config = self._config(
+            physics_fps=60,
+            stable_frames=1,
+            gravity_y=0.0,
+            damping=1.0,
+            fruit_elasticity=1.0,
+            stable_velocity_epsilon=35.0,
+        )
+        simulator = TensorVectorSimulator(1, config=config, device='cpu')
+        level = 1
+        radius = float(simulator._dropped_radii[level])
+        floor_y = config.board_height - config.wall_width - radius
+        self._install_fruit(simulator, 0, 0, level, 160, floor_y, 1)
+        simulator.velocities[0, 0, 1] = 45.0
+
+        physics = simulator.advance_incremental_frame()
+
+        displacement = torch.linalg.vector_norm(
+            simulator.positions[0, 0]
+            - simulator._motion_reference_positions[0, 0]
+        )
+        speed = torch.linalg.vector_norm(simulator.velocities[0, 0])
+        self.assertLessEqual(
+            float(displacement), config.stable_velocity_epsilon * config.dt
+        )
+        self.assertGreater(float(speed), config.stable_velocity_epsilon)
+        self.assertTrue(bool(physics.stable[0]))
+
     def test_low_speed_contact_does_not_apply_restitution(self):
         config = self._config(restitution_velocity_threshold=35.0)
         simulator = TensorVectorSimulator(2, config=config, device='cpu')
@@ -501,6 +530,41 @@ class CudaVectorSimulatorTest(unittest.TestCase):
                 second_result.physics.frames_simulated,
             )
         )
+
+    def test_cuda_stability_uses_solved_frame_displacement(self):
+        config = SimulatorConfig(
+            board_width=320,
+            board_height=420,
+            spawn_y=80,
+            action_count=7,
+            max_fruits=8,
+            physics_fps=60,
+            max_physics_frames=1,
+            stable_frames=1,
+            solver_iterations=2,
+            gravity_y=0.0,
+            damping=1.0,
+            fruit_elasticity=1.0,
+            stable_velocity_epsilon=35.0,
+        )
+        simulator = TensorVectorSimulator(1, config=config, device='cuda')
+        level = 1
+        radius = float(simulator._dropped_radii[level])
+        floor_y = config.board_height - config.wall_width - radius
+        self._install_fruit(simulator, 0, level, 160, floor_y, 1)
+        simulator.velocities[0, 0, 1] = 45.0
+
+        physics = simulator.advance_incremental_frame()
+        torch.cuda.synchronize()
+
+        displacement = torch.linalg.vector_norm(
+            simulator.positions[0, 0]
+            - simulator._motion_reference_positions[0, 0]
+        )
+        speed = torch.linalg.vector_norm(simulator.velocities[0, 0])
+        self.assertLessEqual(float(displacement), 35.0 / 60.0)
+        self.assertGreater(float(speed), 35.0)
+        self.assertTrue(bool(physics.stable[0]))
 
     def test_cuda_unsupported_fruit_keeps_accelerating_under_gravity(self):
         config = SimulatorConfig.high_fidelity_fast(

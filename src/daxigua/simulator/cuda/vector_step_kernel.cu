@@ -500,6 +500,7 @@ __global__ void vector_step_kernel(
     float* positions,
     float* velocities,
     int64_t* incremental_stable_count,
+    float* motion_reference_positions,
     float* angles,
     float* angular_velocities,
     int64_t* levels,
@@ -734,6 +735,8 @@ __global__ void vector_step_kernel(
   const float frame_damping = powf(damping, dt);
   const float stable_velocity_squared =
       stable_velocity_epsilon * stable_velocity_epsilon;
+  const float stable_displacement_squared =
+      stable_velocity_squared * dt * dt;
   int consecutive_stable = perform_drop
       ? 0
       : static_cast<int>(incremental_stable_count[env]);
@@ -743,6 +746,12 @@ __global__ void vector_step_kernel(
   for (int frame = 0;
        frame < max_physics_frames && running;
        ++frame) {
+    for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
+      int vector_index = state.vector_index(slot);
+      Vec2 position = state.position(slot);
+      motion_reference_positions[vector_index] = position.x;
+      motion_reference_positions[vector_index + 1] = position.y;
+    }
     int64_t frame_event_count = event_count[env];
     for (int slot = 0; slot < active_slot_upper_bound; ++slot) {
       int index = state.slot_index(slot);
@@ -931,8 +940,12 @@ __global__ void vector_step_kernel(
          ++slot) {
       int index = state.slot_index(slot);
       if (!active[index]) continue;
-      Vec2 velocity = state.velocity(slot);
-      if (dot(velocity, velocity) > stable_velocity_squared
+      int vector_index = state.vector_index(slot);
+      Vec2 position = state.position(slot);
+      Vec2 displacement{
+          position.x - motion_reference_positions[vector_index],
+          position.y - motion_reference_positions[vector_index + 1]};
+      if (dot(displacement, displacement) > stable_displacement_squared
           || fabsf(angular_velocities[index]) > stable_angular_velocity_epsilon) {
         all_stable = false;
         break;
@@ -979,6 +992,7 @@ void vector_step_cuda(
     torch::Tensor positions,
     torch::Tensor velocities,
     torch::Tensor incremental_stable_count,
+    torch::Tensor motion_reference_positions,
     torch::Tensor angles,
     torch::Tensor angular_velocities,
     torch::Tensor levels,
@@ -1090,6 +1104,7 @@ void vector_step_cuda(
       positions.data_ptr<float>(),
       velocities.data_ptr<float>(),
       incremental_stable_count.data_ptr<int64_t>(),
+      motion_reference_positions.data_ptr<float>(),
       angles.data_ptr<float>(),
       angular_velocities.data_ptr<float>(), levels.data_ptr<int64_t>(),
       physics_radii.data_ptr<float>(), masses.data_ptr<float>(),

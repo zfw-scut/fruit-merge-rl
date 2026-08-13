@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 
-PHYSICS_IDENTITY = 'tensor_cuda_v3_full_fall'
+PHYSICS_IDENTITY = 'tensor_cuda_v4_solved_motion_stability'
 
 
 @dataclass(frozen=True, slots=True)

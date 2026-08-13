@@ -15,6 +15,8 @@ import java.util.Set;
 public final class FruitPhysicsWorld {
     private static final int MAX_FRUITS = 64;
     private static final float FIXED_STEP = 1f / FruitRules.PHYSICS_FPS;
+    private static final float STABLE_FRAME_DISPLACEMENT =
+            FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND * FIXED_STEP;
     private static final float FRAME_DAMPING =
             (float) Math.pow(0.995, FIXED_STEP);
     private static final int SOLVER_ITERATIONS = 4;
@@ -127,14 +129,8 @@ public final class FruitPhysicsWorld {
         if (mergeOccurredLastFrame) {
             return false;
         }
-        float maximumSpeedSquared =
-                FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND
-                        * FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND;
         for (FruitBody fruit : fruits) {
-            if (fruit.vx * fruit.vx + fruit.vy * fruit.vy
-                    > maximumSpeedSquared
-                    || Math.abs(fruit.angularVelocity)
-                    > FruitRules.STABLE_ANGULAR_VELOCITY) {
+            if (!fruit.isStable()) {
                 return false;
             }
         }
@@ -197,6 +193,8 @@ public final class FruitPhysicsWorld {
     private void advanceFrame() {
         mergeOccurredLastFrame = false;
 
+        rememberFrameStartPositions();
+
         for (int slot = 0; slot < MAX_FRUITS; slot++) {
             FruitBody fruit = slots[slot];
             if (fruit == null) {
@@ -234,6 +232,16 @@ public final class FruitPhysicsWorld {
         resolveMerges();
 
         rebuildFruitView();
+    }
+
+    private void rememberFrameStartPositions() {
+        for (FruitBody fruit : slots) {
+            if (fruit == null) {
+                continue;
+            }
+            fruit.frameStartX = fruit.x;
+            fruit.frameStartY = fruit.y;
+        }
     }
 
     private static void resolveWalls(FruitBody fruit) {
@@ -732,6 +740,8 @@ public final class FruitPhysicsWorld {
         private float vy;
         private float angle;
         private float angularVelocity;
+        private float frameStartX;
+        private float frameStartY;
         private int ageFrames;
 
 
@@ -760,6 +770,8 @@ public final class FruitPhysicsWorld {
             this.angle = angle;
             this.angularVelocity = angularVelocity;
             this.ageFrames = ageFrames;
+            frameStartX = x - vx * FIXED_STEP;
+            frameStartY = y - vy * FIXED_STEP;
             float mass = FruitRules.mass(level);
             inverseMass = 1f / mass;
             inverseInertia = 1f
@@ -775,9 +787,10 @@ public final class FruitPhysicsWorld {
         public int ageFrames() { return ageFrames; }
 
         public boolean isStable() {
-            return vx * vx + vy * vy
-                    <= FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND
-                    * FruitRules.STABLE_VELOCITY_PIXELS_PER_SECOND
+            float deltaX = x - frameStartX;
+            float deltaY = y - frameStartY;
+            return deltaX * deltaX + deltaY * deltaY
+                    <= STABLE_FRAME_DISPLACEMENT * STABLE_FRAME_DISPLACEMENT
                     && Math.abs(angularVelocity)
                     <= FruitRules.STABLE_ANGULAR_VELOCITY;
         }
