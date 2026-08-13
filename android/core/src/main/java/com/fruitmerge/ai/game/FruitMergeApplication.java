@@ -39,6 +39,8 @@ import java.util.Random;
 public final class FruitMergeApplication extends ApplicationAdapter
         implements InputProcessor {
     private static final float MANUAL_DROP_COOLDOWN_SECONDS = 0.14f;
+    private static final float AI_SLIDE_MIN_SECONDS = 0.12f;
+    private static final float AI_SLIDE_MAX_SECONDS = 0.32f;
     private static final float MANUAL_INPUT_TOP = 144f;
     private static final float AI_LOADING_FALLBACK_SECONDS = 12f;
     private static final float AUTOSAVE_INTERVAL_SECONDS = 1.5f;
@@ -286,10 +288,12 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private boolean inMemorySession;
     private boolean soloResultRecorded;
     private boolean discardNextWallDelta;
+    private HorizontalSlide aiSlide;
     private ScoreSequence activeScoreSequence;
     private ScoreSequence rollingScoreSequence;
     private DuelMatch duelMatch;
     private DuelMatch.Side duelForeground = DuelMatch.Side.PLAYER;
+    private HorizontalSlide duelAiSlide;
     private boolean duelAiRequestInFlight;
     private boolean duelAiArmed;
     private float duelAiArmedX;
@@ -446,6 +450,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
         disposed = true;
         decisionEpoch += 1;
         aiRequestInFlight = false;
+        aiSlide = null;
+        duelAiSlide = null;
         activeDragPointer = -1;
         uiMotion.cancelAll();
         Gdx.input.setCatchKey(Input.Keys.BACK, false);
@@ -1239,6 +1245,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         soloPercentile = state.resultPercentile();
         decisionEpoch += 1L;
         aiRequestInFlight = false;
+        aiSlide = null;
         aiState = alive
                 ? (aiEnabled ? AiState.OBSERVING : AiState.MANUAL)
                 : AiState.GAME_OVER;
@@ -1283,6 +1290,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                 && !duelMatch.aiLane().submittedThisRound();
         duelAiArmedX = state.aiArmedX();
         duelAiRequestInFlight = false;
+        duelAiSlide = null;
         duelPlayerReactionRound = -1;
         duelAiReactionRound = -1;
         activeDragPointer = -1;
@@ -1332,6 +1340,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private void resetGame() {
         decisionEpoch += 1;
         aiRequestInFlight = false;
+        aiSlide = null;
         activeDragPointer = -1;
         physics.clear();
         resetAdaptiveScoreLayout();
@@ -1441,6 +1450,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
     private void invalidateDuelDecision() {
         duelDecisionEpoch += 1L;
         duelAiRequestInFlight = false;
+        duelAiSlide = null;
     }
 
     private void updateDuelGame(float realDelta, float gameDelta) {
@@ -1654,6 +1664,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
             return;
         }
         float remaining = duelMatch.roundRemainingSeconds();
+        if (duelAiSlide != null) {
+            updateDuelAiSlide(realDelta);
+            return;
+        }
         if (duelAiArmed) {
             return;
         }
@@ -1662,7 +1676,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                     createDuelSnapshot(duelMatch.aiLane())
             );
             invalidateDuelDecision();
-            armOrDropDuelAi(FruitRules.actionDropX(
+            startDuelAiSlide(FruitRules.actionDropX(
                     fallback.actionIndex,
                     duelMatch.currentLevel()
             ));
@@ -1680,7 +1694,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
             AiDecision fallback = fallbackDecision(
                     createDuelSnapshot(duelMatch.aiLane())
             );
-            armOrDropDuelAi(FruitRules.actionDropX(
+            startDuelAiSlide(FruitRules.actionDropX(
                     fallback.actionIndex,
                     duelMatch.currentLevel()
             ));
@@ -1766,7 +1780,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
                         3
                 );
             }
-            armOrDropDuelAi(FruitRules.actionDropX(
+            startDuelAiSlide(FruitRules.actionDropX(
                     selected.actionIndex,
                     match.currentLevel()
             ));
@@ -2313,6 +2327,10 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void updateAi(float delta) {
+        if (aiSlide != null) {
+            updateAiSlide(delta);
+            return;
+        }
         if (aiRequestInFlight) {
             aiState = AiState.THINKING;
             return;
@@ -2496,16 +2514,53 @@ public final class FruitMergeApplication extends ApplicationAdapter
     }
 
     private void applyAiDecision(AiDecision decision) {
-        // 稳定局面上的模型决策直接投放，不再追加停顿、试探或回拉轨迹。
-        previewX = FruitRules.actionDropX(decision.actionIndex, currentLevel);
+        float targetX = FruitRules.clampDropX(
+                FruitRules.actionDropX(decision.actionIndex, currentLevel),
+                currentLevel
+        );
+        aiState = AiState.COMMITTING;
+        if (Math.abs(targetX - previewX) <= 0.25f) {
+            previewX = targetX;
+            previewAnchorX = targetX;
+            aiDetail = "投放";
+            dropCurrent(targetX);
+            return;
+        }
+        aiSlide = new HorizontalSlide(previewX, targetX);
+        aiDetail = "移动至投放位置";
+    }
+
+    private void updateAiSlide(float delta) {
+        HorizontalSlide slide = aiSlide;
+        if (slide == null) {
+            return;
+        }
+        if (!alive || !waiting || !aiEnabled) {
+            aiSlide = null;
+            return;
+        }
+        previewX = FruitRules.clampDropX(
+                slide.advance(delta),
+                currentLevel
+        );
+        if (!slide.finished()) {
+            return;
+        }
+        float targetX = FruitRules.clampDropX(
+                slide.targetX,
+                currentLevel
+        );
+        aiSlide = null;
+        previewX = targetX;
+        previewAnchorX = targetX;
         aiState = AiState.COMMITTING;
         aiDetail = "投放";
-        dropCurrent(previewX);
+        dropCurrent(targetX);
     }
 
 
     private void cancelPendingDecision(String detail) {
-        if (!aiRequestInFlight) {
+        if (!aiRequestInFlight && aiSlide == null) {
             return;
         }
         if (waiting) {
@@ -2516,6 +2571,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
         decisionEpoch += 1;
         aiRequestInFlight = false;
+        aiSlide = null;
         aiState = aiEnabled ? AiState.OBSERVING : AiState.MANUAL;
         aiDetail = detail;
     }
@@ -2524,6 +2580,7 @@ public final class FruitMergeApplication extends ApplicationAdapter
         if (!canDropCurrent()) {
             return;
         }
+        aiSlide = null;
         x = FruitRules.clampDropX(x, currentLevel);
         /*
          * 表现序列在第一笔真实合成发生时懒创建。手动玩家可以在上一颗仍运动时
@@ -6934,6 +6991,8 @@ public final class FruitMergeApplication extends ApplicationAdapter
         activeDragPointer = -1;
         decisionEpoch += 1;
         aiRequestInFlight = false;
+        aiSlide = null;
+        duelAiSlide = null;
         if (gameMode == GameMode.CLASSIC) {
             gameMode = GameMode.DUEL;
             resetDuelGame();
@@ -7076,6 +7135,50 @@ public final class FruitMergeApplication extends ApplicationAdapter
      * AI 先完成决策时只把悬浮水果移到目标列。玩家尚未提交则进入“就位等待”，
      * 由玩家抬手触发 dropBoth；玩家已经先投时则按 AI 自己的轨迹时序正常落下。
      */
+    private void startDuelAiSlide(float x) {
+        if (duelMatch == null
+                || !duelMatch.roundOpen()
+                || duelMatch.aiLane().submittedThisRound()) {
+            return;
+        }
+        float target = FruitRules.clampDropX(
+                x,
+                duelMatch.currentLevel()
+        );
+        float start = duelMatch.aiLane().previewX();
+        if (Math.abs(target - start) <= 0.25f) {
+            armOrDropDuelAi(target);
+            return;
+        }
+        duelAiSlide = new HorizontalSlide(start, target);
+    }
+
+    private void updateDuelAiSlide(float delta) {
+        HorizontalSlide slide = duelAiSlide;
+        if (slide == null || duelMatch == null) {
+            duelAiSlide = null;
+            return;
+        }
+        if (!duelMatch.roundOpen()
+                || duelMatch.aiLane().submittedThisRound()
+                || duelMatch.outcome()
+                != DuelMatch.Outcome.IN_PROGRESS) {
+            duelAiSlide = null;
+            return;
+        }
+        duelMatch.setAiPreviewX(slide.advance(delta));
+        if (!slide.finished()) {
+            return;
+        }
+        float target = FruitRules.clampDropX(
+                slide.targetX,
+                duelMatch.currentLevel()
+        );
+        duelAiSlide = null;
+        duelMatch.setAiPreviewX(target);
+        armOrDropDuelAi(target);
+    }
+
     private void armOrDropDuelAi(float x) {
         if (duelMatch == null
                 || !duelMatch.roundOpen()
@@ -7752,6 +7855,45 @@ public final class FruitMergeApplication extends ApplicationAdapter
         }
     }
 
+    /**
+     * 模型选定目标后使用的单段横移动画。这里只做确定性的平滑过渡，
+     * 不引入停顿、试探、回拉或随机抖动，动画结束即投放。
+     */
+    private static final class HorizontalSlide {
+        private final float startX;
+        private final float targetX;
+        private final float duration;
+        private float elapsed;
+
+        private HorizontalSlide(float startX, float targetX) {
+            this.startX = startX;
+            this.targetX = targetX;
+            float normalizedDistance = MathUtils.clamp(
+                    Math.abs(targetX - startX) / FruitRules.BOARD_WIDTH,
+                    0f,
+                    1f
+            );
+            this.duration = MathUtils.lerp(
+                    AI_SLIDE_MIN_SECONDS,
+                    AI_SLIDE_MAX_SECONDS,
+                    (float) Math.sqrt(normalizedDistance)
+            );
+        }
+
+        private float advance(float delta) {
+            elapsed = Math.min(
+                    duration,
+                    elapsed + Math.max(0f, delta)
+            );
+            float progress = duration <= 0f ? 1f : elapsed / duration;
+            float eased = progress * progress * (3f - 2f * progress);
+            return MathUtils.lerp(startX, targetX, eased);
+        }
+
+        private boolean finished() {
+            return elapsed >= duration;
+        }
+    }
 
     private static final class MergeCue {
         private final float x;
