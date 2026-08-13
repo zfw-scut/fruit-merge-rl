@@ -20,7 +20,9 @@
 | `AUX-R34` | `auxiliary-action-rank-active-r3`的34M权重 | `AUX-R24`续训到34M | 已结束对照 | 同上 |
 | `AUX-B4` | `auxiliary-action-single-step-branch-r4` | 24M父轨迹加4M旁路 | 已结束对照 | [`model-auxiliary-action-single-step-branch-r4.md`](../model_evaluations/model-auxiliary-action-single-step-branch-r4.md) |
 | `SAB-128` | `auxiliary-action-structured-branch-128m-r5` | 零初速度新物理；128M父轨迹加12M旁路，30 FPS训练 | 当前来源模型 | [`model-auxiliary-action-structured-branch-128m-r5.md`](../model_evaluations/model-auxiliary-action-structured-branch-128m-r5.md) |
-| `SAB-T120` | `structured-128m-to-120fps-transfer-r1` | `SAB-128`权重迁移；120 FPS适应16M | 当前代表模型 | [`model-structured-128m-to-120fps-transfer-r1.md`](../model_evaluations/model-structured-128m-to-120fps-transfer-r1.md) |
+| `SAB-T120` | `structured-128m-to-120fps-transfer-r1` | `SAB-128`权重迁移；120 FPS适应16M | 禁用快进前代表模型 | [`model-structured-128m-to-120fps-transfer-r1.md`](../model_evaluations/model-structured-128m-to-120fps-transfer-r1.md) |
+| `SAB-FF120` | `sab-full-fall-t120-16m-r1` | `SAB-T120`权重迁移；完整逐帧120 FPS适应16M，无旁路 | 当前完整逐帧对照 | [`model-sab-full-fall-t120-16m-b2m-r2.md`](../model_evaluations/model-sab-full-fall-t120-16m-b2m-r2.md) |
+| `SAB-FF120-B2` | `sab-full-fall-t120-16m-b2m-r2` | `SAB-FF120`精确8M恢复；续训至16M并加入2.097M旁路 | 已结束对照 | 同上 |
 | `RV2` | `reward-v2-r1` | `spatial_v2`奖励实验 | 已结束实验 | [`model-reward-v2-r1.md`](../model_evaluations/model-reward-v2-r1.md) |
 | `RV21` | `reward-v2.1-r1` | `spatial_v2_1`奖励实验 | 已结束实验 | [`model-reward-v2-1-r1.md`](../model_evaluations/model-reward-v2-1-r1.md) |
 

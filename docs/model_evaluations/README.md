@@ -1,8 +1,9 @@
 # 模型评估知识库
 
-> 物理身份说明：`auxiliary-action-structured-branch-128m-r5` 与
-> `structured-128m-to-120fps-transfer-r1` 属于合成水果初速度归零的新物理；更早模型属于
-> 合成水果继承来源动量的旧物理。两种身份不得作未标注的同分布比较。
+> 物理身份说明：`sab-full-fall-t120-16m-r1`与`-b2m-r2`属于当前完整逐帧下落物理；
+> `auxiliary-action-structured-branch-128m-r5`与`structured-128m-to-120fps-transfer-r1`
+> 属于禁用快进前的零初速度物理；更早模型属于合成水果继承来源动量的旧物理。三种身份
+> 不得作未标注的同分布比较。
 
 - 状态：当前模型代际评估的统一入口
 - 目标：让后续 Agent 在修改模型、奖励或训练流程前，先理解已有证据、失败表现和待验证原因
@@ -31,6 +32,7 @@
 | `auxiliary-action-single-step-branch-r4` | 同上，24M父轨迹 + 4M隔离单步旁路样本 | `bdf04ae` | [`model-auxiliary-action-single-step-branch-r4.md`](model-auxiliary-action-single-step-branch-r4.md) | 30/120 FPS为4668.89/4347.91；低于辅助首轮3.73%/2.87%，但高于5层Fast 9.39%/11.56%，旁路框架保留但不升级为效果默认 |
 | `auxiliary-action-structured-branch-128m-r5` | `score_v1`，128M父轨迹 + 12M隔离单步旁路 + 结构化首次接触头 | `2e0f836` | [`model-auxiliary-action-structured-branch-128m-r5.md`](model-auxiliary-action-structured-branch-128m-r5.md) | **零初速度新物理、30 FPS训练**；30/120 FPS局均分7161.42/6551.90，完整来源run与最终索引已归档，作为120 FPS迁移起点保留 |
 | `structured-128m-to-120fps-transfer-r1` | `score_v1`，128M结构化旁路 → 120 FPS weights-only物理域迁移 | `4dd76b4` | [`model-structured-128m-to-120fps-transfer-r1.md`](model-structured-128m-to-120fps-transfer-r1.md) | **零初速度新物理、120 FPS训练**；30/120 FPS局均分8006.41/7568.18，L11消除64.04%/59.52%，同seed显著高于来源，单独登记 |
+| `sab-full-fall-t120-16m-r1` / `sab-full-fall-t120-16m-b2m-r2` | `score_v1`，完整逐帧120 FPS迁移；8M后无旁路/2.097M旁路分叉 | `1b54284` / `106a73b` | [`model-sab-full-fall-t120-16m-b2m-r2.md`](model-sab-full-fall-t120-16m-b2m-r2.md) | **当前完整逐帧物理**；无旁路30/120 FPS为6745.23/6289.67，旁路版低131.98/100.43分，不升级旁路版 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
 | `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线；墙边投放增加属于常见策略，不能单独判为缺陷 |
 
@@ -89,5 +91,8 @@
 - 五层Fast从24M续训至128M后双帧率均分显著提高并超过辅助首轮，但只有一个训练seed，
   恢复时Replay重新预热；它使用5.33倍transition且中位分仍低于辅助首轮，不能据此宣称
   简洁基线具有更高样本效率或辅助动作无效；
+- 完整逐帧120 FPS的无旁路/旁路分叉已完成同4096 seed最终比较；旁路版低1.96%/1.60%，
+  但恢复时主Replay重新预热且只有一个训练seed，因此结论只覆盖当前完整续训流程，不是旁路
+  loss的纯单因素因果估计；
 - 训练完成事件与最后一次资源采样仍发生在内部产物清单之后，使`monitoring.jsonl`和
   `resources.jsonl`比内部清单多一小段；外层迁移归档哈希已独立核对，不影响迁移完整性。
