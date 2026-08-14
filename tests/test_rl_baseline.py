@@ -387,6 +387,26 @@ class RewardTrainingConfigTest(unittest.TestCase):
 
 
 class AutoScaleAndCheckpointTest(unittest.TestCase):
+    def test_training_drop_limit_is_disabled_by_default(self):
+        config = TrainingConfig()
+        self.assertEqual(config.max_episode_drops, 0)
+        with self.assertRaisesRegex(ValueError, 'cannot be negative'):
+            TrainingConfig(max_episode_drops=-1)
+
+    def test_training_drop_limit_can_remain_bounded_for_smoke_tests(self):
+        steps = torch.tensor((999, 1000, 1001), dtype=torch.int64)
+        trainer = object.__new__(BaselineTrainer)
+        trainer.config = TrainingConfig(max_episode_drops=0)
+        self.assertEqual(
+            trainer._training_drop_limit_reached(steps).tolist(),
+            [False, False, False],
+        )
+        trainer.config = TrainingConfig(max_episode_drops=1000)
+        self.assertEqual(
+            trainer._training_drop_limit_reached(steps).tolist(),
+            [False, True, True],
+        )
+
     def test_training_physics_profile_is_explicit_and_validated(self):
         with self.assertRaisesRegex(ValueError, '30 or 120'):
             TrainingConfig(training_physics_fps=60)

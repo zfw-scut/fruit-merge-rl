@@ -383,7 +383,9 @@ class TrainingConfig:
     finalization_reserve_seconds: float = 1800.0
     log_interval_seconds: float = 10.0
     checkpoint_interval_seconds: float = 1800.0
-    max_episode_drops: int = 1000
+    # 0 disables the training-only episode horizon. Positive values remain
+    # available for bounded smoke tests and debugging.
+    max_episode_drops: int = 0
     stage_pilot_envs: int = 256
     stage_pilot_max_drops: int = 128
     model: ModelConfig = field(default_factory=ModelConfig)
@@ -412,6 +414,8 @@ class TrainingConfig:
             raise ValueError('total_transitions must be positive')
         if self.max_wall_seconds < 0.0:
             raise ValueError('max_wall_seconds cannot be negative')
+        if self.max_episode_drops < 0:
+            raise ValueError('max_episode_drops cannot be negative')
         if self.stage_pilot_envs <= 0:
             raise ValueError('stage_pilot_envs must be positive')
         if self.stage_pilot_max_drops <= 0:

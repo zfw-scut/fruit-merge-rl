@@ -10,7 +10,7 @@ max_wall_seconds = 86400.0
 finalization_reserve_seconds = 14400.0
 log_interval_seconds = 10.0
 checkpoint_interval_seconds = 1800.0
-max_episode_drops = 1000
+max_episode_drops = 0
 stage_pilot_envs = 256
 stage_pilot_max_drops = 128
 

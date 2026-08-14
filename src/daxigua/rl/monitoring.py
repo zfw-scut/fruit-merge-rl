@@ -169,6 +169,16 @@ class _DashboardState:
                     'eval_created_l9_per_1000',
                     'eval_created_l10_per_1000',
                     'eval_created_l11_per_1000',
+                    'active_episode_drops_mean',
+                    'active_episode_drops_p50',
+                    'active_episode_drops_p90',
+                    'active_episode_drops_p99',
+                    'active_episode_drops_max',
+                    'long_episode_fraction_1000',
+                    'long_episode_fraction_2000',
+                    'long_episode_fraction_5000',
+                    'long_episode_fraction_10000',
+                    'active_fruit_count_max',
                 )
                 for name in optional_names:
                     if name in payload:

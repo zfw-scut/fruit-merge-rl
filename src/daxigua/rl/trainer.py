@@ -584,10 +584,12 @@ class BaselineTrainer:
             self.stage_thresholds = (8, 16, 32)
             return self.stage_thresholds
         pilot_envs = min(self.active_envs, self.config.stage_pilot_envs)
-        pilot_max_drops = min(
-            self.config.max_episode_drops,
-            self.config.stage_pilot_max_drops,
-        )
+        pilot_max_drops = self.config.stage_pilot_max_drops
+        if self.config.max_episode_drops > 0:
+            pilot_max_drops = min(
+                self.config.max_episode_drops,
+                pilot_max_drops,
+            )
         pilot_mask = torch.zeros(
             self.config.max_envs, dtype=torch.bool, device=self.device
         )
@@ -611,7 +613,7 @@ class BaselineTrainer:
             if not bool(enabled.any().item()):
                 break
             result = self._step(self._random_actions(), enabled)
-            time_limit = result.observation.step_count >= self.config.max_episode_drops
+            time_limit = result.observation.step_count >= pilot_max_drops
             newly_finished = enabled & (result.physics.done | time_limit)
             lengths[newly_finished] = result.observation.step_count[newly_finished]
             finished |= newly_finished
@@ -643,7 +645,10 @@ class BaselineTrainer:
         if self.device.type != 'cuda':
             return
         q1, q2, q3 = self.stage_thresholds
-        upper = max(q3 + 1, min(self.config.max_episode_drops, q3 * 2))
+        upper = q3 * 2
+        if self.config.max_episode_drops > 0:
+            upper = min(self.config.max_episode_drops, upper)
+        upper = max(q3 + 1, upper)
         bounds = ((0, q1), (q1, q2), (q2, q3), (q3, upper))
         targets = torch.zeros(
             self.config.max_envs, dtype=torch.int64, device=self.device
@@ -661,7 +666,7 @@ class BaselineTrainer:
                 low, high, (rows.numel(),), device=self.device
             )
         original_targets = targets.clone()
-        for _ in range(self.config.max_episode_drops * 3):
+        for _ in range(upper * 3):
             pending = self._enabled_mask(
                 self.simulator.step_count < targets
             )
@@ -710,7 +715,7 @@ class BaselineTrainer:
         self.dashboard.event('warmup_started', '开始分阶段预热 Replay')
         self._initialize_reward()
         max_rounds = max(
-            self.config.max_episode_drops * 20,
+            self.config.stage_pilot_max_drops * 20,
             math.ceil(target / self.active_envs) * 100,
         )
         for _ in range(max_rounds):
@@ -767,8 +772,8 @@ class BaselineTrainer:
                     stages,
                     action_effects,
                 )
-            timeout = (
-                result.observation.step_count >= self.config.max_episode_drops
+            timeout = self._training_drop_limit_reached(
+                result.observation.step_count
             )
             self._reset_finished(
                 self._enabled_mask() & (result.physics.done | timeout)
@@ -1038,12 +1043,16 @@ class BaselineTrainer:
             )).sum(dim=1)
         self.actor_metric_decisions += selection.batch_size
 
+    def _training_drop_limit_reached(self, step_count):
+        if self.config.max_episode_drops <= 0:
+            return torch.zeros_like(step_count, dtype=torch.bool)
+        return step_count >= self.config.max_episode_drops
+
     def _episode_finished(self, result):
         return (
             result.physics.done[:self.active_envs]
-            | (
+            | self._training_drop_limit_reached(
                 result.observation.step_count[:self.active_envs]
-                >= self.config.max_episode_drops
             )
         )
 
@@ -1384,6 +1393,28 @@ class BaselineTrainer:
         selected_rank_correlation = rank_correlation_from_sums(
             actor_values[3:]
         )
+        active_episode_drops = self.simulator.step_count[
+            :self.active_envs
+        ].to(torch.float32)
+        drop_quantiles = torch.quantile(
+            active_episode_drops,
+            torch.tensor((0.50, 0.90, 0.99), device=self.device),
+        )
+        active_fruit_counts = self.simulator.active[
+            :self.active_envs
+        ].sum(dim=1)
+        long_episode_values = torch.stack((
+            active_episode_drops.mean(),
+            drop_quantiles[0],
+            drop_quantiles[1],
+            drop_quantiles[2],
+            active_episode_drops.max(),
+            (active_episode_drops >= 1000).to(torch.float32).mean(),
+            (active_episode_drops >= 2000).to(torch.float32).mean(),
+            (active_episode_drops >= 5000).to(torch.float32).mean(),
+            (active_episode_drops >= 10000).to(torch.float32).mean(),
+            active_fruit_counts.to(torch.float32).max(),
+        )).detach().cpu().tolist()
         payload = {
             'phase': 'training',
             **self._progress(),
@@ -1444,6 +1475,16 @@ class BaselineTrainer:
                 sum(self.metric_window_drops) / len(self.metric_window_drops)
                 if self.metric_window_drops else None
             ),
+            'active_episode_drops_mean': long_episode_values[0],
+            'active_episode_drops_p50': long_episode_values[1],
+            'active_episode_drops_p90': long_episode_values[2],
+            'active_episode_drops_p99': long_episode_values[3],
+            'active_episode_drops_max': long_episode_values[4],
+            'long_episode_fraction_1000': long_episode_values[5],
+            'long_episode_fraction_2000': long_episode_values[6],
+            'long_episode_fraction_5000': long_episode_values[7],
+            'long_episode_fraction_10000': long_episode_values[8],
+            'active_fruit_count_max': long_episode_values[9],
             'last_fast_eval_score': self.last_fast_eval_score,
             'last_accurate_eval_score': self.last_accurate_eval_score,
             'active_learning_action_fraction': (
