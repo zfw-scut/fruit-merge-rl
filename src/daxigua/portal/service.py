@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import urlopen
 
 from daxigua.portal.analysis_data import scan_analysis_datasets
+from daxigua.rl.merge_distance_status import scan_merge_distance_runs
 from daxigua.rl.merge_potential_status import scan_merge_potential_runs
 
 
@@ -479,6 +480,7 @@ class PortalServer:
                         self._send(200, scan_analysis_datasets(PROJECT_ROOT))
                     elif path == '/api/dashboard/status':
                         local_merge = scan_merge_potential_runs(PROJECT_ROOT)
+                        local_distance = scan_merge_distance_runs(PROJECT_ROOT)
                         try:
                             dashboard = registry.snapshots().get(
                                 'training_dashboard'
@@ -500,13 +502,27 @@ class PortalServer:
                                     not isinstance(remote_merge, dict)
                                     or not remote_merge.get('available')):
                                 payload['merge_potential'] = local_merge
+                            remote_distance = payload.get('merge_distance')
+                            if (
+                                    not isinstance(remote_distance, dict)
+                                    or not remote_distance.get('available')):
+                                payload['merge_distance'] = local_distance
                             self._send(200, {'available': True, 'payload': payload})
                         except (OSError, URLError, TimeoutError, json.JSONDecodeError):
                             self._send(200, {
-                                'available': local_merge['available'],
+                                'available': (
+                                    local_merge['available']
+                                    or local_distance['available']
+                                ),
                                 'payload': (
-                                    {'merge_potential': local_merge}
-                                    if local_merge['available'] else None
+                                    {
+                                        'merge_potential': local_merge,
+                                        'merge_distance': local_distance,
+                                    }
+                                    if (
+                                        local_merge['available']
+                                        or local_distance['available']
+                                    ) else None
                                 ),
                             })
                     else:

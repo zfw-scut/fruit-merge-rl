@@ -231,6 +231,8 @@ class MergeDistanceDataTests(unittest.TestCase):
             labeled = load_labeled_scene_shard(labeled_path)
 
         self.assertEqual(manifest['scene_rows'], 2)
+        self.assertEqual(manifest['status'], 'complete')
+        self.assertEqual(manifest['completed_scene_shards'], 1)
         self.assertEqual(labeled['t_merge'][:, 0].tolist(), [4, 2])
         self.assertEqual(
             labeled['outcome'][:, 0].tolist(),
@@ -332,12 +334,14 @@ class MergeDistanceTrainingTests(unittest.TestCase):
                 max_train_batches=1, max_eval_batches=1,
                 early_stopping_patience=1, compile_model=False,
                 compile_mode='reduce-overhead', autocast_bfloat16=False,
+                telemetry_interval_seconds=10.0,
             )
             result = train(args)
             checkpoint = output / 'checkpoints' / 'final.pt'
             model, payload = load_predictor_checkpoint(checkpoint, 'cpu')
 
         self.assertEqual(result['status'], 'complete')
+        self.assertEqual(result['phase'], 'completed')
         self.assertEqual(payload['purpose'], 'merge_distance_predictor')
         self.assertEqual(model.config.horizons, (1, 2, 4, 8))
 

@@ -1940,6 +1940,7 @@ body {
 .training-chart-tabs b { font-size: 10px; }
 .training-chart-tabs small { overflow: hidden; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 .training-native-chart { height: 420px; }
+.merge-distance-chart { height: 320px; margin-top: 18px; }
 
 .training-details-stack { display: grid; gap: 10px; }
 .training-disclosure { overflow: hidden; }

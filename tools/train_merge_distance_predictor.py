@@ -204,6 +204,7 @@ def _add_train_arguments(parser):
     parser.add_argument('--max-train-batches', type=int, default=0)
     parser.add_argument('--max-eval-batches', type=int, default=0)
     parser.add_argument('--early-stopping-patience', type=int, default=4)
+    parser.add_argument('--telemetry-interval-seconds', type=float, default=10.0)
     parser.add_argument(
         '--compile-model',
         action=argparse.BooleanOptionalAction,
@@ -645,6 +646,8 @@ def _load_dataset_manifest(dataset_dir):
     payload = json.loads(path.read_text(encoding='utf-8'))
     if payload.get('purpose') != 'merge_distance_predictor_dataset':
         raise ValueError('dataset manifest has the wrong purpose')
+    if payload.get('status') not in (None, 'complete'):
+        raise ValueError('predictor dataset labeling is not complete')
     return payload
 
 
@@ -888,6 +891,8 @@ def train(args):
         )
     if args.epochs <= 0 or args.batch_size <= 0:
         raise ValueError('epochs and batch_size must be positive')
+    if args.telemetry_interval_seconds <= 0:
+        raise ValueError('telemetry_interval_seconds must be positive')
     manifest = _load_dataset_manifest(args.dataset_dir)
     horizons = tuple(manifest['horizons'])
     config = MergeDistanceConfig(
@@ -939,6 +944,7 @@ def train(args):
         'format_version': 1,
         'purpose': 'merge_distance_predictor_training',
         'status': 'running',
+        'phase': 'initializing',
         'created_at_utc': _utc_now(),
         'git_revision': _git_revision(),
         'dataset_dir': str(Path(args.dataset_dir).resolve()),
@@ -954,10 +960,16 @@ def train(args):
             'dataset_dir': str(args.dataset_dir),
             'output_dir': str(args.output_dir),
         },
+        'total_epochs': int(args.epochs),
+        'current_epoch': 0,
+        'completed_epochs': 0,
+        'progress_fraction': 0.0,
     }
     _atomic_json(output_dir / 'manifest.json', run_manifest)
 
     generator = torch.Generator().manual_seed(args.seed)
+    last_completed_epoch = 0
+    last_telemetry = time.perf_counter()
     try:
         for epoch in range(1, int(args.epochs) + 1):
             model.train()
@@ -1023,6 +1035,25 @@ def train(args):
                     loss_sum += float(loss.detach().item())
                     batches += 1
                     fruit_samples += int(valid.sum().item())
+                    now = time.perf_counter()
+                    if (
+                            now - last_telemetry
+                            >= float(args.telemetry_interval_seconds)):
+                        _atomic_json(output_dir / 'manifest.json', {
+                            **run_manifest,
+                            'phase': 'training',
+                            'updated_at_utc': _utc_now(),
+                            'elapsed_seconds': now - started,
+                            'current_epoch': epoch,
+                            'completed_epochs': epoch - 1,
+                            'progress_fraction': (
+                                (epoch - 1) / int(args.epochs)
+                            ),
+                            'epoch_batch': batches,
+                            'train_loss': loss_sum / max(1, batches),
+                            'train_resolved_fruit_samples': fruit_samples,
+                        })
+                        last_telemetry = now
                     if (
                             args.max_train_batches > 0
                             and batches >= int(args.max_train_batches)):
@@ -1031,6 +1062,18 @@ def train(args):
                         args.max_train_batches > 0
                         and batches >= int(args.max_train_batches)):
                     break
+            _atomic_json(output_dir / 'manifest.json', {
+                **run_manifest,
+                'phase': 'validation',
+                'updated_at_utc': _utc_now(),
+                'elapsed_seconds': time.perf_counter() - started,
+                'current_epoch': epoch,
+                'completed_epochs': epoch - 1,
+                'progress_fraction': (epoch - 1) / int(args.epochs),
+                'epoch_batch': batches,
+                'train_loss': loss_sum / max(1, batches),
+                'train_resolved_fruit_samples': fruit_samples,
+            })
             validation = _evaluate_model(
                 model,
                 paths,
@@ -1070,6 +1113,22 @@ def train(args):
                 )
             else:
                 stale_epochs += 1
+            last_completed_epoch = epoch
+            _atomic_json(output_dir / 'manifest.json', {
+                **run_manifest,
+                'phase': 'training',
+                'updated_at_utc': _utc_now(),
+                'elapsed_seconds': time.perf_counter() - started,
+                'current_epoch': epoch,
+                'completed_epochs': epoch,
+                'progress_fraction': epoch / int(args.epochs),
+                'epoch_batch': batches,
+                'train_loss': epoch_record['train_loss'],
+                'train_resolved_fruit_samples': fruit_samples,
+                'latest_validation': validation,
+                'best_epoch': best_epoch,
+                'best_validation_nll': best_nll,
+            })
             print(json.dumps(epoch_record, ensure_ascii=False), flush=True)
             if stale_epochs >= int(args.early_stopping_patience):
                 break
@@ -1077,6 +1136,7 @@ def train(args):
         _atomic_json(output_dir / 'manifest.json', {
             **run_manifest,
             'status': 'failed',
+            'phase': 'failed',
             'updated_at_utc': _utc_now(),
             'failure': f'{type(error).__name__}: {error}',
         })
@@ -1085,6 +1145,17 @@ def train(args):
     best_path = output_dir / 'checkpoints' / 'best.pt'
     best = torch.load(best_path, map_location='cpu', weights_only=False)
     model.load_state_dict(best['model_state'], strict=True)
+    _atomic_json(output_dir / 'manifest.json', {
+        **run_manifest,
+        'phase': 'evaluation',
+        'updated_at_utc': _utc_now(),
+        'elapsed_seconds': time.perf_counter() - started,
+        'current_epoch': last_completed_epoch,
+        'completed_epochs': last_completed_epoch,
+        'progress_fraction': 1.0,
+        'best_epoch': best_epoch,
+        'best_validation_nll': best_nll,
+    })
     test_metrics = _evaluate_model(
         model,
         paths,
@@ -1109,10 +1180,14 @@ def train(args):
     final_manifest = {
         **run_manifest,
         'status': 'complete',
+        'phase': 'completed',
         'updated_at_utc': _utc_now(),
         'elapsed_seconds': time.perf_counter() - started,
         'best_epoch': best_epoch,
         'best_validation_nll': best_nll,
+        'current_epoch': last_completed_epoch,
+        'completed_epochs': last_completed_epoch,
+        'progress_fraction': 1.0,
         'test_metrics': test_metrics,
         'checkpoint': str(final_path.resolve()),
         'checkpoint_sha256': _sha256(final_path),

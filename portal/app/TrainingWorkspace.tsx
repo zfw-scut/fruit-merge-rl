@@ -55,6 +55,61 @@ type MergePotentialStatus = {
   runs?: MergePotentialRun[];
 };
 
+type MergeDistanceHistoryRow = {
+  epoch?: number;
+  train_loss?: number | null;
+  validation_nll?: number | null;
+  validation_lifecycle_weighted_nll?: number | null;
+  validation_exact_bin_accuracy?: number | null;
+  validation_adjacent_bin_accuracy?: number | null;
+};
+
+type MergeDistanceRun = {
+  id: string;
+  name: string;
+  run_dir: string;
+  kind: "collection" | "labeling" | "training";
+  status: string;
+  phase?: string;
+  stale?: boolean;
+  progress_fraction?: number;
+  elapsed_seconds?: number;
+  target_episodes?: number;
+  completed_episodes?: number;
+  transitions?: number;
+  env_steps_per_second?: number;
+  parallel_envs?: number;
+  scene_rows?: number;
+  merge_source_rows?: number;
+  target_shards?: number;
+  completed_shards?: number;
+  resolved_fruit_samples?: number;
+  unique_observed_fruits?: number;
+  current_epoch?: number;
+  completed_epochs?: number;
+  total_epochs?: number;
+  epoch_batch?: number;
+  train_loss?: number | null;
+  validation_nll?: number | null;
+  validation_lifecycle_weighted_nll?: number | null;
+  validation_exact_bin_accuracy?: number | null;
+  validation_adjacent_bin_accuracy?: number | null;
+  best_epoch?: number;
+  best_validation_nll?: number | null;
+  parameter_count?: number;
+  checkpoint_name?: string | null;
+  checkpoint_sha256?: string | null;
+  cuda_device_name?: string | null;
+  history?: MergeDistanceHistoryRow[];
+  failure?: string | null;
+};
+
+type MergeDistanceStatus = {
+  available: boolean;
+  current?: MergeDistanceRun | null;
+  runs?: MergeDistanceRun[];
+};
+
 export type QueueItem = {
   id: string;
   name: string;
@@ -88,6 +143,7 @@ export type DashboardPayload = {
     counts?: Record<string, number>;
   };
   merge_potential?: MergePotentialStatus;
+  merge_distance?: MergeDistanceStatus;
 };
 
 export type DashboardStatus = {
@@ -406,6 +462,113 @@ function MergePotentialPanel({ status }: { status?: MergePotentialStatus }) {
   );
 }
 
+const MERGE_DISTANCE_STATUS_LABELS: Record<string, string> = {
+  running: "运行中",
+  collection: "场景采集中",
+  initializing: "初始化",
+  training: "训练中",
+  validation: "验证中",
+  evaluation: "最终评估中",
+  completed: "已经完成",
+  labeling: "生成标签中",
+  complete: "已经完成",
+  failed: "执行失败",
+  interrupted: "已中断",
+  wall_time_reached: "达到时间上限",
+};
+
+const MERGE_DISTANCE_KIND_LABELS: Record<string, string> = {
+  collection: "场景采集",
+  labeling: "未来事件标签",
+  training: "预测器训练",
+};
+
+function mergeDistanceChartOption(history: MergeDistanceHistoryRow[]): EChartsOption {
+  const definitions = [
+    ["train_loss", "训练Loss"],
+    ["validation_nll", "验证NLL"],
+    ["validation_lifecycle_weighted_nll", "生命周期加权NLL"],
+  ] as const;
+  const values = definitions.flatMap(([key]) => history.map((row) => numeric(row[key])).filter((value): value is number => value !== null));
+  const axis = niceAxis(values, "decimal");
+  return {
+    animationDurationUpdate: 350,
+    color: SERIES_COLORS,
+    grid: { left: 68, right: 28, top: 50, bottom: 58 },
+    legend: { top: 4, type: "scroll", textStyle: { color: "#627187", fontSize: 11 } },
+    tooltip: { trigger: "axis", backgroundColor: "rgba(248,250,253,.98)", borderColor: "rgba(91,109,136,.16)", textStyle: { color: "#26354c" } },
+    toolbox: { right: 8, top: 0, feature: { dataZoom: { yAxisIndex: "none" }, restore: {} }, iconStyle: { borderColor: "#6c7a90" } },
+    xAxis: { type: "value", name: "Epoch", minInterval: 1, axisLabel: { color: "#7c899c" }, splitLine: { lineStyle: { color: "rgba(77,94,120,.08)" } } },
+    yAxis: { type: "value", name: "Loss / NLL", min: axis.min, max: axis.max, interval: axis.interval, axisLabel: { color: "#7c899c", formatter: (value: number) => value.toFixed(axis.digits) }, splitLine: { lineStyle: { color: "rgba(77,94,120,.09)" } } },
+    dataZoom: [{ type: "inside", xAxisIndex: 0, filterMode: "none", zoomOnMouseWheel: "shift", moveOnMouseMove: true }],
+    series: definitions.map(([key, name], index) => ({
+      name,
+      type: "line",
+      showSymbol: history.length < 20,
+      symbolSize: 6,
+      connectNulls: true,
+      lineStyle: { width: index === 0 ? 2.4 : 1.8 },
+      data: history.map((row) => [numeric(row.epoch), numeric(row[key])]).filter((point) => point[0] !== null && point[1] !== null),
+    })),
+  };
+}
+
+function MergeDistancePanel({ status }: { status?: MergeDistanceStatus }) {
+  const run = status?.current;
+  if (!status?.available || !run) return null;
+  const progress = Math.max(0, Math.min(1, numeric(run.progress_fraction) ?? 0));
+  const stateKey = ["running", "labeling"].includes(run.status) ? (run.phase || run.status) : run.status;
+  const stateLabel = run.stale ? "更新已停滞" : (MERGE_DISTANCE_STATUS_LABELS[stateKey] ?? stateKey);
+  const history = run.history ?? [];
+  const checkpointSha = run.checkpoint_sha256 ? run.checkpoint_sha256.slice(0, 12) : "哈希待写入";
+  return (
+    <section className="merge-potential-section merge-distance-section">
+      <div className="section-heading-inline">
+        <div><span>MERGE DISTANCE PREDICTOR</span><h2>合成步距预测工作流</h2><p>SAB-128 场景采集、未来事件标签和轻量预测器训练使用同一只读进度入口。</p></div>
+        <span className={`merge-status-chip merge-status-${run.stale ? "stale" : run.status}`}><Activity size={14} /> {stateLabel}</span>
+      </div>
+      <div className="merge-potential-current">
+        <div><b>{run.name}</b><span>{run.run_dir}</span></div>
+        <strong>{(progress * 100).toFixed(2)}%</strong>
+        <div className="merge-progress-track"><motion.span initial={false} animate={{ width: `${progress * 100}%` }} /></div>
+      </div>
+
+      {run.kind === "training" ? (
+        <div className="training-summary-grid merge-summary-grid">
+          <SummaryMetric icon={ListOrdered} label="训练轮次" value={`${count(run.current_epoch)} / ${count(run.total_epochs)}`} note={`当前轮次 ${count(run.epoch_batch)} 个batch`} />
+          <SummaryMetric icon={Activity} label="训练Loss" value={decimal(run.train_loss, 5)} note={`最佳轮次 ${count(run.best_epoch)}`} />
+          <SummaryMetric icon={Gauge} label="验证NLL" value={decimal(run.validation_nll, 5)} note={`最佳 ${decimal(run.best_validation_nll, 5)}`} />
+          <SummaryMetric icon={CheckCircle2} label="精确区间准确率" value={percent(run.validation_exact_bin_accuracy, true)} note={`相邻区间 ${percent(run.validation_adjacent_bin_accuracy, true)}`} />
+          <SummaryMetric icon={Timer} label="已运行" value={duration(run.elapsed_seconds)} note={`${count(run.parameter_count)} 个参数`} />
+        </div>
+      ) : run.kind === "labeling" ? (
+        <div className="training-summary-grid merge-summary-grid">
+          <SummaryMetric icon={ListOrdered} label="已处理分片" value={count(run.completed_shards)} note={`目标 ${count(run.target_shards)}`} />
+          <SummaryMetric icon={Database} label="场景样本" value={count(run.scene_rows)} note="固定64槽完整状态" />
+          <SummaryMetric icon={Activity} label="有效监督槽位" value={count(run.resolved_fruit_samples)} note={`${count(run.unique_observed_fruits)} 个水果生命周期`} />
+          <SummaryMetric icon={Timer} label="已运行" value={duration(run.elapsed_seconds)} note="未来未知样本不进入loss" />
+        </div>
+      ) : (
+        <div className="training-summary-grid merge-summary-grid">
+          <SummaryMetric icon={Database} label="已完成对局" value={count(run.completed_episodes)} note={`目标 ${count(run.target_episodes)}`} />
+          <SummaryMetric icon={Activity} label="采集吞吐" value={`${decimal(run.env_steps_per_second, 0)} /秒`} note={`${count(run.parallel_envs)} 个并行环境`} />
+          <SummaryMetric icon={ListOrdered} label="完整场景" value={count(run.scene_rows)} note={`${count(run.merge_source_rows)} 条合成源事件`} />
+          <SummaryMetric icon={Gauge} label="策略投放" value={count(run.transitions)} note="真实无投放上限" />
+          <SummaryMetric icon={Timer} label="已运行" value={duration(run.elapsed_seconds)} note={run.cuda_device_name || "CUDA设备待记录"} />
+        </div>
+      )}
+
+      {run.kind === "training" && history.length > 0 && <EChart option={mergeDistanceChartOption(history)} className="training-native-chart merge-distance-chart" />}
+      <div className="merge-potential-meta">
+        <span><b>当前阶段</b>{MERGE_DISTANCE_KIND_LABELS[run.kind] ?? run.kind}</span>
+        <span><b>模型</b>{run.checkpoint_name || "训练中尚无final.pt"} · {checkpointSha}</span>
+        <span><b>任务记录</b>已发现 {status.runs?.length ?? 1} 个阶段或运行</span>
+        {run.failure && <span className="merge-failure"><b>异常</b>{run.failure}</span>}
+      </div>
+    </section>
+  );
+}
+
 export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) {
   const [chartId, setChartId] = useState<ChartId>("score");
   const payload = dashboard.payload;
@@ -519,6 +682,7 @@ export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) 
 
           </>}
 
+          <MergeDistancePanel status={payload?.merge_distance} />
           <MergePotentialPanel status={payload?.merge_potential} />
 
           <div className="training-data-note"><AlertCircle size={15} /><span>界面只读展示聚合数据，不向训练进程发送控制命令。图表缩放只改变本地视图，不修改训练产物。</span></div>

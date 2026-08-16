@@ -93,6 +93,10 @@ PYTHONPATH=src python tools/train_merge_distance_predictor.py train \
 `best.pt`，早停后在固定测试集上生成最终指标和`final.pt`。Linux云端默认启用
 `torch.compile`；本地Windows只运行小型CPU接口预检，不执行正式训练。
 
+采集、标签和训练进度会进入Xigua Atlas的“实时训练”页。训练阶段默认每10秒原子更新
+运行清单，每个epoch追加训练loss和验证指标；既有8765遥测服务只读取这些小型文件，因此
+不需要为预测器单独启动面板，也不会把门户请求放进训练热路径。
+
 独立复核命令为：
 
 ```bash

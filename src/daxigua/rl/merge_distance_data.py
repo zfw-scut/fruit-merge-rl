@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+import time
 
 import torch
 
@@ -288,6 +290,10 @@ def _atomic_json(path, payload):
     temporary.replace(path)
 
 
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
 def label_scene_dataset(
         dataset_dir,
         *,
@@ -314,6 +320,7 @@ def label_scene_dataset(
         json.loads(source_manifest_path.read_text(encoding='utf-8'))
         if source_manifest_path.exists() else {}
     )
+    source_simulator = source_manifest.get('simulator_config') or {}
 
     scene_paths = table_shards(dataset_dir, 'scenes')
     if not scene_paths:
@@ -334,6 +341,35 @@ def label_scene_dataset(
     )
     del all_scene_keys
 
+    created_at = _utc_now()
+    started = time.perf_counter()
+    progress_base = {
+        'format_version': 1,
+        'purpose': 'merge_distance_predictor_dataset',
+        'source_dataset': str(dataset_dir.resolve()),
+        'source_identity': {
+            'checkpoint': source_manifest.get('checkpoint'),
+            'checkpoint_sha256': source_manifest.get('checkpoint_sha256'),
+            'physics_identity': source_manifest.get('physics_identity'),
+            'simulator_config': source_manifest.get('simulator_config'),
+            'physics_fps': source_simulator.get('physics_fps', 30),
+            'policy': source_manifest.get('policy'),
+            'git_revision': source_manifest.get('git_revision'),
+        },
+        'horizons': list(horizons),
+        'status': 'labeling',
+        'phase': 'labeling',
+        'created_at_utc': created_at,
+        'updated_at_utc': created_at,
+        'source_scene_shards': len(scene_paths),
+        'completed_scene_shards': 0,
+        'progress_fraction': 0.0,
+        'scene_rows': 0,
+        'resolved_fruit_samples': 0,
+    }
+    manifest_path = output_dir / 'dataset_manifest.json'
+    _atomic_json(manifest_path, progress_base)
+
     writer = ShardedTensorWriter(
         labeled_root,
         'scenes_labeled',
@@ -349,7 +385,7 @@ def label_scene_dataset(
         for name in split_names
     }
     try:
-        for path in scene_paths:
+        for shard_index, path in enumerate(scene_paths, start=1):
             payload = torch.load(path, map_location='cpu', weights_only=False)
             labeled = _label_scene_columns(
                 payload['columns'],
@@ -380,25 +416,42 @@ def label_scene_dataset(
                     flat,
                     minlength=12 * (len(horizons) + 2),
                 ))
+            _atomic_json(manifest_path, {
+                **progress_base,
+                'updated_at_utc': _utc_now(),
+                'completed_scene_shards': shard_index,
+                'progress_fraction': shard_index / len(scene_paths),
+                'scene_rows': int(writer.total_rows),
+                'resolved_fruit_samples': int(sum(
+                    split_fruit_counts.values()
+                )),
+                'elapsed_seconds': time.perf_counter() - started,
+            })
+    except Exception as error:
+        _atomic_json(manifest_path, {
+            **progress_base,
+            'status': 'failed',
+            'phase': 'failed',
+            'updated_at_utc': _utc_now(),
+            'scene_rows': int(writer.total_rows),
+            'resolved_fruit_samples': int(sum(
+                split_fruit_counts.values()
+            )),
+            'elapsed_seconds': time.perf_counter() - started,
+            'failure': f'{type(error).__name__}: {error}',
+        })
+        raise
     finally:
         writer.close()
 
     manifest = {
-        'format_version': 1,
-        'purpose': 'merge_distance_predictor_dataset',
-        'source_dataset': str(dataset_dir.resolve()),
-        'source_identity': {
-            'checkpoint': source_manifest.get('checkpoint'),
-            'checkpoint_sha256': source_manifest.get('checkpoint_sha256'),
-            'physics_identity': source_manifest.get('physics_identity'),
-            'simulator_config': source_manifest.get('simulator_config'),
-            'physics_fps': source_manifest.get('simulator_config', {}).get(
-                'physics_fps', 30
-            ),
-            'policy': source_manifest.get('policy'),
-            'git_revision': source_manifest.get('git_revision'),
-        },
-        'horizons': list(horizons),
+        **progress_base,
+        'status': 'complete',
+        'phase': 'completed',
+        'updated_at_utc': _utc_now(),
+        'completed_scene_shards': len(scene_paths),
+        'progress_fraction': 1.0,
+        'elapsed_seconds': time.perf_counter() - started,
         'class_semantics': {
             'horizon_classes': [
                 (
@@ -419,13 +472,14 @@ def label_scene_dataset(
         'scene_rows': int(writer.total_rows),
         'labeled_shards': int(writer.shard_count),
         'unique_observed_fruits': int(unique_scene_keys.numel()),
+        'resolved_fruit_samples': int(sum(split_fruit_counts.values())),
         'split_scene_counts': dict(split_scene_counts),
         'split_resolved_fruit_samples': dict(split_fruit_counts),
         'class_counts_by_level': {
             name: class_counts[name].tolist() for name in split_names
         },
     }
-    _atomic_json(output_dir / 'dataset_manifest.json', manifest)
+    _atomic_json(manifest_path, manifest)
     return manifest
 
 
