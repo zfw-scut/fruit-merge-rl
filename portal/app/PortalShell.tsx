@@ -35,6 +35,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import { EChart } from "./EChart";
 import { CURRENT_TRAINING, FEATURED_MODEL_IDS, MODELS, type ModelRecord } from "./model-data";
 import { ScenarioWorkspace } from "./ScenarioWorkspace";
@@ -47,7 +48,7 @@ const API = (() => {
   return `http://127.0.0.1:${port}`;
 })();
 
-type ViewId = "overview" | "models" | "documents" | "tools" | "live" | "lab";
+type ViewId = "overview" | "models" | "analysis" | "documents" | "tools" | "live" | "lab";
 type MetricId = "score30" | "score120" | "parameters" | "transitions" | "trainingHours";
 
 type DocumentRecord = {
@@ -111,6 +112,7 @@ type ToolChoices = {
 const NAVIGATION: Array<{ id: ViewId; label: string; hint: string; icon: LucideIcon }> = [
   { id: "overview", label: "总览", hint: "Overview", icon: LayoutDashboard },
   { id: "models", label: "模型图谱", hint: "Evidence", icon: BarChart3 },
+  { id: "analysis", label: "数据分析", hint: "Analytics", icon: Database },
   { id: "documents", label: "文档知识库", hint: "Knowledge", icon: BookOpenText },
   { id: "tools", label: "工具中心", hint: "Launchpad", icon: Wrench },
   { id: "live", label: "实时训练", hint: "Telemetry", icon: Activity },
@@ -804,6 +806,13 @@ export function PortalShell() {
                   <div className="reader-empty"><BookOpenText size={34} /><h2>等待文档索引</h2><p>请确认本地门户控制服务已经启动。</p></div>
                 )}
               </article>
+            </motion.section>
+          )}
+
+          {activeView === "analysis" && (
+            <motion.section key="analysis" className="page analysis-page" animate={pageEnter} exit={{ opacity: 0, y: -8 }} transition={pageTransition}>
+              <PageHeader eyebrow="STATISTICAL ANALYSIS" title="让统计关系可以被直接探索。" description="从表格追溯到条件概率、时间尺度和双因素交互；当前默认读取 SAB-128 Merge Potential 正式数据，后续统计可沿用同一数据集契约。" />
+              <AnalysisWorkspace apiBase={API} />
             </motion.section>
           )}
 

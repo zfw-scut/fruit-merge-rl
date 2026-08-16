@@ -18,6 +18,9 @@ from urllib.error import URLError
 from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import urlopen
 
+from daxigua.portal.analysis_data import scan_analysis_datasets
+from daxigua.rl.merge_potential_status import scan_merge_potential_runs
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DOCS_ROOT = PROJECT_ROOT / 'docs'
@@ -472,7 +475,10 @@ class PortalServer:
                         for tool_id, definition in TOOL_DEFINITIONS.items():
                             tools.append({**definition, 'process': snapshots.get(tool_id)})
                         self._send(200, {'tools': tools, 'choices': _choices()})
+                    elif path == '/api/analysis/datasets':
+                        self._send(200, scan_analysis_datasets(PROJECT_ROOT))
                     elif path == '/api/dashboard/status':
+                        local_merge = scan_merge_potential_runs(PROJECT_ROOT)
                         try:
                             dashboard = registry.snapshots().get(
                                 'training_dashboard'
@@ -487,9 +493,22 @@ class PortalServer:
                                     dashboard_url + '/api/status',
                                     timeout=1.5) as response:
                                 payload = json.loads(response.read().decode('utf-8'))
+                            if not isinstance(payload, dict):
+                                payload = {}
+                            remote_merge = payload.get('merge_potential')
+                            if (
+                                    not isinstance(remote_merge, dict)
+                                    or not remote_merge.get('available')):
+                                payload['merge_potential'] = local_merge
                             self._send(200, {'available': True, 'payload': payload})
                         except (OSError, URLError, TimeoutError, json.JSONDecodeError):
-                            self._send(200, {'available': False, 'payload': None})
+                            self._send(200, {
+                                'available': local_merge['available'],
+                                'payload': (
+                                    {'merge_potential': local_merge}
+                                    if local_merge['available'] else None
+                                ),
+                            })
                     else:
                         self._send(404, {'error': '接口不存在'})
                 except Exception as exc:

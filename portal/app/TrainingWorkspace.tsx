@@ -22,6 +22,39 @@ import { EChart } from "./EChart";
 type Scalar = number | string | boolean | null | undefined;
 type MetricRow = Record<string, unknown>;
 
+type MergePotentialRun = {
+  id: string;
+  name: string;
+  run_dir: string;
+  status: string;
+  stale?: boolean;
+  target_episodes?: number;
+  completed_episodes?: number;
+  progress_fraction?: number;
+  transitions?: number;
+  elapsed_seconds?: number;
+  env_steps_per_second?: number;
+  parallel_envs?: number;
+  max_drops?: number;
+  physics_fps?: number;
+  drop_fast_forward?: boolean;
+  snapshot_rows?: number;
+  merge_source_rows?: number;
+  episode_rows?: number;
+  peak_cuda_allocated_bytes?: number;
+  checkpoint_name?: string | null;
+  checkpoint_sha256?: string | null;
+  cuda_device_name?: string | null;
+  analysis_ready?: boolean;
+  failure?: string | null;
+};
+
+type MergePotentialStatus = {
+  available: boolean;
+  current?: MergePotentialRun | null;
+  runs?: MergePotentialRun[];
+};
+
 export type QueueItem = {
   id: string;
   name: string;
@@ -54,6 +87,7 @@ export type DashboardPayload = {
     items?: QueueItem[];
     counts?: Record<string, number>;
   };
+  merge_potential?: MergePotentialStatus;
 };
 
 export type DashboardStatus = {
@@ -326,6 +360,52 @@ function SummaryMetric({ icon: Icon, label, value, note }: { icon: LucideIcon; l
   return <article className="training-summary-card"><span><Icon size={18} /></span><small>{label}</small><strong>{value}</strong><p>{note}</p></article>;
 }
 
+const MERGE_STATUS_LABELS: Record<string, string> = {
+  running: "采集中",
+  complete: "采集完成",
+  interrupted: "已中断",
+  wall_time_reached: "达到时间上限",
+  failed: "采集失败",
+};
+
+function MergePotentialPanel({ status }: { status?: MergePotentialStatus }) {
+  const run = status?.current;
+  if (!status?.available || !run) return null;
+  const progress = Math.max(0, Math.min(1, numeric(run.progress_fraction) ?? 0));
+  const peakBytes = numeric(run.peak_cuda_allocated_bytes);
+  const peakVram = peakBytes === null ? "—" : `${(peakBytes / 1024 ** 3).toFixed(2)} GiB`;
+  const stateLabel = run.stale ? "更新已停滞" : (MERGE_STATUS_LABELS[run.status] ?? run.status);
+  const checkpointSha = run.checkpoint_sha256 ? run.checkpoint_sha256.slice(0, 12) : "哈希待写入";
+  const runCount = status.runs?.length ?? 1;
+  return (
+    <section className="merge-potential-section">
+      <div className="section-heading-inline">
+        <div><span>MERGE POTENTIAL DATA</span><h2>未来合成时间统计</h2><p>SAB-128 在当前无下落加速环境中的大规模对局采集；面板只读取采集清单。</p></div>
+        <span className={`merge-status-chip merge-status-${run.stale ? "stale" : run.status}`}><Activity size={14} /> {stateLabel}</span>
+      </div>
+      <div className="merge-potential-current">
+        <div><b>{run.name}</b><span>{run.run_dir}</span></div>
+        <strong>{(progress * 100).toFixed(2)}%</strong>
+        <div className="merge-progress-track"><motion.span initial={false} animate={{ width: `${progress * 100}%` }} /></div>
+      </div>
+      <div className="training-summary-grid merge-summary-grid">
+        <SummaryMetric icon={Database} label="已完成对局" value={count(run.completed_episodes)} note={`目标 ${count(run.target_episodes)}`} />
+        <SummaryMetric icon={Activity} label="采集吞吐" value={`${decimal(run.env_steps_per_second, 0)} /秒`} note={`${count(run.parallel_envs)} 个并行环境`} />
+        <SummaryMetric icon={ListOrdered} label="快照样本" value={count(run.snapshot_rows)} note={`${count(run.merge_source_rows)} 条合成源事件`} />
+        <SummaryMetric icon={Cpu} label="峰值显存" value={peakVram} note={run.cuda_device_name || "CUDA设备待记录"} />
+        <SummaryMetric icon={Timer} label="已运行" value={duration(run.elapsed_seconds)} note={`${count(run.transitions)} 次策略投放`} />
+      </div>
+      <div className="merge-potential-meta">
+        <span><b>模型</b>{run.checkpoint_name || "checkpoint待记录"} · {checkpointSha}</span>
+        <span><b>物理</b>{count(run.physics_fps)} FPS · {run.drop_fast_forward ? "启用下落加速" : "无下落加速"} · {run.max_drops ? `${count(run.max_drops)}投放上限` : "单局无投放上限"}</span>
+        <span><b>离线汇总</b>{run.analysis_ready ? "分析表已生成" : "等待采集后汇总"}</span>
+        <span><b>已发现任务</b>{runCount}</span>
+        {run.failure && <span className="merge-failure"><b>异常</b>{run.failure}</span>}
+      </div>
+    </section>
+  );
+}
+
 export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) {
   const [chartId, setChartId] = useState<ChartId>("score");
   const payload = dashboard.payload;
@@ -340,13 +420,14 @@ export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) 
     ? (training.action_distribution as unknown as number[])
     : [];
   const actionMax = Math.max(...actionDistribution, 1e-9);
+  const hasTraining = Object.keys(training).length > 0;
 
   return (
     <section className="training-workspace">
       <div className="training-commandbar">
         <div>
           <span className={`training-live-indicator ${dashboard.available ? "is-online" : ""}`} />
-          <span>{dashboard.available ? "训练遥测已连接" : "等待训练数据源"}</span>
+          <span>{dashboard.available ? "运行遥测已连接" : "等待运行数据源"}</span>
           {numeric(training.training_physics_fps) !== null && <b>{count(training.training_physics_fps)} FPS训练</b>}
         </div>
         <button onClick={onRefresh}><RefreshCw size={15} /> 刷新</button>
@@ -361,6 +442,7 @@ export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) 
         </div>
       ) : (
         <>
+          {hasTraining && <>
           <section className="training-run-hero">
             <div className="training-run-copy">
               <span className={`phase-chip phase-${phase}`}>{PHASE_LABELS[phase] ?? phase}</span>
@@ -434,6 +516,10 @@ export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) 
               </div>
             </details>
           </section>
+
+          </>}
+
+          <MergePotentialPanel status={payload?.merge_potential} />
 
           <div className="training-data-note"><AlertCircle size={15} /><span>界面只读展示聚合数据，不向训练进程发送控制命令。图表缩放只改变本地视图，不修改训练产物。</span></div>
         </>

@@ -6,10 +6,11 @@ import { useEffect, useRef } from "react";
 type EChartProps = {
   option: EChartsOption;
   className?: string;
+  ariaLabel?: string;
   onClick?: (payload: { name?: string; dataIndex?: number }) => void;
 };
 
-export function EChart({ option, className = "", onClick }: EChartProps) {
+export function EChart({ option, className = "", ariaLabel, onClick }: EChartProps) {
   const elementRef = useRef<HTMLDivElement>(null);
   const callbackRef = useRef(onClick);
   const optionRef = useRef(option);
@@ -47,5 +48,5 @@ export function EChart({ option, className = "", onClick }: EChartProps) {
     chartRef.current?.setOption(option, { notMerge: true });
   }, [option]);
 
-  return <div ref={elementRef} className={`echart ${className}`} role="img" />;
+  return <div ref={elementRef} className={`echart ${className}`} role="img" aria-label={ariaLabel} />;
 }
