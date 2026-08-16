@@ -69,6 +69,7 @@ type LabConfig = {
   fruit_specs: FruitSpec[];
   textures: string[];
   geometry: Geometry;
+  voronoi?: { algorithm: string; sample_spacing: number; top_boundary: string; obstacle_boundaries: string[] };
 };
 
 type Fruit = {
@@ -117,6 +118,8 @@ type Health = {
   comparison_model_continuous_available?: boolean;
   model?: Record<string, unknown> | null;
   comparison_available?: boolean;
+  voronoi_available?: boolean;
+  voronoi_device?: string;
 };
 
 type ComparisonProfile = {
@@ -208,6 +211,39 @@ type Evaluation = {
   message?: string;
 };
 
+type VoronoiEdge = {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  clearance: number;
+  owners: number[];
+};
+
+type VoronoiVertex = Point & { clearance: number; owners: number[] };
+
+type VoronoiEvaluation = {
+  algorithm: string;
+  sampled: boolean;
+  sample_spacing: number;
+  raster_shape: number[];
+  device: string;
+  compute_ms: number;
+  cache_hit: boolean;
+  sites: Array<{ index: number; kind: string; fruit_id?: number; level?: number; visible_samples: number }>;
+  edges: VoronoiEdge[];
+  vertices: VoronoiVertex[];
+  stats: {
+    fruit_site_count: number;
+    visible_fruit_site_count: number;
+    edge_count: number;
+    vertex_count: number;
+    free_sample_ratio: number;
+    min_edge_clearance: number;
+    max_edge_clearance: number;
+  };
+};
+
 type ViewSettings = {
   showGrid: boolean;
   showDanger: boolean;
@@ -217,10 +253,12 @@ type ViewSettings = {
   showActual: boolean;
   showNormal: boolean;
   realtimePrediction: boolean;
+  showVoronoi: boolean;
+  showVoronoiVertices: boolean;
 };
 
 const DEFAULT_GEOMETRY: Geometry = { board_width: 560, board_height: 1120, wall_width: 8, spawn_y: 156, action_count: 21, queue_length: 4, max_fruits: 64 };
-const DEFAULT_SETTINGS: ViewSettings = { showGrid: true, showDanger: true, showAnchors: true, showVelocity: false, showPrediction: true, showActual: true, showNormal: true, realtimePrediction: true };
+const DEFAULT_SETTINGS: ViewSettings = { showGrid: true, showDanger: true, showAnchors: true, showVelocity: false, showPrediction: true, showActual: true, showNormal: true, realtimePrediction: true, showVoronoi: false, showVoronoiVertices: true };
 const CONTACT_LABELS: Record<string, string> = { none: "未接触", floor: "地面", left_wall: "左墙", right_wall: "右墙", fruit: "水果", dynamic_fruit: "水果" };
 
 function number(value: unknown, digits = 1) {
@@ -233,6 +271,11 @@ function percentage(value: unknown) {
   return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : "—";
 }
 
+function voronoiColor(clearance: number) {
+  const scale = Math.max(0, Math.min(1, clearance / 120));
+  return `hsl(${12 + scale * 178} 72% ${49 - scale * 8}%)`;
+}
+
 function sceneKey(state: LiveState) {
   return JSON.stringify({
     queue: state.queue,
@@ -240,6 +283,17 @@ function sceneKey(state: LiveState) {
     score: state.score,
     step: state.step_count,
   });
+}
+
+function voronoiSceneKey(state: LiveState, sampleSpacing = 4) {
+  const positionQuantum = Math.max(1, sampleSpacing);
+  return JSON.stringify(state.fruits.map((fruit) => [
+    fruit.id,
+    fruit.level,
+    Math.round(fruit.physics_radius * 100),
+    Math.round(fruit.x / positionQuantum),
+    Math.round(fruit.y / positionQuantum),
+  ]));
 }
 
 function buildScene(state: LiveState, action: number, fruits = state.fruits, queue = state.queue) {
@@ -313,6 +367,10 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const [selectedAction, setSelectedAction] = useState(10);
   const [model, setModel] = useState<ModelEvaluation | null>(null);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
+  const [voronoi, setVoronoi] = useState<VoronoiEvaluation | null>(null);
+  const [voronoiSourceKey, setVoronoiSourceKey] = useState("");
+  const [voronoiBusy, setVoronoiBusy] = useState(false);
+  const [voronoiError, setVoronoiError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [canvasMode, setCanvasMode] = useState<"live" | "after">("live");
@@ -321,6 +379,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem("xigua-atlas-lab-settings") ?? "{}") }; } catch { return DEFAULT_SETTINGS; }
   });
   const predictionKey = useRef("");
+  const voronoiKey = useRef("");
   const boardRef = useRef<SVGSVGElement>(null);
   const liveRef = useRef<LiveState | null>(null);
   const actionRef = useRef(selectedAction);
@@ -336,6 +395,9 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const geometry = config?.geometry ?? DEFAULT_GEOMETRY;
   const specs = useMemo(() => config?.fruit_specs ?? [], [config?.fruit_specs]);
   const textures = config?.textures ?? [];
+  const voronoiSpacing = config?.voronoi?.sample_spacing ?? 4;
+  const liveVoronoiKey = live ? voronoiSceneKey(live, voronoiSpacing) : "";
+  const voronoiSettleDelay = live?.paused ? 0 : 120;
 
   useEffect(() => { liveRef.current = live; }, [live]);
   useEffect(() => { actionRef.current = selectedAction; }, [selectedAction]);
@@ -435,6 +497,33 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     return () => window.clearTimeout(timer);
   }, [busy, evaluateModel, health?.model_available, live, settings.realtimePrediction]);
 
+  const evaluateVoronoi = useCallback(async () => {
+    const state = liveRef.current;
+    if (!state || !health?.voronoi_available || voronoiBusy) return;
+    const key = voronoiSceneKey(state, voronoiSpacing);
+    setVoronoiBusy(true);
+    try {
+      const result = await api<VoronoiEvaluation>("/api/voronoi/evaluate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scene: buildScene(state, selectedAction) }) });
+      const current = liveRef.current;
+      if (!current || voronoiSceneKey(current, voronoiSpacing) !== key) return;
+      voronoiKey.current = key;
+      setVoronoiSourceKey(key);
+      setVoronoi(result);
+      setVoronoiError(null);
+    } catch (reason) {
+      setVoronoiError(String(reason));
+    } finally {
+      setVoronoiBusy(false);
+    }
+  }, [api, health?.voronoi_available, selectedAction, voronoiBusy, voronoiSpacing]);
+
+  useEffect(() => {
+    if (!settings.showVoronoi || !liveVoronoiKey || !health?.voronoi_available || voronoiBusy) return;
+    if (liveVoronoiKey === voronoiKey.current) return;
+    const timer = window.setTimeout(() => void evaluateVoronoi(), voronoiSettleDelay);
+    return () => window.clearTimeout(timer);
+  }, [evaluateVoronoi, health?.voronoi_available, liveVoronoiKey, settings.showVoronoi, voronoiBusy, voronoiSettleDelay]);
+
   const evaluatePhysics = async () => {
     if (!live) return;
     setBusy("physics");
@@ -477,8 +566,12 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const invalidateDerivedResults = useCallback(() => {
     setEvaluation(null);
     setModel(null);
+    setVoronoi(null);
+    setVoronoiSourceKey("");
+    setVoronoiError(null);
     setCanvasMode("live");
     predictionKey.current = "";
+    voronoiKey.current = "";
   }, []);
 
   const pointFromClient = useCallback((clientX: number, clientY: number) => {
@@ -881,6 +974,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const actual = selectedEvaluation?.action_effect ?? null;
   const afterFruits = selectedEvaluation?.result_fruits;
   const displayFruits = canvasMode === "after" && afterFruits?.length ? afterFruits : live?.fruits ?? [];
+  const displayedVoronoi = settings.showVoronoi && canvasMode === "live" && voronoiSourceKey === liveVoronoiKey ? voronoi : null;
   const qChart = useMemo(() => modelChart(model, selectedAction), [model, selectedAction]);
   const selectedSpec = specs.find((item) => item.level === selectedLevel);
   const left = geometry.wall_width + (selectedSpec?.radius ?? 20) + 2;
@@ -946,6 +1040,10 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
               {settings.showGrid && Array.from({ length: 10 }, (_, index) => <line key={`v${index}`} x1={(index + 1) * geometry.board_width / 11} x2={(index + 1) * geometry.board_width / 11} y1="0" y2={geometry.board_height} className="lab-grid-line" />)}
               {settings.showGrid && Array.from({ length: 11 }, (_, index) => <line key={`h${index}`} y1={(index + 1) * geometry.board_height / 12} y2={(index + 1) * geometry.board_height / 12} x1="0" x2={geometry.board_width} className="lab-grid-line" />)}
               {settings.showDanger && <g><line x1={geometry.wall_width} x2={geometry.board_width - geometry.wall_width} y1={geometry.spawn_y} y2={geometry.spawn_y} className="lab-danger-line" /><text x={geometry.wall_width + 8} y={geometry.spawn_y - 10}>危险线</text></g>}
+              {displayedVoronoi && <g className="lab-voronoi-layer" aria-label="完整圆障碍加权 Voronoi 图">
+                {displayedVoronoi.edges.map((edge, index) => <line key={`ve-${index}`} x1={edge.x1} y1={edge.y1} x2={edge.x2} y2={edge.y2} stroke={voronoiColor(edge.clearance)} />)}
+                {settings.showVoronoiVertices && displayedVoronoi.vertices.map((vertex, index) => <circle key={`vv-${index}`} cx={vertex.x} cy={vertex.y} r={3.4} fill={voronoiColor(vertex.clearance)}><title>{`交汇点 · clearance ${vertex.clearance.toFixed(1)} · ${vertex.owners.length}个站点`}</title></circle>)}
+              </g>}
               {settings.showAnchors && Array.from({ length: geometry.action_count }, (_, index) => { const x = left + (right - left) * index / Math.max(1, geometry.action_count - 1); return <g key={index} className={index === selectedAction ? "lab-anchor is-selected" : "lab-anchor"}><line x1={x} x2={x} y1={geometry.spawn_y - 28} y2={geometry.spawn_y + 28} /><text x={x} y={geometry.spawn_y - 38}>A{index}</text></g>; })}
               <line x1={actionX} x2={actionX} y1="0" y2={geometry.spawn_y} className="lab-probe-line" />
               {displayFruits.map((fruit) => { const draft = gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? gesture : fruit; const radius = specs.find((item) => item.level === fruit.level)?.radius ?? fruit.physics_radius; return <g key={fruit.id} data-fruit-id={fruit.id} transform={`translate(${draft.x} ${draft.y}) rotate(${fruit.angle * 180 / Math.PI})`} className={`${selectedFruit === fruit.id ? "lab-fruit is-selected" : "lab-fruit"}${gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? " is-dragging" : ""}`} onPointerDown={(event) => onFruitPointerDown(event, fruit)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><circle r={radius + 4} /><image href={textures[fruit.level]} x={-radius} y={-radius} width={radius * 2} height={radius * 2} /><text y={4}>L{fruit.level}</text>{settings.showVelocity && <line x1="0" y1="0" x2={fruit.vx * .05} y2={fruit.vy * .05} className="lab-velocity" />}</g>; })}
@@ -972,6 +1070,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
             <div><span>q0最终等级</span><b>{prediction?.q0?.final_level?.index ?? "—"} / {actual?.q0?.final_level ?? "—"}</b></div>
             <div><span>得分增量</span><b>{number(prediction?.outcome?.score_delta)} / {actual?.outcome?.score_delta ?? "—"}</b></div>
           </div>
+          <details className="lab-collapsible" open={settings.showVoronoi}><summary><ChevronDown size={14} /> Voronoi / Free-Space Graph</summary>{displayedVoronoi ? <><div className="lab-voronoi-summary"><span>构建设备<b>{displayedVoronoi.device}</b></span><span>完整站点<b>{displayedVoronoi.stats.fruit_site_count} 水果 + 3 边界</b></span><span>可见水果站点<b>{displayedVoronoi.stats.visible_fruit_site_count} / {displayedVoronoi.stats.fruit_site_count}</b></span><span>图规模<b>{displayedVoronoi.stats.edge_count} 边 · {displayedVoronoi.stats.vertex_count} 交汇点</b></span><span>采样间距<b>{number(displayedVoronoi.sample_spacing)} px</b></span><span>构建耗时<b>{number(displayedVoronoi.compute_ms, 2)} ms{displayedVoronoi.cache_hit ? " · cache" : ""}</b></span></div><div className="lab-voronoi-legend"><i className="is-narrow" />窄 clearance <i className="is-wide" />宽 clearance</div><p className="lab-muted">圆面加权距离；左右壁与桶底参与，顶部开放。规则栅格只用于 GPU 数值构图，画布节点是恢复出的空间交汇点。</p></> : <p className="lab-muted">{voronoiError ?? (voronoiBusy ? "正在构建当前场景的完整图……" : settings.showVoronoi ? "等待场景几何停止明显变化后构图。" : "在显示设置中开启该图层。")}</p>}</details>
           <details className="lab-collapsible" open><summary><ChevronDown size={14} /> 模型动作偏好</summary>{model ? <><div className="lab-model-head"><span>推荐 A{model.action}</span><b>Q {number(model.selected_q, 5)}</b><small>{number(model.inference_ms, 2)} ms</small></div><EChart option={qChart} className="lab-q-chart" /></> : <p className="lab-muted">加载带模型的服务后，稳定场景会自动预测全部21个动作。</p>}</details>
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景与模型身份</summary><div className="lab-identity"><span>实时物理<b>{live?.physics_backend === "tensor_cuda" ? "Tensor / CUDA" : live?.physics_backend === "tensor_cpu" ? "Tensor / CPU" : "—"}</b></span><span>物理帧率<b>{live?.physics_fps ?? "—"} FPS</b></span><span>训练物理同源<b>{live?.training_physics_equivalent ? "是" : "—"}</b></span><span>场上水果<b>{live?.fruits.length ?? 0} / {geometry.max_fruits}</b></span><span>模型checkpoint<b>{String(health?.model?.checkpoint ?? "未加载")}</b></span><span>模型训练量<b>{number(health?.model?.training_transitions, 0)}</b></span></div></details>
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景文件与编辑</summary><div className="lab-file-actions"><button onClick={exportScene}><Download size={14} />导出JSON</button><label><Import size={14} />导入JSON<input type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importScene(file); }} /></label><button disabled={selectedFruit === null} onClick={() => void removeSelected()}><Trash2 size={14} />删除选中水果</button></div><p className="lab-muted">从水果栏拖到画布，松开即放置；场上水果可拖动，右键删除，滚轮切级。暂停后支持擦除、撤销与重做；触摸端可拖动或长按删除。</p></details>
@@ -979,7 +1078,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
       </div>}
 
       <AnimatePresence>
-        {settingsOpen && <motion.div className="lab-settings-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><motion.aside className="lab-settings-drawer" initial={{ x: 36, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 36, opacity: 0 }}><div className="lab-settings-head"><div><span>VISUAL LAYERS</span><h2>场景显示设置</h2><p>只勾选当前诊断需要的图层，避免预测、真实效果和几何辅助相互遮挡。</p></div><button onClick={() => setSettingsOpen(false)}><X size={17} /></button></div><div className="lab-settings-groups"><section><h3>基础画布</h3>{settingLabel("空间网格", settings.showGrid, (value) => setSettings((current) => ({ ...current, showGrid: value })))}{settingLabel("危险线", settings.showDanger, (value) => setSettings((current) => ({ ...current, showDanger: value })))}{settingLabel("21个动作锚点", settings.showAnchors, (value) => setSettings((current) => ({ ...current, showAnchors: value })))}{settingLabel("水果速度向量", settings.showVelocity, (value) => setSettings((current) => ({ ...current, showVelocity: value })))}</section><section><h3>辅助动作预测</h3>{settingLabel("稳定场景实时预测", settings.realtimePrediction, (value) => setSettings((current) => ({ ...current, realtimePrediction: value })))}{settingLabel("预测接触与生成位置", settings.showPrediction, (value) => setSettings((current) => ({ ...current, showPrediction: value })))}{settingLabel("真实动作效果", settings.showActual, (value) => setSettings((current) => ({ ...current, showActual: value })))}{settingLabel("接触法向量", settings.showNormal, (value) => setSettings((current) => ({ ...current, showNormal: value })))}</section></div><button className="ghost-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RefreshCw size={14} />恢复默认图层</button></motion.aside></motion.div>}
+        {settingsOpen && <motion.div className="lab-settings-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><motion.aside className="lab-settings-drawer" initial={{ x: 36, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 36, opacity: 0 }}><div className="lab-settings-head"><div><span>VISUAL LAYERS</span><h2>场景显示设置</h2><p>只勾选当前诊断需要的图层，避免预测、真实效果和几何辅助相互遮挡。</p></div><button onClick={() => setSettingsOpen(false)}><X size={17} /></button></div><div className="lab-settings-groups"><section><h3>基础画布</h3>{settingLabel("空间网格", settings.showGrid, (value) => setSettings((current) => ({ ...current, showGrid: value })))}{settingLabel("危险线", settings.showDanger, (value) => setSettings((current) => ({ ...current, showDanger: value })))}{settingLabel("21个动作锚点", settings.showAnchors, (value) => setSettings((current) => ({ ...current, showAnchors: value })))}{settingLabel("水果速度向量", settings.showVelocity, (value) => setSettings((current) => ({ ...current, showVelocity: value })))}</section><section><h3>自由空间几何</h3>{settingLabel("完整加权 Voronoi 图", settings.showVoronoi, (value) => setSettings((current) => ({ ...current, showVoronoi: value })))}{settingLabel("显示空间交汇节点", settings.showVoronoiVertices, (value) => setSettings((current) => ({ ...current, showVoronoiVertices: value })))}</section><section><h3>辅助动作预测</h3>{settingLabel("稳定场景实时预测", settings.realtimePrediction, (value) => setSettings((current) => ({ ...current, realtimePrediction: value })))}{settingLabel("预测接触与生成位置", settings.showPrediction, (value) => setSettings((current) => ({ ...current, showPrediction: value })))}{settingLabel("真实动作效果", settings.showActual, (value) => setSettings((current) => ({ ...current, showActual: value })))}{settingLabel("接触法向量", settings.showNormal, (value) => setSettings((current) => ({ ...current, showNormal: value })))}</section></div><button className="ghost-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RefreshCw size={14} />恢复默认图层</button></motion.aside></motion.div>}
       </AnimatePresence>
     </section>
   );

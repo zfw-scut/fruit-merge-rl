@@ -11,6 +11,7 @@ from .replay import load_fruit_texture_data_urls
 from .scenario_lab import fruit_specs
 from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import validate_scenario
+from .voronoi import ScenarioVoronoiEvaluator
 
 
 class ScenarioLabServer:
@@ -21,6 +22,7 @@ class ScenarioLabServer:
             model_evaluator=None,
             model_controller=None,
             comparison_model_controller=None,
+            voronoi_evaluator=None,
             live_session=None,
             comparison_session=None,
             host='127.0.0.1',
@@ -32,6 +34,12 @@ class ScenarioLabServer:
         self.comparison_model_controller = comparison_model_controller
         self.live_session = live_session or ScenarioLabLiveSession(
             device=evaluator.device
+        )
+        self.voronoi_evaluator = (
+            voronoi_evaluator or ScenarioVoronoiEvaluator(
+                self.live_session.config,
+                device=self.live_session.device,
+            )
         )
         self.comparison_session = comparison_session
         geometry = self.live_session.config
@@ -48,6 +56,16 @@ class ScenarioLabServer:
                 'action_count': geometry.action_count,
                 'queue_length': geometry.queue_length,
                 'max_fruits': geometry.max_fruits,
+            },
+            'voronoi': {
+                'algorithm': 'full_disk_weighted_voronoi_raster_v1',
+                'sample_spacing': (
+                    self.voronoi_evaluator.builder.sample_spacing
+                ),
+                'top_boundary': 'open',
+                'obstacle_boundaries': [
+                    'left_wall', 'right_wall', 'floor'
+                ],
             },
         }
         self._closing = Event()
@@ -116,6 +134,10 @@ class ScenarioLabServer:
                         'live_physics_backend': owner.live_session.backend,
                         'live_physics_device': str(owner.live_session.device),
                         'training_physics_equivalent': True,
+                        'voronoi_available': True,
+                        'voronoi_device': str(
+                            owner.voronoi_evaluator.device
+                        ),
                         'comparison_available': (
                             owner.comparison_session is not None
                         ),
@@ -225,6 +247,7 @@ class ScenarioLabServer:
             def do_POST(self):
                 if self.path not in (
                         '/api/evaluate',
+                        '/api/voronoi/evaluate',
                         '/api/model/evaluate',
                         '/api/model/control',
                         '/api/comparison/model/control',
@@ -307,6 +330,10 @@ class ScenarioLabServer:
                         if owner.model_evaluator is None:
                             raise RuntimeError('模型 checkpoint 尚未加载')
                         payload = owner.model_evaluator.evaluate(
+                            request.get('scene')
+                        )
+                    elif self.path == '/api/voronoi/evaluate':
+                        payload = owner.voronoi_evaluator.evaluate(
                             request.get('scene')
                         )
                     else:

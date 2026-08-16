@@ -2044,6 +2044,9 @@ body {
 .lab-anchor.is-selected line { stroke: #3478e5; stroke-width: 2; opacity: .95; }
 .lab-anchor.is-selected text { fill: #3478e5; opacity: 1; }
 .lab-probe-line { stroke: #3478e5; stroke-width: 1.3; stroke-dasharray: 5 4; opacity: .65; }
+.lab-voronoi-layer { pointer-events: none; opacity: .84; }
+.lab-voronoi-layer line { stroke-width: 1.7; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.lab-voronoi-layer circle { stroke: rgba(255,255,255,.9); stroke-width: 1.2; vector-effect: non-scaling-stroke; }
 .lab-fruit { cursor: grab; }
 .lab-board.is-erase .lab-fruit { cursor: not-allowed; }
 .lab-fruit.is-dragging { cursor: grabbing; filter: drop-shadow(0 8px 10px rgba(42,72,112,.24)); }
@@ -2092,6 +2095,13 @@ body {
 .lab-model-head b { color: #53637a; font-family: var(--mono); font-size: 8px; }
 .lab-model-head small { grid-column: 1/-1; color: #9ba6b5; font-family: var(--mono); font-size: 7px; }
 .lab-q-chart { height: 180px; }
+.lab-voronoi-summary { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1px; border-top: 1px solid rgba(69,87,112,.06); background: rgba(69,87,112,.05); }
+.lab-voronoi-summary span { display: grid; gap: 3px; background: #e8edf4; padding: 9px 11px; color: #909cac; font-size: 7px; }
+.lab-voronoi-summary b { color: #56657b; font-family: var(--mono); font-size: 8px; }
+.lab-voronoi-legend { display: flex; align-items: center; gap: 6px; padding: 9px 11px 0; color: #8491a4; font-size: 7px; }
+.lab-voronoi-legend i { width: 30px; height: 3px; border-radius: 999px; }
+.lab-voronoi-legend i.is-narrow { background: hsl(12 72% 49%); }
+.lab-voronoi-legend i.is-wide { margin-left: 8px; background: hsl(190 72% 41%); }
 .lab-identity { display: grid; gap: 1px; border-top: 1px solid rgba(69,87,112,.06); background: rgba(69,87,112,.05); }
 .lab-identity span { display: grid; gap: 3px; background: #e8edf4; padding: 9px 11px; color: #909cac; font-size: 7px; }
 .lab-identity b { overflow: hidden; color: #56657b; font-family: var(--mono); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }

@@ -1,0 +1,68 @@
+{
+  "format_version": 1,
+  "baseline": "traditional_weighted_voronoi_raster_builder",
+  "algorithm": "full_disk_weighted_voronoi_raster_v1",
+  "sample_spacing": 4.0,
+  "max_fruits": 64,
+  "visualization_and_json_excluded": true,
+  "cloud_wall_clock_reference": {
+    "device": "NVIDIA GeForce RTX 5090",
+    "torch": "2.8.0+cu128",
+    "batch_size": 1792,
+    "active_count_cases": {
+      "12": {
+        "distance_field_ms": 293.4979274868965,
+        "full_graph_ms": 5390.332451090217,
+        "topology_and_compaction_ms": 5096.83452360332,
+        "distance_share": 0.054448945,
+        "topology_share": 0.945551055
+      },
+      "56": {
+        "distance_field_ms": 296.1921524256468,
+        "full_graph_ms": 5526.0418970137835,
+        "topology_and_compaction_ms": 5229.849744588137,
+        "distance_share": 0.05359943,
+        "topology_share": 0.94640057
+      }
+    },
+    "peak_allocated_mib": 2305.42236328125,
+    "peak_reserved_mib": 2568.0,
+    "source": "cloud_rtx5090_historical_envs.json"
+  },
+  "operator_structure_reference": {
+    "device": "NVIDIA GeForce RTX 4070 Laptop GPU",
+    "profile_batch_size": 8,
+    "active_count": 56,
+    "dynamic_boolean_selections_per_environment": 54,
+    "selection_breakdown_per_environment": {
+      "edge_extraction": 50,
+      "vertex_extraction": 3,
+      "visible_site_statistics": 1
+    },
+    "profile_observed_calls": {
+      "aten_index": 433,
+      "aten_nonzero": 433,
+      "cuda_stream_synchronize": 450,
+      "device_to_host_copy": 442,
+      "cuda_kernel_launch": 3408
+    },
+    "projected_dynamic_boolean_calls": {
+      "1536": 82945,
+      "1792": 96769,
+      "4096": 221185
+    },
+    "source": "local_rtx4070_operator_profile_4px_b8.json",
+    "absolute_time_is_not_cloud_comparable": true
+  },
+  "future_network_comparison_contract": {
+    "required_batch_sizes": [1792, 4096],
+    "required_active_count_cases": [12, 56],
+    "same_input_geometry": true,
+    "report_wall_clock_ms": true,
+    "report_environments_per_second": true,
+    "report_peak_allocated_and_reserved_memory": true,
+    "separate_label_generation_from_inference": true,
+    "exclude_json_and_visual_rendering": true,
+    "compare_topology_semantics_separately_from_speed": true
+  }
+}

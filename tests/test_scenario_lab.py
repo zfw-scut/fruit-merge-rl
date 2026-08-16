@@ -18,6 +18,11 @@ from daxigua.simulator.scenario_lab_comparison import (
     ScenarioLabComparisonSession,
 )
 from daxigua.simulator.scenario_lab_server import ScenarioLabServer
+from daxigua.simulator.config import SimulatorConfig
+from daxigua.simulator.voronoi import (
+    ScenarioVoronoiEvaluator,
+    WeightedVoronoiGraphBuilder,
+)
 from daxigua.rl.scenario_model_controller import (
     ScenarioComparisonModelController,
     ScenarioModelController,
@@ -41,6 +46,97 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertGreater(specs[0]['merged_physics_radius'], 0)
 
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_weighted_voronoi_builder_keeps_every_active_site(self):
+        builder = WeightedVoronoiGraphBuilder(
+            SimulatorConfig(), device='cpu', sample_spacing=8.0
+        )
+        positions = torch.tensor([
+            [[160.0, 900.0], [400.0, 900.0], [280.0, 1030.0]],
+            [[180.0, 800.0], [380.0, 850.0], [280.0, 980.0]],
+        ])
+        radii = torch.tensor([
+            [40.0, 80.0, 30.0],
+            [35.0, 55.0, 70.0],
+        ])
+
+        graphs = builder.build(positions, radii)
+
+        self.assertEqual(2, len(graphs))
+        for graph in graphs:
+            self.assertEqual(6, graph.visible_site_samples.numel())
+            self.assertGreater(graph.edge_start.shape[0], 0)
+            self.assertEqual(graph.edge_start.shape, graph.edge_end.shape)
+            self.assertTrue(torch.all(graph.edge_clearance >= 0.0))
+            self.assertLessEqual(
+                int(graph.edge_owners.max().item()), 5
+            )
+
+    def test_disk_weight_changes_bisector_location(self):
+        builder = WeightedVoronoiGraphBuilder(
+            SimulatorConfig(), device='cpu', sample_spacing=4.0
+        )
+        graph = builder.build(
+            torch.tensor([[[160.0, 900.0], [400.0, 900.0]]]),
+            torch.tensor([[40.0, 80.0]]),
+        )[0]
+        owner_pair = graph.edge_owners.sort(dim=-1).values
+        fruit_ridge = (owner_pair[:, 0] == 0) & (owner_pair[:, 1] == 1)
+        midpoints = (
+            graph.edge_start[fruit_ridge] + graph.edge_end[fruit_ridge]
+        ) * 0.5
+        closest = torch.argmin((midpoints[:, 1] - 900.0).abs())
+
+        self.assertAlmostEqual(260.0, float(midpoints[closest, 0]), delta=8.0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), 'CUDA is required')
+    def test_weighted_voronoi_cuda_matches_cpu_graph(self):
+        config = SimulatorConfig()
+        positions = torch.tensor([[[143.0, 781.0], [391.0, 869.0]]])
+        radii = torch.tensor([[43.0, 77.0]])
+        cpu_graph = WeightedVoronoiGraphBuilder(
+            config, device='cpu', sample_spacing=8.0
+        ).build(positions, radii)[0]
+        cuda_graph = WeightedVoronoiGraphBuilder(
+            config, device='cuda', sample_spacing=8.0
+        ).build(positions, radii)[0]
+
+        self.assertLessEqual(int(torch.max(torch.abs(
+            cpu_graph.visible_site_samples
+            - cuda_graph.visible_site_samples.cpu()
+        )).item()), 2)
+        self.assertEqual(
+            cpu_graph.edge_start.shape,
+            cuda_graph.edge_start.shape,
+        )
+        self.assertTrue(torch.allclose(
+            cpu_graph.edge_clearance.sort().values,
+            cuda_graph.edge_clearance.cpu().sort().values,
+            atol=1e-4,
+        ))
+
+    def test_scenario_voronoi_payload_is_compact_and_cached(self):
+        evaluator = ScenarioVoronoiEvaluator(
+            SimulatorConfig(), device='cpu', sample_spacing=8.0
+        )
+        scene = {
+            'fps': 120,
+            'queue': [1, 2, 3, 4],
+            'fruits': [
+                {'id': 4, 'level': 3, 'x': 200.0, 'y': 930.0},
+                {'id': 7, 'level': 5, 'x': 350.0, 'y': 920.0},
+            ],
+        }
+
+        first = evaluator.evaluate(scene)
+        second = evaluator.evaluate(scene)
+
+        self.assertEqual('full_disk_weighted_voronoi_raster_v1', first['algorithm'])
+        self.assertEqual(5, len(first['sites']))
+        self.assertTrue(first['edges'])
+        self.assertNotIn('owner_grid', first)
+        self.assertFalse(first['cache_hit'])
+        self.assertTrue(second['cache_hit'])
+
     def test_comparison_model_controller_repeats_same_policy_action(self):
         class FakeEvaluator:
             @staticmethod
@@ -204,7 +300,46 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(11, len(config['fruit_specs']))
         self.assertTrue(config['textures'][1].startswith('data:image/png;base64,'))
         self.assertEqual(21, config['geometry']['action_count'])
+        self.assertEqual(
+            'full_disk_weighted_voronoi_raster_v1',
+            config['voronoi']['algorithm'],
+        )
         self.assertEqual('http://127.0.0.1:3000', allow_origin)
+
+    def test_voronoi_http_api_exposes_scene_graph(self):
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'), host='127.0.0.1', port=0
+        ).start()
+        try:
+            with urlopen(server.url + 'api/health', timeout=2.0) as response:
+                health = json.loads(response.read())
+            request = Request(
+                server.url + 'api/voronoi/evaluate',
+                data=json.dumps({
+                    'scene': {
+                        'fps': 120,
+                        'queue': [1, 2, 3, 4],
+                        'fruits': [{
+                            'id': 1,
+                            'level': 4,
+                            'x': 280.0,
+                            'y': 900.0,
+                        }],
+                    },
+                }).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=4.0) as response:
+                graph = json.loads(response.read())
+        finally:
+            server.close()
+
+        self.assertTrue(health['voronoi_available'])
+        self.assertEqual('cpu', health['voronoi_device'])
+        self.assertEqual(4, len(graph['sites']))
+        self.assertGreater(graph['stats']['edge_count'], 0)
+        self.assertGreater(graph['stats']['free_sample_ratio'], 0.0)
 
     def test_model_evaluator_returns_all_action_effect_predictions(self):
         config = ModelConfig(

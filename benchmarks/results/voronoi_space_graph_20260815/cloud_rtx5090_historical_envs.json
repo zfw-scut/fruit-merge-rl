@@ -1,0 +1,421 @@
+{
+  "format_version": 1,
+  "benchmark": "weighted_voronoi_space_graph_prototype",
+  "started_at": "2026-08-15T01:16:55.419136+00:00",
+  "status": "complete",
+  "preset": "historical",
+  "physics_identity": "tensor_cuda_v4_solved_motion_stability",
+  "system": {
+    "hostname": "autodl-container-0f9f4cb2a6-fda0785f",
+    "platform": "Linux-5.15.0-94-generic-x86_64-with-glibc2.35",
+    "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]",
+    "torch": "2.8.0+cu128",
+    "torch_cuda": "12.8",
+    "cuda_available": true,
+    "device": "cuda",
+    "gpu_name": "NVIDIA GeForce RTX 5090",
+    "gpu_total_memory_mib": 32109.25,
+    "gpu_compute_capability": "12.0",
+    "cudnn": 91002
+  },
+  "source": {
+    "benchmark_sha256": "7706c70b4d0875395a7507dda0b1c2e68ec6fe3e96a21527d4dc4477699bfbb4",
+    "voronoi_sha256": "abd1176245f05de3170ae290824b89d62ba2d85841a87e0c04a7227fda452aaa"
+  },
+  "settings": {
+    "component_batches": [
+      1536,
+      1792,
+      4096
+    ],
+    "active_counts": [
+      12,
+      56
+    ],
+    "component_repeats": 1,
+    "shadow_batches": [
+      1536,
+      1792,
+      4096
+    ],
+    "shadow_steps": 1,
+    "pre_roll_steps": 12,
+    "sample_spacing": 4.0,
+    "max_fruits": 64,
+    "warmup_repeats": 1,
+    "timeout_seconds_per_case": 300.0,
+    "visualization_serialization_timed": false,
+    "component_input_is_real_rollout": false,
+    "shadow_input_is_real_rollout": true
+  },
+  "cases": [
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 1536,
+      "max_fruits": 64,
+      "active_count": 12,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          251.86865404248238
+        ],
+        "min_ms": 251.86865404248238,
+        "median_ms": 251.86865404248238,
+        "p90_ms": 251.86865404248238,
+        "max_ms": 251.86865404248238,
+        "peak_allocated_mib": 1972.01123046875,
+        "peak_reserved_mib": 2248.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          4594.063444063067
+        ],
+        "min_ms": 4594.063444063067,
+        "median_ms": 4594.063444063067,
+        "p90_ms": 4594.063444063067,
+        "max_ms": 4594.063444063067,
+        "peak_allocated_mib": 1972.01123046875,
+        "peak_reserved_mib": 2248.0
+      },
+      "topology_and_compaction_estimate_ms": 4342.194790020585,
+      "full_graph_envs_per_second": 334.3445337014187,
+      "mean_edge_count": 945.0364583333334,
+      "max_edge_count": 953,
+      "mean_vertex_count": 19.715494791666668,
+      "max_vertex_count": 22,
+      "process_elapsed_seconds": 12.368030905723572
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 1792,
+      "max_fruits": 64,
+      "active_count": 12,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          293.4979274868965
+        ],
+        "min_ms": 293.4979274868965,
+        "median_ms": 293.4979274868965,
+        "p90_ms": 293.4979274868965,
+        "max_ms": 293.4979274868965,
+        "peak_allocated_mib": 2305.42236328125,
+        "peak_reserved_mib": 2568.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          5390.332451090217
+        ],
+        "min_ms": 5390.332451090217,
+        "median_ms": 5390.332451090217,
+        "p90_ms": 5390.332451090217,
+        "max_ms": 5390.332451090217,
+        "peak_allocated_mib": 2305.42236328125,
+        "peak_reserved_mib": 2568.0
+      },
+      "topology_and_compaction_estimate_ms": 5096.83452360332,
+      "full_graph_envs_per_second": 332.4470273883684,
+      "mean_edge_count": 945.0284598214286,
+      "max_edge_count": 953,
+      "mean_vertex_count": 19.714285714285715,
+      "max_vertex_count": 22,
+      "process_elapsed_seconds": 13.61471687629819
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 4096,
+      "max_fruits": 64,
+      "active_count": 12,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          685.342276468873
+        ],
+        "min_ms": 685.342276468873,
+        "median_ms": 685.342276468873,
+        "p90_ms": 685.342276468873,
+        "max_ms": 685.342276468873,
+        "peak_allocated_mib": 5076.2373046875,
+        "peak_reserved_mib": 5414.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          12518.316624686122
+        ],
+        "min_ms": 12518.316624686122,
+        "median_ms": 12518.316624686122,
+        "p90_ms": 12518.316624686122,
+        "max_ms": 12518.316624686122,
+        "peak_allocated_mib": 5076.2373046875,
+        "peak_reserved_mib": 5414.0
+      },
+      "topology_and_compaction_estimate_ms": 11832.974348217249,
+      "full_graph_envs_per_second": 327.2005432361958,
+      "mean_edge_count": 945.029541015625,
+      "max_edge_count": 953,
+      "mean_vertex_count": 19.714111328125,
+      "max_vertex_count": 22,
+      "process_elapsed_seconds": 28.9886129591614
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 1536,
+      "max_fruits": 64,
+      "active_count": 56,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          253.83940897881985
+        ],
+        "min_ms": 253.83940897881985,
+        "median_ms": 253.83940897881985,
+        "p90_ms": 253.83940897881985,
+        "max_ms": 253.83940897881985,
+        "peak_allocated_mib": 1972.01123046875,
+        "peak_reserved_mib": 2248.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          4557.759592309594
+        ],
+        "min_ms": 4557.759592309594,
+        "median_ms": 4557.759592309594,
+        "p90_ms": 4557.759592309594,
+        "max_ms": 4557.759592309594,
+        "peak_allocated_mib": 1972.01123046875,
+        "peak_reserved_mib": 2248.0
+      },
+      "topology_and_compaction_estimate_ms": 4303.920183330774,
+      "full_graph_envs_per_second": 337.0076830273641,
+      "mean_edge_count": 1829.5533854166667,
+      "max_edge_count": 1840,
+      "mean_vertex_count": 65.859375,
+      "max_vertex_count": 70,
+      "process_elapsed_seconds": 11.865010280162096
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 1792,
+      "max_fruits": 64,
+      "active_count": 56,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          296.1921524256468
+        ],
+        "min_ms": 296.1921524256468,
+        "median_ms": 296.1921524256468,
+        "p90_ms": 296.1921524256468,
+        "max_ms": 296.1921524256468,
+        "peak_allocated_mib": 2305.42236328125,
+        "peak_reserved_mib": 2568.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          5526.0418970137835
+        ],
+        "min_ms": 5526.0418970137835,
+        "median_ms": 5526.0418970137835,
+        "p90_ms": 5526.0418970137835,
+        "max_ms": 5526.0418970137835,
+        "peak_allocated_mib": 2305.42236328125,
+        "peak_reserved_mib": 2568.0
+      },
+      "topology_and_compaction_estimate_ms": 5229.849744588137,
+      "full_graph_envs_per_second": 324.28273860326294,
+      "mean_edge_count": 1829.5518973214287,
+      "max_edge_count": 1840,
+      "mean_vertex_count": 65.85881696428571,
+      "max_vertex_count": 70,
+      "process_elapsed_seconds": 13.974753631278872
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 4096,
+      "max_fruits": 64,
+      "active_count": 56,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          687.6760423183441
+        ],
+        "min_ms": 687.6760423183441,
+        "median_ms": 687.6760423183441,
+        "p90_ms": 687.6760423183441,
+        "max_ms": 687.6760423183441,
+        "peak_allocated_mib": 5076.2373046875,
+        "peak_reserved_mib": 5414.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          12494.702098891139
+        ],
+        "min_ms": 12494.702098891139,
+        "median_ms": 12494.702098891139,
+        "p90_ms": 12494.702098891139,
+        "max_ms": 12494.702098891139,
+        "peak_allocated_mib": 5076.2373046875,
+        "peak_reserved_mib": 5414.0
+      },
+      "topology_and_compaction_estimate_ms": 11807.026056572795,
+      "full_graph_envs_per_second": 327.8189401861374,
+      "mean_edge_count": 1829.545166015625,
+      "max_edge_count": 1840,
+      "mean_vertex_count": 65.858154296875,
+      "max_vertex_count": 70,
+      "process_elapsed_seconds": 28.89187996648252
+    },
+    {
+      "kind": "shadow",
+      "status": "ok",
+      "input_family": "real_random_simulator_rollout_state",
+      "batch_size": 1536,
+      "max_fruits": 64,
+      "pre_roll_steps": 12,
+      "measured_steps": 1,
+      "sample_spacing": 4.0,
+      "mean_active_fruits": 8.029948234558105,
+      "physics_step": {
+        "samples_ms": [
+          33.81815366446972
+        ],
+        "min_ms": 33.81815366446972,
+        "median_ms": 33.81815366446972,
+        "p90_ms": 33.81815366446972,
+        "max_ms": 33.81815366446972
+      },
+      "full_graph": {
+        "samples_ms": [
+          4410.40807031095
+        ],
+        "min_ms": 4410.40807031095,
+        "median_ms": 4410.40807031095,
+        "p90_ms": 4410.40807031095,
+        "max_ms": 4410.40807031095
+      },
+      "baseline_env_steps_per_second": 45419.392650455775,
+      "shadow_env_steps_per_second": 345.6169696568748,
+      "throughput_retained_ratio": 0.007609458195901407,
+      "graph_share_of_synchronized_time": 0.9923905418040986,
+      "mean_edge_count": 1050.0130208333333,
+      "peak_allocated_mib": 1983.5703125,
+      "peak_reserved_mib": 2260.0,
+      "finite_state": true,
+      "process_elapsed_seconds": 11.695654509589076
+    },
+    {
+      "kind": "shadow",
+      "status": "ok",
+      "input_family": "real_random_simulator_rollout_state",
+      "batch_size": 1792,
+      "max_fruits": 64,
+      "pre_roll_steps": 12,
+      "measured_steps": 1,
+      "sample_spacing": 4.0,
+      "mean_active_fruits": 8.045201301574707,
+      "physics_step": {
+        "samples_ms": [
+          34.29030068218708
+        ],
+        "min_ms": 34.29030068218708,
+        "median_ms": 34.29030068218708,
+        "p90_ms": 34.29030068218708,
+        "max_ms": 34.29030068218708
+      },
+      "full_graph": {
+        "samples_ms": [
+          6110.469203442335
+        ],
+        "min_ms": 6110.469203442335,
+        "median_ms": 6110.469203442335,
+        "p90_ms": 6110.469203442335,
+        "max_ms": 6110.469203442335
+      },
+      "baseline_env_steps_per_second": 52259.675895198474,
+      "shadow_env_steps_per_second": 291.6306161042044,
+      "throughput_retained_ratio": 0.005580413791486964,
+      "graph_share_of_synchronized_time": 0.994419586208513,
+      "mean_edge_count": 1050.470424107143,
+      "peak_allocated_mib": 2318.90185546875,
+      "peak_reserved_mib": 2580.0,
+      "finite_state": true,
+      "process_elapsed_seconds": 15.139595001935959
+    },
+    {
+      "kind": "shadow",
+      "status": "ok",
+      "input_family": "real_random_simulator_rollout_state",
+      "batch_size": 4096,
+      "max_fruits": 64,
+      "pre_roll_steps": 12,
+      "measured_steps": 1,
+      "sample_spacing": 4.0,
+      "mean_active_fruits": 8.005859375,
+      "physics_step": {
+        "samples_ms": [
+          33.41108188033104
+        ],
+        "min_ms": 33.41108188033104,
+        "median_ms": 33.41108188033104,
+        "p90_ms": 33.41108188033104,
+        "max_ms": 33.41108188033104
+      },
+      "full_graph": {
+        "samples_ms": [
+          12037.500876933336
+        ],
+        "min_ms": 12037.500876933336,
+        "median_ms": 12037.500876933336,
+        "p90_ms": 12037.500876933336,
+        "max_ms": 12037.500876933336
+      },
+      "baseline_env_steps_per_second": 122594.05471126924,
+      "shadow_env_steps_per_second": 339.3281314598003,
+      "throughput_retained_ratio": 0.002767900386841583,
+      "graph_share_of_synchronized_time": 0.9972320996131584,
+      "mean_edge_count": 1048.7109375,
+      "peak_allocated_mib": 5107.88720703125,
+      "peak_reserved_mib": 5440.0,
+      "finite_state": true,
+      "process_elapsed_seconds": 27.28306420519948
+    }
+  ],
+  "updated_at": "2026-08-15T01:19:39.298249+00:00",
+  "completed_at": "2026-08-15T01:19:39.298159+00:00"
+}

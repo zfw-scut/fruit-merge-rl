@@ -1,0 +1,487 @@
+{
+  "format_version": 1,
+  "benchmark": "weighted_voronoi_space_graph_prototype",
+  "started_at": "2026-08-15T01:10:38.400800+00:00",
+  "status": "complete",
+  "preset": "standard",
+  "physics_identity": "tensor_cuda_v4_solved_motion_stability",
+  "system": {
+    "hostname": "autodl-container-0f9f4cb2a6-fda0785f",
+    "platform": "Linux-5.15.0-94-generic-x86_64-with-glibc2.35",
+    "python": "3.12.3 | packaged by Anaconda, Inc. | (main, May  6 2024, 19:46:43) [GCC 11.2.0]",
+    "torch": "2.8.0+cu128",
+    "torch_cuda": "12.8",
+    "cuda_available": true,
+    "device": "cuda",
+    "gpu_name": "NVIDIA GeForce RTX 5090",
+    "gpu_total_memory_mib": 32109.25,
+    "gpu_compute_capability": "12.0",
+    "cudnn": 91002
+  },
+  "source": {
+    "benchmark_sha256": "5151cbe179000d3acfa6185521e702603b21e9f6f570c2d6ebe1b8f4ad99d700",
+    "voronoi_sha256": "abd1176245f05de3170ae290824b89d62ba2d85841a87e0c04a7227fda452aaa"
+  },
+  "settings": {
+    "component_batches": [
+      1,
+      16,
+      64,
+      256
+    ],
+    "active_counts": [
+      12,
+      56
+    ],
+    "component_repeats": 2,
+    "shadow_batches": [
+      32,
+      128
+    ],
+    "shadow_steps": 2,
+    "pre_roll_steps": 12,
+    "sample_spacing": 4.0,
+    "max_fruits": 64,
+    "warmup_repeats": 1,
+    "timeout_seconds_per_case": 300.0,
+    "visualization_serialization_timed": false,
+    "component_input_is_real_rollout": false,
+    "shadow_input_is_real_rollout": true
+  },
+  "cases": [
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 1,
+      "max_fruits": 64,
+      "active_count": 12,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          0.3758557140827179,
+          0.46270713210105896
+        ],
+        "min_ms": 0.3758557140827179,
+        "median_ms": 0.4192814230918884,
+        "p90_ms": 0.46270713210105896,
+        "max_ms": 0.46270713210105896,
+        "peak_allocated_mib": 47.06591796875,
+        "peak_reserved_mib": 62.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          3.8712508976459503,
+          13.738555833697319
+        ],
+        "min_ms": 3.8712508976459503,
+        "median_ms": 8.804903365671635,
+        "p90_ms": 13.738555833697319,
+        "max_ms": 13.738555833697319,
+        "peak_allocated_mib": 46.27880859375,
+        "peak_reserved_mib": 64.0
+      },
+      "topology_and_compaction_estimate_ms": 8.385621942579746,
+      "full_graph_envs_per_second": 113.57308064263127,
+      "mean_edge_count": 949.0,
+      "max_edge_count": 949,
+      "mean_vertex_count": 19.0,
+      "max_vertex_count": 19,
+      "process_elapsed_seconds": 2.120703499764204
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 16,
+      "max_fruits": 64,
+      "active_count": 12,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          2.6252493262290955,
+          2.6530325412750244
+        ],
+        "min_ms": 2.6252493262290955,
+        "median_ms": 2.63914093375206,
+        "p90_ms": 2.6530325412750244,
+        "max_ms": 2.6530325412750244,
+        "peak_allocated_mib": 252.533203125,
+        "peak_reserved_mib": 350.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          49.477843567728996,
+          50.38624629378319
+        ],
+        "min_ms": 49.477843567728996,
+        "median_ms": 49.93204493075609,
+        "p90_ms": 50.38624629378319,
+        "max_ms": 50.38624629378319,
+        "peak_allocated_mib": 239.9521484375,
+        "peak_reserved_mib": 352.0
+      },
+      "topology_and_compaction_estimate_ms": 47.29290399700403,
+      "full_graph_envs_per_second": 320.4355043377095,
+      "mean_edge_count": 945.0625,
+      "max_edge_count": 951,
+      "mean_vertex_count": 19.75,
+      "max_vertex_count": 22,
+      "process_elapsed_seconds": 2.286065425723791
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 64,
+      "max_fruits": 64,
+      "active_count": 12,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          10.618017986416817,
+          10.67708432674408
+        ],
+        "min_ms": 10.618017986416817,
+        "median_ms": 10.647551156580448,
+        "p90_ms": 10.67708432674408,
+        "max_ms": 10.67708432674408,
+        "peak_allocated_mib": 330.3603515625,
+        "peak_reserved_mib": 434.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          230.67988269031048,
+          231.20198212563992
+        ],
+        "min_ms": 230.67988269031048,
+        "median_ms": 230.9409324079752,
+        "p90_ms": 231.20198212563992,
+        "max_ms": 231.20198212563992,
+        "peak_allocated_mib": 280.03857421875,
+        "peak_reserved_mib": 438.0
+      },
+      "topology_and_compaction_estimate_ms": 220.29338125139475,
+      "full_graph_envs_per_second": 277.12713953600485,
+      "mean_edge_count": 945.1875,
+      "max_edge_count": 953,
+      "mean_vertex_count": 19.734375,
+      "max_vertex_count": 22,
+      "process_elapsed_seconds": 2.935193445533514
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 256,
+      "max_fruits": 64,
+      "active_count": 12,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          43.13388653099537,
+          43.13940554857254
+        ],
+        "min_ms": 43.13388653099537,
+        "median_ms": 43.136646039783955,
+        "p90_ms": 43.13940554857254,
+        "max_ms": 43.13940554857254,
+        "peak_allocated_mib": 646.60009765625,
+        "peak_reserved_mib": 926.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          796.8285176903009,
+          808.4196411073208
+        ],
+        "min_ms": 796.8285176903009,
+        "median_ms": 802.6240793988109,
+        "p90_ms": 808.4196411073208,
+        "max_ms": 808.4196411073208,
+        "peak_allocated_mib": 445.13720703125,
+        "peak_reserved_mib": 936.0
+      },
+      "topology_and_compaction_estimate_ms": 759.4874333590269,
+      "full_graph_envs_per_second": 318.9537998807008,
+      "mean_edge_count": 945.0625,
+      "max_edge_count": 953,
+      "mean_vertex_count": 19.7265625,
+      "max_vertex_count": 22,
+      "process_elapsed_seconds": 4.635001454502344
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 1,
+      "max_fruits": 64,
+      "active_count": 56,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          0.3998689353466034,
+          0.49693696200847626
+        ],
+        "min_ms": 0.3998689353466034,
+        "median_ms": 0.4484029486775398,
+        "p90_ms": 0.49693696200847626,
+        "max_ms": 0.49693696200847626,
+        "peak_allocated_mib": 47.06591796875,
+        "peak_reserved_mib": 62.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          4.164021462202072,
+          4.390386864542961
+        ],
+        "min_ms": 4.164021462202072,
+        "median_ms": 4.277204163372517,
+        "p90_ms": 4.390386864542961,
+        "max_ms": 4.390386864542961,
+        "peak_allocated_mib": 46.3115234375,
+        "peak_reserved_mib": 64.0
+      },
+      "topology_and_compaction_estimate_ms": 3.828801214694977,
+      "full_graph_envs_per_second": 233.7975840768643,
+      "mean_edge_count": 1839.0,
+      "max_edge_count": 1839,
+      "mean_vertex_count": 70.0,
+      "max_vertex_count": 70,
+      "process_elapsed_seconds": 2.1588784754276276
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 16,
+      "max_fruits": 64,
+      "active_count": 56,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          2.6256348937749863,
+          2.62586772441864
+        ],
+        "min_ms": 2.6256348937749863,
+        "median_ms": 2.625751309096813,
+        "p90_ms": 2.62586772441864,
+        "max_ms": 2.62586772441864,
+        "peak_allocated_mib": 252.533203125,
+        "peak_reserved_mib": 350.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          50.34731142222881,
+          60.08145771920681
+        ],
+        "min_ms": 50.34731142222881,
+        "median_ms": 55.21438457071781,
+        "p90_ms": 60.08145771920681,
+        "max_ms": 60.08145771920681,
+        "peak_allocated_mib": 240.47314453125,
+        "peak_reserved_mib": 352.0
+      },
+      "topology_and_compaction_estimate_ms": 52.588633261621,
+      "full_graph_envs_per_second": 289.7795587942744,
+      "mean_edge_count": 1830.3125,
+      "max_edge_count": 1839,
+      "mean_vertex_count": 66.0625,
+      "max_vertex_count": 70,
+      "process_elapsed_seconds": 2.414084104821086
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 64,
+      "max_fruits": 64,
+      "active_count": 56,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          10.638058185577393,
+          10.642698034644127
+        ],
+        "min_ms": 10.638058185577393,
+        "median_ms": 10.64037811011076,
+        "p90_ms": 10.642698034644127,
+        "max_ms": 10.642698034644127,
+        "peak_allocated_mib": 330.3603515625,
+        "peak_reserved_mib": 434.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          189.49826061725616,
+          191.31498038768768
+        ],
+        "min_ms": 189.49826061725616,
+        "median_ms": 190.40662050247192,
+        "p90_ms": 191.31498038768768,
+        "max_ms": 191.31498038768768,
+        "peak_allocated_mib": 282.11865234375,
+        "peak_reserved_mib": 440.0
+      },
+      "topology_and_compaction_estimate_ms": 179.76624239236116,
+      "full_graph_envs_per_second": 336.1227662730831,
+      "mean_edge_count": 1829.6875,
+      "max_edge_count": 1840,
+      "mean_vertex_count": 65.84375,
+      "max_vertex_count": 70,
+      "process_elapsed_seconds": 2.7580291982740164
+    },
+    {
+      "kind": "component",
+      "status": "ok",
+      "input_family": "deterministic_pile_stress",
+      "batch_size": 256,
+      "max_fruits": 64,
+      "active_count": 56,
+      "sample_spacing": 4.0,
+      "raster_shape": [
+        276,
+        131
+      ],
+      "distance_field": {
+        "samples_ms": [
+          43.31987909972668,
+          43.353576213121414
+        ],
+        "min_ms": 43.31987909972668,
+        "median_ms": 43.336727656424046,
+        "p90_ms": 43.353576213121414,
+        "max_ms": 43.353576213121414,
+        "peak_allocated_mib": 646.60009765625,
+        "peak_reserved_mib": 926.0
+      },
+      "full_graph": {
+        "samples_ms": [
+          767.9432649165392,
+          903.6636762320995
+        ],
+        "min_ms": 767.9432649165392,
+        "median_ms": 835.8034705743194,
+        "p90_ms": 903.6636762320995,
+        "max_ms": 903.6636762320995,
+        "peak_allocated_mib": 453.45556640625,
+        "peak_reserved_mib": 944.0
+      },
+      "topology_and_compaction_estimate_ms": 792.4667429178953,
+      "full_graph_envs_per_second": 306.2920997732763,
+      "mean_edge_count": 1829.609375,
+      "max_edge_count": 1840,
+      "mean_vertex_count": 65.875,
+      "max_vertex_count": 70,
+      "process_elapsed_seconds": 4.755141282454133
+    },
+    {
+      "kind": "shadow",
+      "status": "ok",
+      "input_family": "real_random_simulator_rollout_state",
+      "batch_size": 32,
+      "max_fruits": 64,
+      "pre_roll_steps": 12,
+      "measured_steps": 2,
+      "sample_spacing": 4.0,
+      "mean_active_fruits": 8.25,
+      "physics_step": {
+        "samples_ms": [
+          18.88352818787098,
+          23.143276572227478
+        ],
+        "min_ms": 18.88352818787098,
+        "median_ms": 21.01340238004923,
+        "p90_ms": 23.143276572227478,
+        "max_ms": 23.143276572227478
+      },
+      "full_graph": {
+        "samples_ms": [
+          92.28176809847355,
+          145.22891491651535
+        ],
+        "min_ms": 92.28176809847355,
+        "median_ms": 118.75534150749445,
+        "p90_ms": 145.22891491651535,
+        "max_ms": 145.22891491651535
+      },
+      "baseline_env_steps_per_second": 1522.837635773909,
+      "shadow_env_steps_per_second": 228.9496142696026,
+      "throughput_retained_ratio": 0.1503440740438819,
+      "graph_share_of_synchronized_time": 0.8496559259561182,
+      "mean_edge_count": 1068.046875,
+      "peak_allocated_mib": 251.75732421875,
+      "peak_reserved_mib": 358.0,
+      "finite_state": true,
+      "process_elapsed_seconds": 42.690046252682805
+    },
+    {
+      "kind": "shadow",
+      "status": "ok",
+      "input_family": "real_random_simulator_rollout_state",
+      "batch_size": 128,
+      "max_fruits": 64,
+      "pre_roll_steps": 12,
+      "measured_steps": 2,
+      "sample_spacing": 4.0,
+      "mean_active_fruits": 7.921875,
+      "physics_step": {
+        "samples_ms": [
+          23.98829720914364,
+          28.30643579363823
+        ],
+        "min_ms": 23.98829720914364,
+        "median_ms": 26.147366501390934,
+        "p90_ms": 28.30643579363823,
+        "max_ms": 28.30643579363823
+      },
+      "full_graph": {
+        "samples_ms": [
+          362.80982941389084,
+          406.3809085637331
+        ],
+        "min_ms": 362.80982941389084,
+        "median_ms": 384.59536898881197,
+        "p90_ms": 406.3809085637331,
+        "max_ms": 406.3809085637331
+      },
+      "baseline_env_steps_per_second": 4895.33047212196,
+      "shadow_env_steps_per_second": 311.6305875677577,
+      "throughput_retained_ratio": 0.06365874364201532,
+      "graph_share_of_synchronized_time": 0.9363412563579847,
+      "mean_edge_count": 1046.078125,
+      "peak_allocated_mib": 330.7236328125,
+      "peak_reserved_mib": 462.0,
+      "finite_state": true,
+      "process_elapsed_seconds": 3.360879311338067
+    }
+  ],
+  "updated_at": "2026-08-15T01:11:48.581936+00:00",
+  "completed_at": "2026-08-15T01:11:48.581878+00:00"
+}

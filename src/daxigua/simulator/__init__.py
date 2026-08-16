@@ -33,6 +33,11 @@ from .scenario_lab_server import ScenarioLabServer
 from .scenario_lab_comparison import ScenarioLabComparisonSession
 from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import ScenarioLabEvaluator, validate_scenario
+from .voronoi import (
+    ScenarioVoronoiEvaluator,
+    WeightedVoronoiGraph,
+    WeightedVoronoiGraphBuilder,
+)
 from .types import (
     BatchActionEffectEvents,
     BatchDecisionSidecar,
@@ -67,6 +72,7 @@ __all__ = [
     'ScenarioLabComparisonSession',
     'ScenarioLabLiveSession',
     'ScenarioLabServer',
+    'ScenarioVoronoiEvaluator',
     'SimulatorConfig',
     'SingleEnvAdapter',
     'SpatialRewardComputer',
@@ -80,6 +86,8 @@ __all__ = [
     'TensorVectorSimulator',
     'trace_to_payload',
     'VectorEnv',
+    'WeightedVoronoiGraph',
+    'WeightedVoronoiGraphBuilder',
     'write_replay_fragment',
     'write_replay_html',
     'write_replay_payload_html',

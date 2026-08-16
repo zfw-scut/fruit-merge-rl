@@ -1,0 +1,633 @@
+{
+  "format_version": 1,
+  "profile": "weighted_voronoi_operator_costs",
+  "created_at": "2026-08-16T17:57:49.138275+00:00",
+  "system": {
+    "hostname": "yeyifan",
+    "platform": "Windows-10-10.0.26200-SP0",
+    "python": "3.11.15 | packaged by conda-forge | (main, Jun 11 2026, 03:27:10) [MSC v.1944 64 bit (AMD64)]",
+    "torch": "2.12.1+cu130",
+    "torch_cuda": "13.0",
+    "device": "cuda",
+    "gpu_name": "NVIDIA GeForce RTX 4070 Laptop GPU"
+  },
+  "input": {
+    "family": "deterministic_pile_stress",
+    "batch_size": 8,
+    "active_count": 56,
+    "max_fruits": 64,
+    "sample_spacing": 4.0,
+    "raster_shape": [
+      276,
+      131
+    ],
+    "timing_repeats": 3
+  },
+  "unprofiled_timing": {
+    "distance_field": {
+      "samples_ms": [
+        18.147900002077222,
+        18.41199997579679,
+        21.301600005244836
+      ],
+      "median_ms": 18.41199997579679,
+      "min_ms": 18.147900002077222,
+      "max_ms": 21.301600005244836
+    },
+    "full_graph": {
+      "samples_ms": [
+        86.30519997677766,
+        87.89840000099503,
+        88.88419999857433
+      ],
+      "median_ms": 87.89840000099503,
+      "min_ms": 86.30519997677766,
+      "max_ms": 88.88419999857433
+    },
+    "topology_and_compaction_estimate_ms": 69.48640002519824,
+    "distance_share_of_full": 0.2094691140633773,
+    "topology_share_of_full": 0.7905308859366227,
+    "edges_total": 14655,
+    "vertices_total": 530
+  },
+  "operator_profile": {
+    "profiled_operation_wall_ms": 169.80560001684353,
+    "profiler_total_wall_ms_including_trace_finalization": 2279.7398999973666,
+    "important_events": {
+      "aten::index": {
+        "name": "aten::index",
+        "calls": 433,
+        "self_cpu_ms": 12.602899999999487,
+        "cpu_total_ms": 114.61980000000004,
+        "self_device_ms": 1.531866000000151,
+        "device_total_ms": 6.3582079999999275
+      },
+      "aten::nonzero": {
+        "name": "aten::nonzero",
+        "calls": 433,
+        "self_cpu_ms": 19.6209000000016,
+        "cpu_total_ms": 87.67410000000027,
+        "self_device_ms": 4.823589999999777,
+        "device_total_ms": 4.8263419999997765
+      },
+      "cudaStreamSynchronize": {
+        "name": "cudaStreamSynchronize",
+        "calls": 450,
+        "self_cpu_ms": 23.528299999999987,
+        "cpu_total_ms": 23.528299999999987,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      "cudaMemcpyAsync": {
+        "name": "cudaMemcpyAsync",
+        "calls": 488,
+        "self_cpu_ms": 8.801399999999784,
+        "cpu_total_ms": 8.801399999999784,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      "cudaLaunchKernel": {
+        "name": "cudaLaunchKernel",
+        "calls": 3408,
+        "self_cpu_ms": 54.83760000000008,
+        "cpu_total_ms": 54.83760000000008,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      "Memcpy DtoH (Device -> Pinned)": {
+        "name": "Memcpy DtoH (Device -> Pinned)",
+        "calls": 442,
+        "self_cpu_ms": 0.0,
+        "cpu_total_ms": 0.0,
+        "self_device_ms": 0.5014849999999714,
+        "device_total_ms": 0.5014849999999714
+      },
+      "Memcpy DtoD (Device -> Device)": {
+        "name": "Memcpy DtoD (Device -> Device)",
+        "calls": 38,
+        "self_cpu_ms": 0.0,
+        "cpu_total_ms": 0.0,
+        "self_device_ms": 1.7255589999999748,
+        "device_total_ms": 1.7255589999999748
+      },
+      "aten::cat": {
+        "name": "aten::cat",
+        "calls": 104,
+        "self_cpu_ms": 1.5711000000000594,
+        "cpu_total_ms": 3.9158999999999997,
+        "self_device_ms": 2.781416999999982,
+        "device_total_ms": 2.781416999999982
+      },
+      "aten::sort": {
+        "name": "aten::sort",
+        "calls": 16,
+        "self_cpu_ms": 0.5454000000001324,
+        "cpu_total_ms": 3.3371000000000293,
+        "self_device_ms": 3.9041119999999356,
+        "device_total_ms": 4.282562999999958
+      },
+      "aten::stack": {
+        "name": "aten::stack",
+        "calls": 62,
+        "self_cpu_ms": 0.39459999999991124,
+        "cpu_total_ms": 3.4888999999999712,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.3726269999999513
+      },
+      "aten::bincount": {
+        "name": "aten::bincount",
+        "calls": 8,
+        "self_cpu_ms": 0.26469999999998256,
+        "cpu_total_ms": 2.643200000000026,
+        "self_device_ms": 0.09479599999996571,
+        "device_total_ms": 0.22102399999988848
+      },
+      "aten::sum": {
+        "name": "aten::sum",
+        "calls": 30,
+        "self_cpu_ms": 0.6140000000000623,
+        "cpu_total_ms": 2.2841000000000924,
+        "self_device_ms": 2.2711080000000394,
+        "device_total_ms": 2.347409999999977
+      },
+      "aten::minimum": {
+        "name": "aten::minimum",
+        "calls": 80,
+        "self_cpu_ms": 1.0240999999998748,
+        "cpu_total_ms": 2.620499999999938,
+        "self_device_ms": 0.1268020000001525,
+        "device_total_ms": 0.1268020000001525
+      },
+      "aten::masked_fill": {
+        "name": "aten::masked_fill",
+        "calls": 6,
+        "self_cpu_ms": 0.07240000000000282,
+        "cpu_total_ms": 0.6260000000000004,
+        "self_device_ms": 0.0,
+        "device_total_ms": 2.6122139999999963
+      },
+      "aten::min": {
+        "name": "aten::min",
+        "calls": 14,
+        "self_cpu_ms": 0.3263000000000866,
+        "cpu_total_ms": 0.6956000000000268,
+        "self_device_ms": 1.4559840000000077,
+        "device_total_ms": 1.4559840000000077
+      },
+      "aten::sqrt": {
+        "name": "aten::sqrt",
+        "calls": 6,
+        "self_cpu_ms": 0.06690000000000054,
+        "cpu_total_ms": 0.17190000000000055,
+        "self_device_ms": 1.165190999999997,
+        "device_total_ms": 1.165190999999997
+      }
+    },
+    "top_self_cpu": [
+      {
+        "name": "cudaLaunchKernel",
+        "calls": 3408,
+        "self_cpu_ms": 54.83760000000008,
+        "cpu_total_ms": 54.83760000000008,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "cudaStreamSynchronize",
+        "calls": 450,
+        "self_cpu_ms": 23.528299999999987,
+        "cpu_total_ms": 23.528299999999987,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::nonzero",
+        "calls": 433,
+        "self_cpu_ms": 19.6209000000016,
+        "cpu_total_ms": 87.67410000000027,
+        "self_device_ms": 4.823589999999777,
+        "device_total_ms": 4.8263419999997765
+      },
+      {
+        "name": "aten::index",
+        "calls": 433,
+        "self_cpu_ms": 12.602899999999487,
+        "cpu_total_ms": 114.61980000000004,
+        "self_device_ms": 1.531866000000151,
+        "device_total_ms": 6.3582079999999275
+      },
+      {
+        "name": "cudaMemcpyAsync",
+        "calls": 488,
+        "self_cpu_ms": 8.801399999999784,
+        "cpu_total_ms": 8.801399999999784,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::select",
+        "calls": 1380,
+        "self_cpu_ms": 3.7824000000001052,
+        "cpu_total_ms": 4.61650000000036,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::as_strided",
+        "calls": 2661,
+        "self_cpu_ms": 2.3436000000004,
+        "cpu_total_ms": 2.3436000000004,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::bitwise_and",
+        "calls": 176,
+        "self_cpu_ms": 2.2639999999998945,
+        "cpu_total_ms": 6.277100000000104,
+        "self_device_ms": 0.3659060000000136,
+        "device_total_ms": 0.3659060000000136
+      },
+      {
+        "name": "aten::resize_",
+        "calls": 449,
+        "self_cpu_ms": 2.1511999999999936,
+        "cpu_total_ms": 2.1511999999999936,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::transpose",
+        "calls": 433,
+        "self_cpu_ms": 1.6749000000001142,
+        "cpu_total_ms": 2.189799999999999,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "Activity Buffer Request",
+        "calls": 1,
+        "self_cpu_ms": 1.6123000000000003,
+        "cpu_total_ms": 1.6123000000000003,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::reshape",
+        "calls": 878,
+        "self_cpu_ms": 1.5930999999998936,
+        "cpu_total_ms": 2.2880999999999223,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::cat",
+        "calls": 104,
+        "self_cpu_ms": 1.5711000000000594,
+        "cpu_total_ms": 3.9158999999999997,
+        "self_device_ms": 2.781416999999982,
+        "device_total_ms": 2.781416999999982
+      },
+      {
+        "name": "cudaOccupancyMaxActiveBlocksPerMultiprocessorWithFlags",
+        "calls": 880,
+        "self_cpu_ms": 1.270800000000172,
+        "cpu_total_ms": 1.270800000000172,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::set_",
+        "calls": 433,
+        "self_cpu_ms": 1.217299999999681,
+        "cpu_total_ms": 1.217299999999681,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::minimum",
+        "calls": 80,
+        "self_cpu_ms": 1.0240999999998748,
+        "cpu_total_ms": 2.620499999999938,
+        "self_device_ms": 0.1268020000001525,
+        "device_total_ms": 0.1268020000001525
+      },
+      {
+        "name": "aten::t",
+        "calls": 433,
+        "self_cpu_ms": 1.0211999999999362,
+        "cpu_total_ms": 3.2109999999999355,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::clamp_min_",
+        "calls": 94,
+        "self_cpu_ms": 1.005600000000044,
+        "cpu_total_ms": 2.5279000000000074,
+        "self_device_ms": 1.0420349999999934,
+        "device_total_ms": 1.0420349999999934
+      },
+      {
+        "name": "aten::ge",
+        "calls": 56,
+        "self_cpu_ms": 0.9905000000000382,
+        "cpu_total_ms": 2.232500000000078,
+        "self_device_ms": 0.09883299999999144,
+        "device_total_ms": 0.09883299999999144
+      },
+      {
+        "name": "aten::copy_",
+        "calls": 87,
+        "self_cpu_ms": 0.7463999999999451,
+        "cpu_total_ms": 3.351699999999972,
+        "self_device_ms": 1.8693889999998923,
+        "device_total_ms": 1.8693889999998923
+      },
+      {
+        "name": "aten::view",
+        "calls": 902,
+        "self_cpu_ms": 0.7455000000000196,
+        "cpu_total_ms": 0.7455000000000196,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::sum",
+        "calls": 30,
+        "self_cpu_ms": 0.6140000000000623,
+        "cpu_total_ms": 2.2841000000000924,
+        "self_device_ms": 2.2711080000000394,
+        "device_total_ms": 2.347409999999977
+      },
+      {
+        "name": "aten::unsqueeze",
+        "calls": 182,
+        "self_cpu_ms": 0.5737999999999798,
+        "cpu_total_ms": 0.7071000000000045,
+        "self_device_ms": 0.0,
+        "device_total_ms": 0.0
+      },
+      {
+        "name": "aten::sort",
+        "calls": 16,
+        "self_cpu_ms": 0.5454000000001324,
+        "cpu_total_ms": 3.3371000000000293,
+        "self_device_ms": 3.9041119999999356,
+        "device_total_ms": 4.282562999999958
+      },
+      {
+        "name": "aten::add",
+        "calls": 40,
+        "self_cpu_ms": 0.48669999999999347,
+        "cpu_total_ms": 1.1567999999999992,
+        "self_device_ms": 0.08003900000001159,
+        "device_total_ms": 0.08003900000001159
+      }
+    ],
+    "top_self_device": [
+      {
+        "name": "aten::nonzero",
+        "calls": 433,
+        "self_cpu_ms": 19.6209000000016,
+        "cpu_total_ms": 87.67410000000027,
+        "self_device_ms": 4.823589999999777,
+        "device_total_ms": 4.8263419999997765
+      },
+      {
+        "name": "aten::sort",
+        "calls": 16,
+        "self_cpu_ms": 0.5454000000001324,
+        "cpu_total_ms": 3.3371000000000293,
+        "self_device_ms": 3.9041119999999356,
+        "device_total_ms": 4.282562999999958
+      },
+      {
+        "name": "aten::pow",
+        "calls": 6,
+        "self_cpu_ms": 0.11680000000000154,
+        "cpu_total_ms": 0.2275999999999999,
+        "self_device_ms": 3.2488819999999956,
+        "device_total_ms": 3.2488819999999956
+      },
+      {
+        "name": "aten::cat",
+        "calls": 104,
+        "self_cpu_ms": 1.5711000000000594,
+        "cpu_total_ms": 3.9158999999999997,
+        "self_device_ms": 2.781416999999982,
+        "device_total_ms": 2.781416999999982
+      },
+      {
+        "name": "aten::sub",
+        "calls": 30,
+        "self_cpu_ms": 0.44319999999999843,
+        "cpu_total_ms": 1.1444999999999996,
+        "self_device_ms": 2.518665999999991,
+        "device_total_ms": 2.518665999999991
+      },
+      {
+        "name": "aten::sum",
+        "calls": 30,
+        "self_cpu_ms": 0.6140000000000623,
+        "cpu_total_ms": 2.2841000000000924,
+        "self_device_ms": 2.2711080000000394,
+        "device_total_ms": 2.347409999999977
+      },
+      {
+        "name": "aten::copy_",
+        "calls": 87,
+        "self_cpu_ms": 0.7463999999999451,
+        "cpu_total_ms": 3.351699999999972,
+        "self_device_ms": 1.8693889999998923,
+        "device_total_ms": 1.8693889999998923
+      },
+      {
+        "name": "Memcpy DtoD (Device -> Device)",
+        "calls": 38,
+        "self_cpu_ms": 0.0,
+        "cpu_total_ms": 0.0,
+        "self_device_ms": 1.7255589999999748,
+        "device_total_ms": 1.7255589999999748
+      },
+      {
+        "name": "aten::index",
+        "calls": 433,
+        "self_cpu_ms": 12.602899999999487,
+        "cpu_total_ms": 114.61980000000004,
+        "self_device_ms": 1.531866000000151,
+        "device_total_ms": 6.3582079999999275
+      },
+      {
+        "name": "aten::min",
+        "calls": 14,
+        "self_cpu_ms": 0.3263000000000866,
+        "cpu_total_ms": 0.6956000000000268,
+        "self_device_ms": 1.4559840000000077,
+        "device_total_ms": 1.4559840000000077
+      },
+      {
+        "name": "aten::masked_fill_",
+        "calls": 6,
+        "self_cpu_ms": 0.0785,
+        "cpu_total_ms": 0.18829999999999744,
+        "self_device_ms": 1.1934509999999983,
+        "device_total_ms": 1.1934509999999983
+      },
+      {
+        "name": "aten::sqrt",
+        "calls": 6,
+        "self_cpu_ms": 0.06690000000000054,
+        "cpu_total_ms": 0.17190000000000055,
+        "self_device_ms": 1.165190999999997,
+        "device_total_ms": 1.165190999999997
+      },
+      {
+        "name": "aten::clamp_min_",
+        "calls": 94,
+        "self_cpu_ms": 1.005600000000044,
+        "cpu_total_ms": 2.5279000000000074,
+        "self_device_ms": 1.0420349999999934,
+        "device_total_ms": 1.0420349999999934
+      },
+      {
+        "name": "Memcpy DtoH (Device -> Pinned)",
+        "calls": 442,
+        "self_cpu_ms": 0.0,
+        "cpu_total_ms": 0.0,
+        "self_device_ms": 0.5014849999999714,
+        "device_total_ms": 0.5014849999999714
+      },
+      {
+        "name": "aten::bitwise_and",
+        "calls": 176,
+        "self_cpu_ms": 2.2639999999998945,
+        "cpu_total_ms": 6.277100000000104,
+        "self_device_ms": 0.3659060000000136,
+        "device_total_ms": 0.3659060000000136
+      },
+      {
+        "name": "aten::minimum",
+        "calls": 80,
+        "self_cpu_ms": 1.0240999999998748,
+        "cpu_total_ms": 2.620499999999938,
+        "self_device_ms": 0.1268020000001525,
+        "device_total_ms": 0.1268020000001525
+      },
+      {
+        "name": "aten::ge",
+        "calls": 56,
+        "self_cpu_ms": 0.9905000000000382,
+        "cpu_total_ms": 2.232500000000078,
+        "self_device_ms": 0.09883299999999144,
+        "device_total_ms": 0.09883299999999144
+      },
+      {
+        "name": "aten::bincount",
+        "calls": 8,
+        "self_cpu_ms": 0.26469999999998256,
+        "cpu_total_ms": 2.643200000000026,
+        "self_device_ms": 0.09479599999996571,
+        "device_total_ms": 0.22102399999988848
+      },
+      {
+        "name": "aten::add",
+        "calls": 40,
+        "self_cpu_ms": 0.48669999999999347,
+        "cpu_total_ms": 1.1567999999999992,
+        "self_device_ms": 0.08003900000001159,
+        "device_total_ms": 0.08003900000001159
+      },
+      {
+        "name": "aten::ne",
+        "calls": 16,
+        "self_cpu_ms": 0.25460000000002403,
+        "cpu_total_ms": 0.685699999999988,
+        "self_device_ms": 0.048869000000020604,
+        "device_total_ms": 0.048869000000020604
+      },
+      {
+        "name": "aten::max",
+        "calls": 8,
+        "self_cpu_ms": 0.14910000000001308,
+        "cpu_total_ms": 0.45480000000002474,
+        "self_device_ms": 0.04819999999994616,
+        "device_total_ms": 0.04819999999994616
+      },
+      {
+        "name": "aten::mul",
+        "calls": 32,
+        "self_cpu_ms": 0.3137999999999374,
+        "cpu_total_ms": 0.923199999999988,
+        "self_device_ms": 0.04666399999994974,
+        "device_total_ms": 0.04666399999994974
+      },
+      {
+        "name": "aten::bitwise_not",
+        "calls": 14,
+        "self_cpu_ms": 0.17509999999999853,
+        "cpu_total_ms": 0.42139999999999916,
+        "self_device_ms": 0.029190000000009604,
+        "device_total_ms": 0.029190000000009604
+      },
+      {
+        "name": "aten::eq",
+        "calls": 16,
+        "self_cpu_ms": 0.16000000000001274,
+        "cpu_total_ms": 0.3717000000000553,
+        "self_device_ms": 0.027267999999974563,
+        "device_total_ms": 0.027267999999974563
+      },
+      {
+        "name": "aten::arange",
+        "calls": 32,
+        "self_cpu_ms": 0.26310000000009315,
+        "cpu_total_ms": 1.2010999999999894,
+        "self_device_ms": 0.017506000000044878,
+        "device_total_ms": 0.035012000000089756
+      }
+    ]
+  },
+  "calls_per_environment": {
+    "aten::index": 54.125,
+    "aten::nonzero": 54.125,
+    "cudaStreamSynchronize": 56.25,
+    "cudaMemcpyAsync": 61.0,
+    "cudaLaunchKernel": 426.0,
+    "Memcpy DtoH (Device -> Pinned)": 55.25,
+    "Memcpy DtoD (Device -> Device)": 4.75,
+    "aten::cat": 13.0,
+    "aten::sort": 2.0,
+    "aten::stack": 7.75,
+    "aten::bincount": 1.0,
+    "aten::sum": 3.75,
+    "aten::minimum": 10.0,
+    "aten::masked_fill": 0.75,
+    "aten::min": 1.75,
+    "aten::sqrt": 0.75
+  },
+  "derived_structure": {
+    "batch_global_validation_index_calls": 1,
+    "dynamic_boolean_selections_per_environment": 54.0
+  },
+  "projected_structural_calls": {
+    "1536": {
+      "dynamic_boolean_index_calls": 82945,
+      "dynamic_nonzero_calls": 82945
+    },
+    "1792": {
+      "dynamic_boolean_index_calls": 96769,
+      "dynamic_nonzero_calls": 96769
+    },
+    "4096": {
+      "dynamic_boolean_index_calls": 221185,
+      "dynamic_nonzero_calls": 221185
+    }
+  },
+  "scope": {
+    "includes_json_serialization": false,
+    "includes_visual_rendering": false,
+    "profiled_batch_is_training_batch": false,
+    "projection_is_structural_call_count_not_time": true
+  }
+}
