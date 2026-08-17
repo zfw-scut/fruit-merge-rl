@@ -20,6 +20,7 @@ class ScenarioLabServer:
             evaluator,
             *,
             model_evaluator=None,
+            merge_distance_evaluator=None,
             model_controller=None,
             comparison_model_controller=None,
             voronoi_evaluator=None,
@@ -30,6 +31,7 @@ class ScenarioLabServer:
             title='合成大西瓜 · Reward V2.1场景实验室'):
         self.evaluator = evaluator
         self.model_evaluator = model_evaluator
+        self.merge_distance_evaluator = merge_distance_evaluator
         self.model_controller = model_controller
         self.comparison_model_controller = comparison_model_controller
         self.live_session = live_session or ScenarioLabLiveSession(
@@ -126,6 +128,10 @@ class ScenarioLabServer:
                         owner.model_evaluator.identity
                         if owner.model_evaluator is not None else None
                     )
+                    merge_distance_identity = (
+                        owner.merge_distance_evaluator.identity
+                        if owner.merge_distance_evaluator is not None else None
+                    )
                     self._json(200, {
                         'ready': True,
                         'reward_version': 'spatial_v2_1',
@@ -143,6 +149,10 @@ class ScenarioLabServer:
                         ),
                         'model_available': model_identity is not None,
                         'model': model_identity,
+                        'merge_distance_available': (
+                            merge_distance_identity is not None
+                        ),
+                        'merge_distance_model': merge_distance_identity,
                         'model_continuous_available': (
                             owner.model_controller is not None
                         ),
@@ -249,6 +259,7 @@ class ScenarioLabServer:
                         '/api/evaluate',
                         '/api/voronoi/evaluate',
                         '/api/model/evaluate',
+                        '/api/merge-distance/evaluate',
                         '/api/model/control',
                         '/api/comparison/model/control',
                         '/api/live/command',
@@ -331,6 +342,18 @@ class ScenarioLabServer:
                             raise RuntimeError('模型 checkpoint 尚未加载')
                         payload = owner.model_evaluator.evaluate(
                             request.get('scene')
+                        )
+                    elif self.path == '/api/merge-distance/evaluate':
+                        if owner.merge_distance_evaluator is None:
+                            raise RuntimeError('合成步距预测器尚未加载')
+                        payload = owner.merge_distance_evaluator.evaluate(
+                            request.get('scene'),
+                            danger_progress=request.get(
+                                'danger_progress', 0.0
+                            ),
+                            over_danger_line=request.get(
+                                'over_danger_line'
+                            ),
                         )
                     elif self.path == '/api/voronoi/evaluate':
                         payload = owner.voronoi_evaluator.evaluate(

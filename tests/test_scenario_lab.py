@@ -3,6 +3,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from tempfile import TemporaryDirectory
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -29,6 +30,13 @@ from daxigua.rl.scenario_model_controller import (
 )
 from daxigua.rl.config import ModelConfig
 from daxigua.rl.model import BaselineGnnDqn
+from daxigua.rl.merge_distance import (
+    MergeDistanceConfig,
+    MergeDistancePredictor,
+)
+from daxigua.rl.scenario_merge_distance_evaluator import (
+    ScenarioMergeDistanceEvaluator,
+)
 from daxigua.rl.scenario_model_evaluator import ScenarioModelEvaluator
 from daxigua.rl.viewer import LoadedViewerModel
 
@@ -46,6 +54,56 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertGreater(specs[0]['merged_physics_radius'], 0)
 
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_merge_distance_evaluator_returns_prediction_for_each_fruit(self):
+        config = MergeDistanceConfig(
+            hidden_dim=16,
+            edge_hidden_dim=16,
+            message_layers=1,
+            queue_hidden_dim=8,
+            queue_layers=1,
+            level_embedding_dim=6,
+            max_neighbors=4,
+            nearest_neighbors=2,
+            motion_neighbors=1,
+            vertical_neighbors_per_direction=1,
+        )
+        model = MergeDistancePredictor(config)
+        with torch.no_grad():
+            for parameter in model.parameters():
+                parameter.zero_()
+            model.output_head.bias[3] = 5.0
+        with TemporaryDirectory() as temporary:
+            checkpoint = Path(temporary) / 'predictor.pt'
+            torch.save({
+                'purpose': 'merge_distance_predictor',
+                'model_config': config.to_dict(),
+                'geometry_config': model.geometry_config,
+                'model_state': model.state_dict(),
+                'metrics': {'exact_bin_accuracy': 0.5},
+            }, checkpoint)
+            evaluator = ScenarioMergeDistanceEvaluator(
+                checkpoint, device='cpu'
+            )
+            payload = evaluator.evaluate({
+                'fps': 120,
+                'queue': [1, 2, 3, 4],
+                'fruits': [{
+                    'id': 42,
+                    'level': 3,
+                    'x': 280.0,
+                    'y': 900.0,
+                }],
+            })
+
+        self.assertEqual(1, payload['fruit_count'])
+        prediction = payload['predictions'][0]
+        self.assertEqual(42, prediction['fruit_id'])
+        self.assertEqual(3, prediction['class_index'])
+        self.assertEqual('5–8 次', prediction['label'])
+        self.assertEqual(5, prediction['min_steps'])
+        self.assertEqual(8, prediction['max_steps'])
+        self.assertEqual(13, len(prediction['probabilities']))
+
     def test_weighted_voronoi_builder_keeps_every_active_site(self):
         builder = WeightedVoronoiGraphBuilder(
             SimulatorConfig(), device='cpu', sample_spacing=8.0
@@ -469,6 +527,63 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
         self.assertEqual(7, result['action'])
         self.assertEqual(21, len(result['q_values']))
         self.assertTrue(control['running'])
+
+    def test_merge_distance_http_api_exposes_read_only_evaluation(self):
+        class FakeMergeDistanceEvaluator:
+            identity = {
+                'checkpoint': 'merge-distance.pt',
+                'checkpoint_sha256': 'abcdef123456',
+                'device': 'cpu',
+                'class_count': 13,
+            }
+
+            @staticmethod
+            def evaluate(scene, **_context):
+                return {
+                    'fruit_count': len(scene['fruits']),
+                    'predictions': [{
+                        'fruit_id': fruit['id'],
+                        'label': '5–8 次',
+                    } for fruit in scene['fruits']],
+                }
+
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'),
+            merge_distance_evaluator=FakeMergeDistanceEvaluator(),
+            host='127.0.0.1',
+            port=0,
+        ).start()
+        scene = {
+            'fps': 120,
+            'queue': [1, 2, 3, 4],
+            'fruits': [{
+                'id': 9, 'level': 2, 'x': 200.0, 'y': 800.0,
+            }],
+        }
+        try:
+            with urlopen(server.url + 'api/health', timeout=2.0) as response:
+                health = json.loads(response.read())
+            request = Request(
+                server.url + 'api/merge-distance/evaluate',
+                data=json.dumps({
+                    'scene': scene,
+                    'danger_progress': 0.25,
+                    'over_danger_line': False,
+                }).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=2.0) as response:
+                result = json.loads(response.read())
+        finally:
+            server.close()
+
+        self.assertTrue(health['merge_distance_available'])
+        self.assertEqual(
+            'merge-distance.pt',
+            health['merge_distance_model']['checkpoint'],
+        )
+        self.assertEqual(9, result['predictions'][0]['fruit_id'])
 
     def test_comparison_model_control_http_api(self):
         class FakeModelEvaluator:

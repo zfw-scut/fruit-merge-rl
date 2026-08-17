@@ -47,12 +47,18 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
              'options': ['play_vs_training', 'backend_parity']},
             {'id': 'model_device', 'label': '模型设备', 'type': 'select', 'default': 'auto',
              'options': ['auto', 'cuda', 'cpu']},
+            {'id': 'merge_distance_device', 'label': '步距预测设备',
+             'type': 'select', 'default': 'auto',
+             'options': ['auto', 'cuda', 'cpu']},
             {'id': 'port', 'label': '服务端口', 'type': 'number', 'default': 8769,
              'min': 1024, 'max': 65535, 'step': 1},
             {'id': 'reward_scale', 'label': '空间奖励缩放', 'type': 'range',
              'default': 1.0, 'min': 0.1, 'max': 2.0, 'step': 0.1},
             {'id': 'checkpoint', 'label': '模型 Checkpoint', 'type': 'checkpoint',
              'default': '', 'optional': True},
+            {'id': 'merge_distance_checkpoint', 'label': '步距预测 Checkpoint',
+             'type': 'merge_distance_checkpoint', 'default': '',
+             'optional': True},
         ],
     },
     'training_dashboard': {
@@ -211,6 +217,11 @@ def build_tool_command(tool_id: str, params: dict[str, Any]) -> tuple[list[str],
         port = _int_value(params, 'port', 1024, 65535)
         device = _choice(params, 'device', ('cuda', 'cpu'))
         model_device = _choice(params, 'model_device', ('auto', 'cuda', 'cpu'))
+        merge_distance_device = params.get('merge_distance_device', 'auto')
+        if merge_distance_device not in ('auto', 'cuda', 'cpu'):
+            raise ValueError(
+                "merge_distance_device 只能是 ('auto', 'cuda', 'cpu')"
+            )
         reward_scale = _float_value(params, 'reward_scale', 0.1, 2.0)
         comparison = params.get('comparison', 'on')
         if comparison not in ('on', 'off'):
@@ -227,6 +238,9 @@ def build_tool_command(tool_id: str, params: dict[str, Any]) -> tuple[list[str],
         command = [python, 'tools/open_scenario_lab.py', '--host',
                    '127.0.0.1', '--port', str(port), '--device', device,
                    '--model-device', model_device, '--reward-scale', str(reward_scale)]
+        command.extend([
+            '--merge-distance-device', merge_distance_device,
+        ])
         if comparison == 'on':
             command.extend([
                 '--comparison',
@@ -235,6 +249,14 @@ def build_tool_command(tool_id: str, params: dict[str, Any]) -> tuple[list[str],
         checkpoint = str(params.get('checkpoint') or '').strip()
         if checkpoint:
             command.extend(['--checkpoint', str(_inside(PROJECT_ROOT, checkpoint))])
+        merge_distance_checkpoint = str(
+            params.get('merge_distance_checkpoint') or ''
+        ).strip()
+        if merge_distance_checkpoint:
+            command.extend([
+                '--merge-distance-checkpoint',
+                str(_inside(PROJECT_ROOT, merge_distance_checkpoint)),
+            ])
         return command, f'http://127.0.0.1:{port}/'
     if tool_id == 'training_dashboard':
         port = _int_value(params, 'port', 1024, 65535)

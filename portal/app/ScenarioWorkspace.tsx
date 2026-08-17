@@ -117,6 +117,8 @@ type Health = {
   model_continuous_available: boolean;
   comparison_model_continuous_available?: boolean;
   model?: Record<string, unknown> | null;
+  merge_distance_available?: boolean;
+  merge_distance_model?: Record<string, unknown> | null;
   comparison_available?: boolean;
   voronoi_available?: boolean;
   voronoi_device?: string;
@@ -184,6 +186,27 @@ type ModelEvaluation = {
   q_values: number[];
   inference_ms: number;
   action_effect_predictions?: Prediction[] | null;
+  model?: Record<string, unknown>;
+};
+
+type MergeDistancePrediction = {
+  fruit_id: number;
+  level: number;
+  class_index: number;
+  label: string;
+  min_steps: number | null;
+  max_steps: number | null;
+  is_tail: boolean;
+  is_terminal_unmerged: boolean;
+  confidence: number;
+  eventual_merge_probability: number;
+  probabilities: number[];
+};
+
+type MergeDistanceEvaluation = {
+  fruit_count: number;
+  inference_ms: number;
+  predictions: MergeDistancePrediction[];
   model?: Record<string, unknown>;
 };
 
@@ -255,11 +278,13 @@ type ViewSettings = {
   realtimePrediction: boolean;
   showVoronoi: boolean;
   showVoronoiVertices: boolean;
+  showMergeDistance: boolean;
 };
 
 const DEFAULT_GEOMETRY: Geometry = { board_width: 560, board_height: 1120, wall_width: 8, spawn_y: 156, action_count: 21, queue_length: 4, max_fruits: 64 };
-const DEFAULT_SETTINGS: ViewSettings = { showGrid: true, showDanger: true, showAnchors: true, showVelocity: false, showPrediction: true, showActual: true, showNormal: true, realtimePrediction: true, showVoronoi: false, showVoronoiVertices: true };
+const DEFAULT_SETTINGS: ViewSettings = { showGrid: true, showDanger: true, showAnchors: true, showVelocity: false, showPrediction: true, showActual: true, showNormal: true, realtimePrediction: true, showVoronoi: false, showVoronoiVertices: true, showMergeDistance: false };
 const CONTACT_LABELS: Record<string, string> = { none: "未接触", floor: "地面", left_wall: "左墙", right_wall: "右墙", fruit: "水果", dynamic_fruit: "水果" };
+const MERGE_DISTANCE_COLORS = ["#20b982", "#46bf72", "#78c85e", "#a7c64d", "#d2bd43", "#e2a23c", "#e18443", "#d86652", "#c4526d", "#a64c8b", "#7755a6", "#5365b5", "#8792a3"];
 
 function number(value: unknown, digits = 1) {
   const numeric = Number(value);
@@ -274,6 +299,10 @@ function percentage(value: unknown) {
 function voronoiColor(clearance: number) {
   const scale = Math.max(0, Math.min(1, clearance / 120));
   return `hsl(${12 + scale * 178} 72% ${49 - scale * 8}%)`;
+}
+
+function mergeDistanceColor(prediction: MergeDistancePrediction) {
+  return MERGE_DISTANCE_COLORS[Math.max(0, Math.min(MERGE_DISTANCE_COLORS.length - 1, prediction.class_index))];
 }
 
 function sceneKey(state: LiveState) {
@@ -366,6 +395,9 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const [editTool, setEditTool] = useState<EditTool>("place");
   const [selectedAction, setSelectedAction] = useState(10);
   const [model, setModel] = useState<ModelEvaluation | null>(null);
+  const [mergeDistance, setMergeDistance] = useState<MergeDistanceEvaluation | null>(null);
+  const [mergeDistanceSourceKey, setMergeDistanceSourceKey] = useState("");
+  const [mergeDistanceBusy, setMergeDistanceBusy] = useState(false);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [voronoi, setVoronoi] = useState<VoronoiEvaluation | null>(null);
   const [voronoiSourceKey, setVoronoiSourceKey] = useState("");
@@ -379,6 +411,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     try { return { ...DEFAULT_SETTINGS, ...JSON.parse(localStorage.getItem("xigua-atlas-lab-settings") ?? "{}") }; } catch { return DEFAULT_SETTINGS; }
   });
   const predictionKey = useRef("");
+  const mergeDistanceInFlight = useRef(0);
   const voronoiKey = useRef("");
   const boardRef = useRef<SVGSVGElement>(null);
   const liveRef = useRef<LiveState | null>(null);
@@ -387,6 +420,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const touchHoldRef = useRef<{ pointerId: number; x: number; y: number; timer: number } | null>(null);
   const [gesture, setGesture] = useState<BoardGesture | null>(null);
   const [hoverPoint, setHoverPoint] = useState<Point | null>(null);
+  const [hoveredFruit, setHoveredFruit] = useState<number | null>(null);
   const [history, setHistory] = useState<SceneSnapshot[]>([]);
   const [future, setFuture] = useState<SceneSnapshot[]>([]);
   const [comparison, setComparison] = useState<ComparisonState | null>(null);
@@ -489,6 +523,37 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     } catch (reason) { setError(String(reason)); } finally { if (!quiet) setBusy(null); }
   }, [api, health?.model_available, live, selectedAction]);
 
+  const evaluateMergeDistance = useCallback(async (manual = false) => {
+    const state = liveRef.current;
+    if (!state || !health?.merge_distance_available) return;
+    if (!manual && mergeDistanceInFlight.current > 0) return;
+    const key = sceneKey(state);
+    mergeDistanceInFlight.current += 1;
+    setMergeDistanceBusy(true);
+    try {
+      const result = await api<MergeDistanceEvaluation>("/api/merge-distance/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scene: buildScene(state, selectedAction),
+          danger_progress: state.danger_progress,
+          over_danger_line: state.over_danger_line,
+        }),
+      });
+      const current = liveRef.current;
+      if (current && sceneKey(current) === key) {
+        setMergeDistance(result);
+        setMergeDistanceSourceKey(key);
+      }
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      mergeDistanceInFlight.current = Math.max(0, mergeDistanceInFlight.current - 1);
+      if (mergeDistanceInFlight.current === 0) setMergeDistanceBusy(false);
+    }
+  }, [api, health?.merge_distance_available, selectedAction]);
+
   useEffect(() => {
     if (!settings.realtimePrediction || !live?.stable || !health?.model_available || busy === "model") return;
     const key = sceneKey(live);
@@ -496,6 +561,16 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     const timer = window.setTimeout(() => void evaluateModel(true), 260);
     return () => window.clearTimeout(timer);
   }, [busy, evaluateModel, health?.model_available, live, settings.realtimePrediction]);
+
+  useEffect(() => {
+    if (!settings.showMergeDistance || !health?.merge_distance_available) return;
+    const refresh = () => {
+      if (liveRef.current?.stable) void evaluateMergeDistance(false);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 900);
+    return () => window.clearInterval(timer);
+  }, [evaluateMergeDistance, health?.merge_distance_available, settings.showMergeDistance]);
 
   const evaluateVoronoi = useCallback(async () => {
     const state = liveRef.current;
@@ -975,6 +1050,11 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const afterFruits = selectedEvaluation?.result_fruits;
   const displayFruits = canvasMode === "after" && afterFruits?.length ? afterFruits : live?.fruits ?? [];
   const displayedVoronoi = settings.showVoronoi && canvasMode === "live" && voronoiSourceKey === liveVoronoiKey ? voronoi : null;
+  const liveSceneKey = live ? sceneKey(live) : "";
+  const displayedMergeDistance = settings.showMergeDistance && canvasMode === "live" && mergeDistanceSourceKey === liveSceneKey ? mergeDistance : null;
+  const mergeDistanceByFruit = useMemo(() => new Map((displayedMergeDistance?.predictions ?? []).map((item) => [item.fruit_id, item])), [displayedMergeDistance]);
+  const hoveredFruitState = hoveredFruit === null ? null : displayFruits.find((fruit) => fruit.id === hoveredFruit) ?? null;
+  const hoveredMergeDistance = hoveredFruit === null ? null : mergeDistanceByFruit.get(hoveredFruit) ?? null;
   const qChart = useMemo(() => modelChart(model, selectedAction), [model, selectedAction]);
   const selectedSpec = specs.find((item) => item.level === selectedLevel);
   const left = geometry.wall_width + (selectedSpec?.radius ?? 20) + 2;
@@ -1046,18 +1126,20 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
               </g>}
               {settings.showAnchors && Array.from({ length: geometry.action_count }, (_, index) => { const x = left + (right - left) * index / Math.max(1, geometry.action_count - 1); return <g key={index} className={index === selectedAction ? "lab-anchor is-selected" : "lab-anchor"}><line x1={x} x2={x} y1={geometry.spawn_y - 28} y2={geometry.spawn_y + 28} /><text x={x} y={geometry.spawn_y - 38}>A{index}</text></g>; })}
               <line x1={actionX} x2={actionX} y1="0" y2={geometry.spawn_y} className="lab-probe-line" />
-              {displayFruits.map((fruit) => { const draft = gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? gesture : fruit; const radius = specs.find((item) => item.level === fruit.level)?.radius ?? fruit.physics_radius; return <g key={fruit.id} data-fruit-id={fruit.id} transform={`translate(${draft.x} ${draft.y}) rotate(${fruit.angle * 180 / Math.PI})`} className={`${selectedFruit === fruit.id ? "lab-fruit is-selected" : "lab-fruit"}${gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? " is-dragging" : ""}`} onPointerDown={(event) => onFruitPointerDown(event, fruit)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><circle r={radius + 4} /><image href={textures[fruit.level]} x={-radius} y={-radius} width={radius * 2} height={radius * 2} /><text y={4}>L{fruit.level}</text>{settings.showVelocity && <line x1="0" y1="0" x2={fruit.vx * .05} y2={fruit.vy * .05} className="lab-velocity" />}</g>; })}
+              {displayFruits.map((fruit) => { const draft = gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? gesture : fruit; const radius = specs.find((item) => item.level === fruit.level)?.radius ?? fruit.physics_radius; const distance = mergeDistanceByFruit.get(fruit.id); return <g key={fruit.id} data-fruit-id={fruit.id} transform={`translate(${draft.x} ${draft.y}) rotate(${fruit.angle * 180 / Math.PI})`} className={`${selectedFruit === fruit.id ? "lab-fruit is-selected" : "lab-fruit"}${gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? " is-dragging" : ""}`} onPointerEnter={() => setHoveredFruit(fruit.id)} onPointerLeave={() => setHoveredFruit((current) => current === fruit.id ? null : current)} onPointerDown={(event) => onFruitPointerDown(event, fruit)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><circle r={radius + 4} /><image href={textures[fruit.level]} x={-radius} y={-radius} width={radius * 2} height={radius * 2} />{distance && <><circle className="lab-merge-distance-tint" r={radius} style={{ fill: mergeDistanceColor(distance) }} /><circle className="lab-merge-distance-ring" r={radius + 2} style={{ stroke: mergeDistanceColor(distance) }} /></>}<text y={4}>L{fruit.level}</text>{settings.showVelocity && <line x1="0" y1="0" x2={fruit.vx * .05} y2={fruit.vy * .05} className="lab-velocity" />}</g>; })}
               {ghostPoint && dropGesture && <g transform={`translate(${ghostPoint.x} ${ghostPoint.y})`} className="lab-fruit is-ghost"><circle r={(ghostSpec?.radius ?? 20) + 4} /><image href={textures[dropGesture.level]} x={-(ghostSpec?.radius ?? 20)} y={-(ghostSpec?.radius ?? 20)} width={(ghostSpec?.radius ?? 20) * 2} height={(ghostSpec?.radius ?? 20) * 2} /><text y={4}>L{dropGesture.level}</text></g>}
               {settings.showPrediction && prediction?.first_contact?.position && <g className="lab-overlay prediction"><circle cx={prediction.first_contact.position.x} cy={prediction.first_contact.position.y} r="14" /><text x={prediction.first_contact.position.x + 18} y={prediction.first_contact.position.y - 12}>预测接触</text>{settings.showNormal && prediction.first_contact.normal && <line x1={prediction.first_contact.position.x} y1={prediction.first_contact.position.y} x2={prediction.first_contact.position.x + prediction.first_contact.normal.x * 54} y2={prediction.first_contact.position.y + prediction.first_contact.normal.y * 54} />}</g>}
               {settings.showActual && actual?.first_contact?.position && <g className="lab-overlay actual"><circle cx={actual.first_contact.position.x} cy={actual.first_contact.position.y} r="11" /><text x={actual.first_contact.position.x + 16} y={actual.first_contact.position.y + 24}>真实接触</text>{settings.showNormal && actual.first_contact.normal && <line x1={actual.first_contact.position.x} y1={actual.first_contact.position.y} x2={actual.first_contact.position.x + actual.first_contact.normal.x * 54} y2={actual.first_contact.position.y + actual.first_contact.normal.y * 54} />}</g>}
               {settings.showPrediction && prediction?.generations?.map((generation) => generation.exists_probability && generation.exists_probability > .35 && generation.position ? <g key={generation.rank} className="lab-overlay generation"><circle cx={generation.position.x} cy={generation.position.y} r={8 + Number(generation.rank)} /><text x={generation.position.x + 12} y={generation.position.y}>预测新L{generation.level?.index}</text></g> : null)}
               <rect x="0" y={geometry.board_height - geometry.wall_width} width={geometry.board_width} height={geometry.wall_width} className="lab-wall" /><rect x="0" y="0" width={geometry.wall_width} height={geometry.board_height} className="lab-wall" /><rect x={geometry.board_width - geometry.wall_width} y="0" width={geometry.wall_width} height={geometry.board_height} className="lab-wall" />
-              {hoverPoint && <g className="lab-coordinate-readout" transform={`translate(${Math.min(geometry.board_width - 82, hoverPoint.x + 12)} ${Math.max(26, hoverPoint.y - 12)})`}><rect x="0" y="-20" width="76" height="24" rx="6" /><text x="7" y="-4">{hoverPoint.x.toFixed(0)}, {hoverPoint.y.toFixed(0)}</text></g>}
+              {hoveredFruitState && hoveredMergeDistance && <g className="lab-merge-distance-tooltip" transform={`translate(${Math.max(8, Math.min(geometry.board_width - 184, hoveredFruitState.x + 18))} ${Math.max(62, hoveredFruitState.y - 18)})`}><rect x="0" y="-54" width="176" height="54" rx="8" /><circle cx="12" cy="-39" r="4" style={{ fill: mergeDistanceColor(hoveredMergeDistance) }} /><text className="is-title" x="22" y="-35">L{hoveredFruitState.level} · {hoveredMergeDistance.label}</text><text x="10" y="-15">区间置信 {percentage(hoveredMergeDistance.confidence)} · 最终合成 {percentage(hoveredMergeDistance.eventual_merge_probability)}</text></g>}
+              {hoverPoint && !hoveredMergeDistance && <g className="lab-coordinate-readout" transform={`translate(${Math.min(geometry.board_width - 82, hoverPoint.x + 12)} ${Math.max(26, hoverPoint.y - 12)})`}><rect x="0" y="-20" width="76" height="24" rx="6" /><text x="7" y="-4">{hoverPoint.x.toFixed(0)}, {hoverPoint.y.toFixed(0)}</text></g>}
             </svg>
           </div>
+          {settings.showMergeDistance && <div className="lab-merge-distance-legend"><span><i className="is-fast" />较快合成</span><span className="is-gradient" /><span>较晚合成<i className="is-slow" /></span><span><i className="is-terminal" />终局前未合成</span><b>{displayedMergeDistance ? `${displayedMergeDistance.fruit_count} 个水果 · ${number(displayedMergeDistance.inference_ms, 2)} ms` : health?.merge_distance_available ? "等待稳定场景预测" : "预测器未加载"}</b></div>}
           <div className="lab-interaction-hint"><Crosshair size={14} /><span>{interactionHint}</span><kbd>V</kbd><kbd>B</kbd><kbd>E</kbd></div>
           <div className="lab-action-strip"><span>A{selectedAction}</span><input type="range" min="0" max={geometry.action_count - 1} value={selectedAction} onChange={(event) => { setSelectedAction(Number(event.target.value)); setCanvasMode("live"); }} /><b>x {actionX.toFixed(1)}</b></div>
-          <div className="lab-primary-actions"><button className="primary-button compact" disabled={!health?.model_available || Boolean(busy)} onClick={() => void evaluateModel()}><Sparkles size={15} />{busy === "model" ? "预测中" : "刷新模型预测"}</button><button disabled={Boolean(busy)} onClick={() => void evaluatePhysics()}><FlaskConical size={15} />{busy === "physics" ? "验证21动作中" : "真实验证21动作"}</button><button disabled={!live || Boolean(busy)} onClick={() => void sendCommand({ type: "drop_action", action: selectedAction })}><Play size={15} />执行A{selectedAction}</button><button disabled={!health?.model_continuous_available || Boolean(busy)} onClick={() => void modelControl()}>{live?.model_continuous?.running ? <Pause size={15} /> : <Activity size={15} />}{live?.model_continuous?.running ? "停止持续决策" : "启动持续决策"}</button></div>
+          <div className="lab-primary-actions"><button className="primary-button compact" disabled={!health?.model_available || Boolean(busy)} onClick={() => void evaluateModel()}><Sparkles size={15} />{busy === "model" ? "预测中" : "刷新模型预测"}</button><button disabled={!health?.merge_distance_available || !live} onClick={() => void evaluateMergeDistance(true)}><RefreshCw className={mergeDistanceBusy ? "is-spinning" : ""} size={15} />{mergeDistanceBusy ? "步距预测中" : "刷新步距预测"}</button><button disabled={Boolean(busy)} onClick={() => void evaluatePhysics()}><FlaskConical size={15} />{busy === "physics" ? "验证21动作中" : "真实验证21动作"}</button><button disabled={!live || Boolean(busy)} onClick={() => void sendCommand({ type: "drop_action", action: selectedAction })}><Play size={15} />执行A{selectedAction}</button><button disabled={!health?.model_continuous_available || Boolean(busy)} onClick={() => void modelControl()}>{live?.model_continuous?.running ? <Pause size={15} /> : <Activity size={15} />}{live?.model_continuous?.running ? "停止持续决策" : "启动持续决策"}</button></div>
         </main>
 
         <aside className="lab-inspector">
@@ -1070,6 +1152,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
             <div><span>q0最终等级</span><b>{prediction?.q0?.final_level?.index ?? "—"} / {actual?.q0?.final_level ?? "—"}</b></div>
             <div><span>得分增量</span><b>{number(prediction?.outcome?.score_delta)} / {actual?.outcome?.score_delta ?? "—"}</b></div>
           </div>
+          <details className="lab-collapsible" open={settings.showMergeDistance}><summary><ChevronDown size={14} /> 合成步距预测</summary>{health?.merge_distance_available ? <><div className="lab-merge-distance-summary"><span>状态<b>{settings.showMergeDistance ? "实时颜色已开启" : "等待开启图层"}</b></span><span>预测水果<b>{displayedMergeDistance?.fruit_count ?? "—"}</b></span><span>单次耗时<b>{number(displayedMergeDistance?.inference_ms, 2)} ms</b></span><span>预测器<b>{String(health.merge_distance_model?.checkpoint ?? "—")}</b></span></div><p className="lab-muted">颜色表示最大概率时间区间；悬停水果可查看具体区间、区间置信度和最终参与合成概率。</p></> : <p className="lab-muted">尚未加载合成步距预测器。启动实验室时可自动发现最近训练完成的预测器，也可在工具参数中指定 checkpoint。</p>}</details>
           <details className="lab-collapsible" open={settings.showVoronoi}><summary><ChevronDown size={14} /> Voronoi / Free-Space Graph</summary>{displayedVoronoi ? <><div className="lab-voronoi-summary"><span>构建设备<b>{displayedVoronoi.device}</b></span><span>完整站点<b>{displayedVoronoi.stats.fruit_site_count} 水果 + 3 边界</b></span><span>可见水果站点<b>{displayedVoronoi.stats.visible_fruit_site_count} / {displayedVoronoi.stats.fruit_site_count}</b></span><span>图规模<b>{displayedVoronoi.stats.edge_count} 边 · {displayedVoronoi.stats.vertex_count} 交汇点</b></span><span>采样间距<b>{number(displayedVoronoi.sample_spacing)} px</b></span><span>构建耗时<b>{number(displayedVoronoi.compute_ms, 2)} ms{displayedVoronoi.cache_hit ? " · cache" : ""}</b></span></div><div className="lab-voronoi-legend"><i className="is-narrow" />窄 clearance <i className="is-wide" />宽 clearance</div><p className="lab-muted">圆面加权距离；左右壁与桶底参与，顶部开放。规则栅格只用于 GPU 数值构图，画布节点是恢复出的空间交汇点。</p></> : <p className="lab-muted">{voronoiError ?? (voronoiBusy ? "正在构建当前场景的完整图……" : settings.showVoronoi ? "等待场景几何停止明显变化后构图。" : "在显示设置中开启该图层。")}</p>}</details>
           <details className="lab-collapsible" open><summary><ChevronDown size={14} /> 模型动作偏好</summary>{model ? <><div className="lab-model-head"><span>推荐 A{model.action}</span><b>Q {number(model.selected_q, 5)}</b><small>{number(model.inference_ms, 2)} ms</small></div><EChart option={qChart} className="lab-q-chart" /></> : <p className="lab-muted">加载带模型的服务后，稳定场景会自动预测全部21个动作。</p>}</details>
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景与模型身份</summary><div className="lab-identity"><span>实时物理<b>{live?.physics_backend === "tensor_cuda" ? "Tensor / CUDA" : live?.physics_backend === "tensor_cpu" ? "Tensor / CPU" : "—"}</b></span><span>物理帧率<b>{live?.physics_fps ?? "—"} FPS</b></span><span>训练物理同源<b>{live?.training_physics_equivalent ? "是" : "—"}</b></span><span>场上水果<b>{live?.fruits.length ?? 0} / {geometry.max_fruits}</b></span><span>模型checkpoint<b>{String(health?.model?.checkpoint ?? "未加载")}</b></span><span>模型训练量<b>{number(health?.model?.training_transitions, 0)}</b></span></div></details>
@@ -1078,7 +1161,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
       </div>}
 
       <AnimatePresence>
-        {settingsOpen && <motion.div className="lab-settings-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><motion.aside className="lab-settings-drawer" initial={{ x: 36, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 36, opacity: 0 }}><div className="lab-settings-head"><div><span>VISUAL LAYERS</span><h2>场景显示设置</h2><p>只勾选当前诊断需要的图层，避免预测、真实效果和几何辅助相互遮挡。</p></div><button onClick={() => setSettingsOpen(false)}><X size={17} /></button></div><div className="lab-settings-groups"><section><h3>基础画布</h3>{settingLabel("空间网格", settings.showGrid, (value) => setSettings((current) => ({ ...current, showGrid: value })))}{settingLabel("危险线", settings.showDanger, (value) => setSettings((current) => ({ ...current, showDanger: value })))}{settingLabel("21个动作锚点", settings.showAnchors, (value) => setSettings((current) => ({ ...current, showAnchors: value })))}{settingLabel("水果速度向量", settings.showVelocity, (value) => setSettings((current) => ({ ...current, showVelocity: value })))}</section><section><h3>自由空间几何</h3>{settingLabel("完整加权 Voronoi 图", settings.showVoronoi, (value) => setSettings((current) => ({ ...current, showVoronoi: value })))}{settingLabel("显示空间交汇节点", settings.showVoronoiVertices, (value) => setSettings((current) => ({ ...current, showVoronoiVertices: value })))}</section><section><h3>辅助动作预测</h3>{settingLabel("稳定场景实时预测", settings.realtimePrediction, (value) => setSettings((current) => ({ ...current, realtimePrediction: value })))}{settingLabel("预测接触与生成位置", settings.showPrediction, (value) => setSettings((current) => ({ ...current, showPrediction: value })))}{settingLabel("真实动作效果", settings.showActual, (value) => setSettings((current) => ({ ...current, showActual: value })))}{settingLabel("接触法向量", settings.showNormal, (value) => setSettings((current) => ({ ...current, showNormal: value })))}</section></div><button className="ghost-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RefreshCw size={14} />恢复默认图层</button></motion.aside></motion.div>}
+        {settingsOpen && <motion.div className="lab-settings-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><motion.aside className="lab-settings-drawer" initial={{ x: 36, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 36, opacity: 0 }}><div className="lab-settings-head"><div><span>VISUAL LAYERS</span><h2>场景显示设置</h2><p>只勾选当前诊断需要的图层，避免预测、真实效果和几何辅助相互遮挡。</p></div><button onClick={() => setSettingsOpen(false)}><X size={17} /></button></div><div className="lab-settings-groups"><section><h3>基础画布</h3>{settingLabel("空间网格", settings.showGrid, (value) => setSettings((current) => ({ ...current, showGrid: value })))}{settingLabel("危险线", settings.showDanger, (value) => setSettings((current) => ({ ...current, showDanger: value })))}{settingLabel("21个动作锚点", settings.showAnchors, (value) => setSettings((current) => ({ ...current, showAnchors: value })))}{settingLabel("水果速度向量", settings.showVelocity, (value) => setSettings((current) => ({ ...current, showVelocity: value })))}</section><section><h3>自由空间几何</h3>{settingLabel("完整加权 Voronoi 图", settings.showVoronoi, (value) => setSettings((current) => ({ ...current, showVoronoi: value })))}{settingLabel("显示空间交汇节点", settings.showVoronoiVertices, (value) => setSettings((current) => ({ ...current, showVoronoiVertices: value })))}</section><section><h3>逐水果语义预测</h3>{settingLabel("合成步距颜色滤镜（实时）", settings.showMergeDistance, (value) => setSettings((current) => ({ ...current, showMergeDistance: value })))}</section><section><h3>辅助动作预测</h3>{settingLabel("稳定场景实时预测", settings.realtimePrediction, (value) => setSettings((current) => ({ ...current, realtimePrediction: value })))}{settingLabel("预测接触与生成位置", settings.showPrediction, (value) => setSettings((current) => ({ ...current, showPrediction: value })))}{settingLabel("真实动作效果", settings.showActual, (value) => setSettings((current) => ({ ...current, showActual: value })))}{settingLabel("接触法向量", settings.showNormal, (value) => setSettings((current) => ({ ...current, showNormal: value })))}</section></div><button className="ghost-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RefreshCw size={14} />恢复默认图层</button></motion.aside></motion.div>}
       </AnimatePresence>
     </section>
   );

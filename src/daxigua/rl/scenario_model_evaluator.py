@@ -17,18 +17,17 @@ from .observations import TensorState
 from .viewer import LoadedViewerModel
 
 
-def _state_from_scene(
+def tensor_state_from_scene(
         scene,
-        loaded,
         *,
+        device,
+        capacity,
         danger_progress=0.0,
         over_danger_line=None):
-    """把已规范化的场景转换成基线 GNN-DQN 的单批状态。"""
+    """把已规范化的场景转换成模型可直接读取的单批状态。"""
 
-    if not isinstance(loaded, LoadedViewerModel):
-        raise TypeError('loaded must be LoadedViewerModel')
-    device = loaded.device
-    capacity = loaded.model_config.max_fruits
+    device = torch.device(device)
+    capacity = int(capacity)
     fruit_count = len(scene['fruits'])
     if fruit_count > capacity:
         raise ValueError('scenario fruit count exceeds model capacity')
@@ -111,6 +110,25 @@ def _state_from_scene(
             [over_danger_line], dtype=torch.bool, device=device
         ),
         physics_fps=float(scene['fps']),
+    )
+
+
+def _state_from_scene(
+        scene,
+        loaded,
+        *,
+        danger_progress=0.0,
+        over_danger_line=None):
+    """把已规范化的场景转换成基线 GNN-DQN 的单批状态。"""
+
+    if not isinstance(loaded, LoadedViewerModel):
+        raise TypeError('loaded must be LoadedViewerModel')
+    return tensor_state_from_scene(
+        scene,
+        device=loaded.device,
+        capacity=loaded.model_config.max_fruits,
+        danger_progress=danger_progress,
+        over_danger_line=over_danger_line,
     )
 
 
@@ -232,4 +250,4 @@ class ScenarioModelEvaluator:
         }
 
 
-__all__ = ['ScenarioModelEvaluator']
+__all__ = ['ScenarioModelEvaluator', 'tensor_state_from_scene']

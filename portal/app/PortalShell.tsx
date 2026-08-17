@@ -69,7 +69,7 @@ type DocumentRecord = {
 type ToolParameter = {
   id: string;
   label: string;
-  type: "select" | "number" | "range" | "checkpoint" | "run" | "config" | "segmented";
+  type: "select" | "number" | "range" | "checkpoint" | "merge_distance_checkpoint" | "run" | "config" | "segmented";
   default: string | number | boolean;
   options?: Array<string | number>;
   min?: number;
@@ -920,7 +920,9 @@ function ToolIcon({ id }: { id: string }) {
 }
 
 function ParameterControl({ parameter, value, choices, onChange }: { parameter: ToolParameter; value: string | number | boolean; choices: ToolChoices; onChange: (value: string | number | boolean) => void }) {
-  const dynamicOptions = parameter.type === 'checkpoint' ? choices.checkpoints : parameter.type === 'run' ? choices.runs : parameter.type === 'config' ? choices.configs : null;
+  const predictorCheckpoints = choices.checkpoints.filter((option) => option.value.replaceAll('\\', '/').startsWith('runs/merge_distance/'));
+  const policyCheckpoints = choices.checkpoints.filter((option) => !option.value.replaceAll('\\', '/').startsWith('runs/merge_distance/'));
+  const dynamicOptions = parameter.type === 'checkpoint' ? policyCheckpoints : parameter.type === 'merge_distance_checkpoint' ? predictorCheckpoints : parameter.type === 'run' ? choices.runs : parameter.type === 'config' ? choices.configs : null;
   const options = dynamicOptions ?? parameter.options?.map((option) => ({ label: String(option), value: String(option) })) ?? [];
   const numeric = parameter.type === 'number' || parameter.type === 'range';
   return (
@@ -928,9 +930,9 @@ function ParameterControl({ parameter, value, choices, onChange }: { parameter: 
       <span><b>{parameter.label}</b>{parameter.optional && <small>可选</small>}</span>
       {parameter.type === 'segmented' ? (
         <div className="segmented-control">{options.map((option) => <button type="button" key={option.value} className={String(value) === option.value ? 'active' : ''} onClick={() => onChange(Number(option.value))}>{option.label}</button>)}</div>
-      ) : options.length || ['checkpoint', 'run', 'config', 'select'].includes(parameter.type) ? (
+      ) : options.length || ['checkpoint', 'merge_distance_checkpoint', 'run', 'config', 'select'].includes(parameter.type) ? (
         <select value={String(value)} onChange={(event) => onChange(event.target.value)}>
-          {(parameter.optional || !options.length) && <option value="">{options.length ? '不加载模型' : '暂无可用项目'}</option>}
+          {(parameter.optional || !options.length) && <option value="">{options.length ? parameter.type === 'merge_distance_checkpoint' ? '自动发现最近成品' : '不加载模型' : '暂无可用项目'}</option>}
           {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
       ) : numeric ? (
