@@ -367,13 +367,11 @@ def collect_candidates(args):
                 POSITIVE_TIME_BUCKETS
                 if kind in ('TP', 'FN') else (NEGATIVE_TIME_BUCKET,)
             )
-            seen = set()
             for bucket_name in buckets:
                 selected[(level, kind, bucket_name)] = (
                     select_unique_candidates(
                         pools[(level, kind, bucket_name)],
                         reserve_count,
-                        seen=seen,
                     )
                 )
     return model, selected, counts, time_counts, device
