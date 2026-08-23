@@ -34,6 +34,7 @@ from tools.train_pair_risk import (
 from tools.benchmark_pair_risk_collection import _gpu_summary
 from tools.render_pair_risk_gallery import (
     confusion_kind,
+    select_complete_timelines,
     select_unique_candidates,
     timeline_target_specs,
     warning_time_bucket,
@@ -368,6 +369,30 @@ class PairRiskBalanceTests(unittest.TestCase):
             {'role': 'forecast_midpoint', 'target_step': 212},
             {'role': 'forecast_end', 'target_step': 224},
         ])
+
+    def test_gallery_prefers_complete_timeline_before_confidence(self):
+        incomplete = {
+            'priority': 0.99,
+            'timeline': [
+                {'frame': {'target_pair_present': True}},
+                {'frame': None},
+                {'frame': None},
+            ],
+        }
+        complete = {
+            'priority': 0.80,
+            'timeline': [
+                {'frame': {'target_pair_present': True}},
+                {'frame': {'target_pair_present': True}},
+                {'frame': {'target_pair_present': False}},
+            ],
+        }
+        selected = select_complete_timelines(
+            {('level', 'kind', 'time'): [incomplete, complete]}, 1
+        )
+        self.assertIs(
+            selected[('level', 'kind', 'time')][0], complete
+        )
 
 
 class PairRiskTrainingSmokeTests(unittest.TestCase):

@@ -81,6 +81,7 @@ def parse_args(argv=None):
     parser.add_argument('--per-bucket', type=int, default=2)
     parser.add_argument('--batch-size', type=int, default=8192)
     parser.add_argument('--pool-multiplier', type=int, default=32)
+    parser.add_argument('--timeline-reserve-multiplier', type=int, default=8)
     parser.add_argument(
         '--autocast-bfloat16',
         action=argparse.BooleanOptionalAction,
@@ -232,6 +233,8 @@ def collect_candidates(args):
         raise ValueError('per-bucket and batch-size must be positive')
     if args.pool_multiplier <= 0:
         raise ValueError('pool-multiplier must be positive')
+    if args.timeline_reserve_multiplier <= 0:
+        raise ValueError('timeline-reserve-multiplier must be positive')
     dataset_dir = Path(args.dataset_dir).resolve()
     checkpoint_path = Path(args.checkpoint).resolve()
     device = _resolve_device(args.device)
@@ -355,6 +358,9 @@ def collect_candidates(args):
                         )
                         del bucket[pool_limit:]
     selected = {}
+    reserve_count = (
+        int(args.per_bucket) * int(args.timeline_reserve_multiplier)
+    )
     for level in range(7, 12):
         for kind in CONFUSION_ORDER:
             buckets = (
@@ -366,7 +372,7 @@ def collect_candidates(args):
                 selected[(level, kind, bucket_name)] = (
                     select_unique_candidates(
                         pools[(level, kind, bucket_name)],
-                        args.per_bucket,
+                        reserve_count,
                         seen=seen,
                     )
                 )
@@ -485,6 +491,7 @@ def attach_timeline_frames(
             entry = dict(spec)
             entry['frame'] = candidate if spec['role'] == 'prediction' else None
             entry['distance'] = 0 if spec['role'] == 'prediction' else None
+            entry['rank'] = (0, 0) if spec['role'] == 'prediction' else None
             timeline.append(entry)
             if spec['role'] != 'prediction':
                 requests_by_episode.setdefault(
@@ -518,15 +525,24 @@ def attach_timeline_frames(
                     continue
                 seen_episode_steps.add(scene_identity)
                 for candidate, entry in requests_by_episode[episode]:
-                    distance = abs(step - int(entry['target_step']))
+                    delta = step - int(entry['target_step'])
+                    distance = abs(delta)
                     if distance > max_distance:
                         continue
-                    if (
-                            entry['distance'] is not None
-                            and distance >= int(entry['distance'])):
+                    side_penalty = (
+                        0
+                        if (
+                            entry['role'] in ('onset', 'confirmation')
+                            and delta >= 0
+                        )
+                        else 1
+                    )
+                    rank = (distance, side_penalty)
+                    if entry['rank'] is not None and rank >= entry['rank']:
                         continue
                     entry['frame'] = _copy_scene(columns, row, candidate)
                     entry['distance'] = distance
+                    entry['rank'] = rank
 
     scored_frames = []
     for candidate in candidates:
@@ -549,6 +565,32 @@ def attach_timeline_frames(
         for frame, probability in zip(frames, probabilities):
             frame['probability'] = float(probability)
     return candidates
+
+
+def timeline_candidate_quality(candidate):
+    frames = [entry['frame'] for entry in candidate['timeline']]
+    scene_count = sum(frame is not None for frame in frames)
+    pair_count = sum(
+        bool(frame.get('target_pair_present', True))
+        for frame in frames if frame is not None
+    )
+    return (
+        scene_count == len(frames),
+        scene_count,
+        pair_count,
+        float(candidate['priority']),
+    )
+
+
+def select_complete_timelines(selected, count):
+    """优先保留三帧完整、目标水果对可追踪的高置信案例。"""
+
+    return {
+        key: sorted(
+            candidates, key=timeline_candidate_quality, reverse=True
+        )[:int(count)]
+        for key, candidates in selected.items()
+    }
 
 
 def _draw_scene(axis, frame, candidate, board, *, role, target_step):
@@ -788,6 +830,7 @@ def run(args):
         batch_size=args.batch_size,
         autocast_bfloat16=args.autocast_bfloat16,
     )
+    selected = select_complete_timelines(selected, args.per_bucket)
     model_config = model.config
     simulator = collection_manifest.get('simulator_config') or {}
     board = {
@@ -834,6 +877,9 @@ def run(args):
         'split': args.split,
         'threshold': float(args.threshold),
         'per_bucket': int(args.per_bucket),
+        'timeline_reserve_multiplier': int(
+            args.timeline_reserve_multiplier
+        ),
         'forecast_horizon': forecast_horizon,
         'confirmation_drops': confirmation_drops,
         'exposure_stride': exposure_stride,
