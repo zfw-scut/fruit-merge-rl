@@ -32,6 +32,10 @@ from tools.train_pair_risk import (
     training_balance_to,
 )
 from tools.benchmark_pair_risk_collection import _gpu_summary
+from tools.render_pair_risk_gallery import (
+    confusion_kind,
+    select_unique_candidates,
+)
 
 
 def _model_columns(batch=3, fruits=6):
@@ -300,6 +304,37 @@ class PairRiskBalanceTests(unittest.TestCase):
         self.assertEqual(
             summary['memory_used_mib']['median'], 2000
         )
+
+    def test_gallery_classification_and_event_deduplication(self):
+        self.assertEqual(confusion_kind(True, True), 'TP')
+        self.assertEqual(confusion_kind(True, False), 'FP')
+        self.assertEqual(confusion_kind(False, True), 'FN')
+        self.assertEqual(confusion_kind(False, False), 'TN')
+        candidates = [
+            {
+                'priority': 0.99,
+                'event_id': 3,
+                'episode_id': 10,
+                'fruit_id_i': 1,
+                'fruit_id_j': 2,
+            },
+            {
+                'priority': 0.98,
+                'event_id': 3,
+                'episode_id': 10,
+                'fruit_id_i': 1,
+                'fruit_id_j': 2,
+            },
+            {
+                'priority': 0.97,
+                'event_id': 4,
+                'episode_id': 11,
+                'fruit_id_i': 5,
+                'fruit_id_j': 6,
+            },
+        ]
+        selected = select_unique_candidates(candidates, 2)
+        self.assertEqual([row['event_id'] for row in selected], [3, 4])
 
 
 class PairRiskTrainingSmokeTests(unittest.TestCase):
