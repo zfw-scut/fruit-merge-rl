@@ -174,7 +174,9 @@ class QueueMessageLayer(nn.Module):
 class BaselineGnnDqn(nn.Module):
     """共享物理水果 GNN、队列编码和 21 个单向动作探针。"""
 
-    EDGE_DIM = 14
+    LEGACY_EDGE_DIM = 14
+    PAIR_RESULT_EDGE_DIM = 4
+    EDGE_DIM = LEGACY_EDGE_DIM + PAIR_RESULT_EDGE_DIM
     BOUNDARY_EDGE_DIM = 5
     ACTION_LIGHT_DIM = 8
     ACTION_DETAIL_DIM = 10
@@ -485,6 +487,29 @@ class BaselineGnnDqn(nn.Module):
         )
         level_i = state.levels.unsqueeze(2)
         level_j = state.levels.unsqueeze(1)
+        canonical_radii = self.display_radii[
+            state.levels.to(torch.long).clamp(0, MAX_FRUIT_LEVEL)
+        ]
+        canonical_radius_i = canonical_radii.unsqueeze(2)
+        canonical_radius_j = canonical_radii.unsqueeze(1)
+        center_fraction = canonical_radius_i / (
+            canonical_radius_i + canonical_radius_j
+        ).clamp_min(1.0)
+        pair_result_center = (
+            position.unsqueeze(2)
+            + center_fraction.unsqueeze(-1) * relative
+        )
+        pair_max_level = torch.maximum(level_i, level_j).to(torch.long)
+        pair_result_exists = pair_valid & (pair_max_level < MAX_FRUIT_LEVEL)
+        pair_result_level = (pair_max_level + 1).clamp_max(MAX_FRUIT_LEVEL)
+        pair_result_radius = (
+            self.display_radii[pair_result_level] - 1.0
+        ).clamp_min(0.0)
+        pair_result_radius = torch.where(
+            pair_result_exists,
+            pair_result_radius,
+            torch.zeros_like(pair_result_radius),
+        )
         edge_full = torch.stack(
             (
                 relative[..., 0] / radius_sum.clamp_min(1.0),
@@ -503,6 +528,10 @@ class BaselineGnnDqn(nn.Module):
                 torch.where(
                     torch.isfinite(ttc), ttc.clamp(0.0, 1.0), torch.ones_like(ttc)
                 ),
+                pair_result_center[..., 0] / self.board_width * 2.0 - 1.0,
+                pair_result_center[..., 1] / self.board_height * 2.0 - 1.0,
+                pair_result_radius / self.board_width,
+                pair_result_exists.to(position.dtype),
             ),
             dim=-1,
         )
@@ -896,3 +925,38 @@ class BaselineGnnDqn(nn.Module):
             state, predict_action_effects, action_effect_batch_size
         )
         return output if return_details else output.q_values
+
+
+def compatible_model_state_dict(model, state_dict):
+    """为旧 14 维物理边权重补零，保留旧 checkpoint 的原始行为。"""
+
+    upgraded = state_dict.copy()
+    expected = model.state_dict()
+    for layer_index in range(len(model.physical_layers)):
+        for suffix in ('edge_encoder.0.weight', 'edge_gate.weight'):
+            key = f'physical_layers.{layer_index}.{suffix}'
+            source = upgraded.get(key)
+            target = expected.get(key)
+            if source is None or target is None or source.shape == target.shape:
+                continue
+            legacy_shape = (
+                source.ndim == 2
+                and target.ndim == 2
+                and source.shape[0] == target.shape[0]
+                and source.shape[1] + model.PAIR_RESULT_EDGE_DIM
+                == target.shape[1]
+            )
+            if not legacy_shape:
+                continue
+            padded = source.new_zeros(target.shape)
+            padded[:, :source.shape[1]] = source
+            upgraded[key] = padded
+    return upgraded
+
+
+def load_compatible_model_state_dict(model, state_dict, *, strict=True):
+    """加载当前权重，并兼容新增配对结果几何之前的旧物理边权重。"""
+
+    return model.load_state_dict(
+        compatible_model_state_dict(model, state_dict), strict=strict
+    )

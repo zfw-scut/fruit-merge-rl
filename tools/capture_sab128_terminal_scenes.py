@@ -55,7 +55,11 @@ def parse_args(argv=None):
     )
     parser.add_argument('--episodes', type=int, default=256)
     parser.add_argument('--checkpoint', type=Path, default=DEFAULT_CHECKPOINT)
-    parser.add_argument('--device', default='cuda')
+    parser.add_argument(
+        '--device',
+        default='cuda',
+        help='cuda 使用批量并行；cpu 使用逐局诊断路径，建议减少 episodes。',
+    )
     parser.add_argument('--seed-base', type=int, default=92_000_000)
     parser.add_argument(
         '--max-drops',
@@ -166,37 +170,19 @@ def _report_row(index, snapshot, image_path):
     }
 
 
-@torch.inference_mode()
-def run(args):
-    if args.episodes <= 0:
-        raise ValueError('episodes must be positive')
-    if args.max_drops <= 0:
-        raise ValueError('max-drops must be positive')
-    output_dir = (
-        args.output_dir.resolve()
-        if args.output_dir is not None
-        else Path(tempfile.mkdtemp(prefix='daxigua-sab128-terminal-')).resolve()
-    )
-    if output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError(f'output directory is not empty: {output_dir}')
-    output_dir.mkdir(parents=True, exist_ok=True)
-    images_dir = output_dir / 'images'
-    images_dir.mkdir()
+def _end_kind(result, capped, row=0):
+    if bool(result.physics.done[row].item()):
+        return 'failed'
+    if bool(result.physics.truncated[row].item()):
+        return 'truncated'
+    if bool(capped[row].item()):
+        return 'drop_limit'
+    raise RuntimeError('requested end kind for an unfinished episode')
 
-    loaded = load_viewer_model(args.checkpoint, device=args.device)
-    if loaded.checkpoint_sha256.lower() != SAB128_SHA256:
-        raise ValueError('checkpoint does not match the registered SAB-128')
-    config = viewer_simulator_config(
-        30, loaded.model_config, loaded.device
-    )
+
+def _collect_cuda(args, loaded, config, seeds):
     simulator = TensorVectorSimulator(
         args.episodes, config=config, device=loaded.device
-    )
-    seeds = (
-        torch.arange(args.episodes, dtype=torch.int64)
-        .mul_(SEED_STRIDE)
-        .add_(args.seed_base)
-        .to(loaded.device)
     )
     simulator.reset(seeds=seeds)
     active = torch.ones(
@@ -231,14 +217,8 @@ def run(args):
             finished, as_tuple=False
         ).flatten().detach().cpu().tolist()
         for row in finished_rows:
-            if bool(result.physics.done[row].item()):
-                end_kind = 'failed'
-            elif bool(result.physics.truncated[row].item()):
-                end_kind = 'truncated'
-            else:
-                end_kind = 'drop_limit'
             snapshots[row] = _snapshot(
-                after, row, seeds[row].item(), end_kind
+                after, row, seeds[row].item(), _end_kind(result, capped, row)
             )
         active &= ~finished
 
@@ -248,6 +228,7 @@ def run(args):
             completed = args.episodes - int(active.sum().item())
             print(json.dumps({
                 'phase': 'playing',
+                'device': 'cuda',
                 'completed': completed,
                 'episodes': args.episodes,
                 'active': int(active.sum().item()),
@@ -258,8 +239,94 @@ def run(args):
                 ),
             }, ensure_ascii=False), flush=True)
             last_progress = now
+    return snapshots, time.perf_counter() - started
 
-    collection_seconds = time.perf_counter() - started
+
+def _collect_cpu(args, loaded, config, seeds):
+    """CPU 诊断路径逐局运行，避免依赖仅 CUDA 可用的掩码步进。"""
+
+    simulator = TensorVectorSimulator(1, config=config, device=loaded.device)
+    snapshots = [None] * args.episodes
+    transitions = 0
+    started = time.perf_counter()
+    last_progress = started
+    for index in range(args.episodes):
+        seed = int(seeds[index].item())
+        simulator.reset(seeds=seed)
+        while True:
+            observation = simulator.observe()
+            state = TensorState.from_observation(
+                observation, physics_fps=config.physics_fps
+            )
+            action = loaded.model(state).argmax(dim=1)
+            result = simulator.step(action)
+            transitions += 1
+            after = result.observation
+            capped = after.step_count >= args.max_drops
+            finished = (
+                result.physics.done | result.physics.truncated | capped
+            )
+            if bool(finished[0].item()):
+                snapshots[index] = _snapshot(
+                    after, 0, seed, _end_kind(result, capped)
+                )
+                break
+
+            now = time.perf_counter()
+            if now - last_progress >= args.progress_seconds:
+                elapsed = now - started
+                print(json.dumps({
+                    'phase': 'playing',
+                    'device': 'cpu',
+                    'completed': index,
+                    'episodes': args.episodes,
+                    'active': 1,
+                    'transitions_per_second': (
+                        transitions / max(elapsed, 1e-9)
+                    ),
+                    'current_episode_drops': int(after.step_count[0].item()),
+                }, ensure_ascii=False), flush=True)
+                last_progress = now
+    return snapshots, time.perf_counter() - started
+
+
+@torch.inference_mode()
+def run(args):
+    if args.episodes <= 0:
+        raise ValueError('episodes must be positive')
+    if args.max_drops <= 0:
+        raise ValueError('max-drops must be positive')
+    output_dir = (
+        args.output_dir.resolve()
+        if args.output_dir is not None
+        else Path(tempfile.mkdtemp(prefix='daxigua-sab128-terminal-')).resolve()
+    )
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f'output directory is not empty: {output_dir}')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    images_dir = output_dir / 'images'
+    images_dir.mkdir()
+
+    loaded = load_viewer_model(args.checkpoint, device=args.device)
+    if loaded.checkpoint_sha256.lower() != SAB128_SHA256:
+        raise ValueError('checkpoint does not match the registered SAB-128')
+    config = viewer_simulator_config(
+        30, loaded.model_config, loaded.device
+    )
+    seeds = (
+        torch.arange(args.episodes, dtype=torch.int64)
+        .mul_(SEED_STRIDE)
+        .add_(args.seed_base)
+        .to(loaded.device)
+    )
+    if loaded.device.type == 'cuda':
+        snapshots, collection_seconds = _collect_cuda(
+            args, loaded, config, seeds
+        )
+    else:
+        snapshots, collection_seconds = _collect_cpu(
+            args, loaded, config, seeds
+        )
     report_rows = []
     for index, snapshot in enumerate(snapshots):
         image_name = (

@@ -36,7 +36,11 @@ from daxigua.rl.evaluation import (
     select_critical_episodes,
 )
 from daxigua.rl.learner import DqnLearner
-from daxigua.rl.model import BaselineGnnDqn
+from daxigua.rl.model import (
+    BaselineGnnDqn,
+    compatible_model_state_dict,
+    load_compatible_model_state_dict,
+)
 from daxigua.rl.monitoring import (
     _DashboardState,
     _completed_dashboard_snapshot,
@@ -122,6 +126,102 @@ class ObservationAndModelTest(unittest.TestCase):
         q_values = model(state)
         self.assertEqual(q_values.shape, (2, 21))
         self.assertTrue(bool(torch.isfinite(q_values).all()))
+
+    def test_physical_edge_exposes_pair_result_geometry(self):
+        model = BaselineGnnDqn(_small_model_config())
+        self.simulator.active[0, :2] = True
+        self.simulator.levels[0, :2] = torch.tensor((5, 2))
+        self.simulator.positions[0, 0] = torch.tensor((100.0, 800.0))
+        self.simulator.positions[0, 1] = torch.tensor((260.0, 800.0))
+        self.simulator.physics_radii[0, :2] = torch.tensor((59.0, 29.0))
+        state = TensorState.from_observation(
+            self.simulator.observe(), physics_fps=120
+        )
+
+        neighbors, features, mask = model._physical_graph(state)
+        selected = (neighbors[0, 0] == 1) & mask[0, 0]
+        self.assertEqual(int(selected.sum().item()), 1)
+        edge = features[0, 0, selected][0]
+        large_radius = float(model.display_radii[5].item())
+        small_radius = float(model.display_radii[2].item())
+        expected_x = 100.0 + (
+            large_radius / (large_radius + small_radius)
+        ) * 160.0
+        self.assertAlmostEqual(
+            float(edge[14].item()), expected_x / 560.0 * 2.0 - 1.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(edge[15].item()), 800.0 / 1120.0 * 2.0 - 1.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(edge[16].item()),
+            (float(model.display_radii[6].item()) - 1.0) / 560.0,
+            places=6,
+        )
+        self.assertEqual(float(edge[17].item()), 1.0)
+
+    def test_same_level_pair_result_is_midpoint_and_l11_has_no_circle(self):
+        model = BaselineGnnDqn(_small_model_config())
+        self.simulator.active[0, :2] = True
+        self.simulator.levels[0, :2] = 7
+        self.simulator.positions[0, 0] = torch.tensor((120.0, 760.0))
+        self.simulator.positions[0, 1] = torch.tensor((240.0, 840.0))
+        self.simulator.physics_radii[0, :2] = 70.0
+        state = TensorState.from_observation(
+            self.simulator.observe(), physics_fps=120
+        )
+        neighbors, features, mask = model._physical_graph(state)
+        selected = (neighbors[0, 0] == 1) & mask[0, 0]
+        edge = features[0, 0, selected][0]
+        self.assertAlmostEqual(
+            float(edge[14].item()), 180.0 / 560.0 * 2.0 - 1.0,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(edge[15].item()), 800.0 / 1120.0 * 2.0 - 1.0,
+            places=6,
+        )
+
+        self.simulator.levels[0, 0] = 11
+        state = TensorState.from_observation(
+            self.simulator.observe(), physics_fps=120
+        )
+        neighbors, features, mask = model._physical_graph(state)
+        selected = (neighbors[0, 0] == 1) & mask[0, 0]
+        edge = features[0, 0, selected][0]
+        self.assertEqual(float(edge[16].item()), 0.0)
+        self.assertEqual(float(edge[17].item()), 0.0)
+
+    def test_legacy_edge_weights_are_zero_extended(self):
+        model = BaselineGnnDqn(_small_model_config())
+        legacy = model.state_dict()
+        edge_keys = []
+        for layer_index in range(len(model.physical_layers)):
+            edge_keys.extend((
+                f'physical_layers.{layer_index}.edge_encoder.0.weight',
+                f'physical_layers.{layer_index}.edge_gate.weight',
+            ))
+        for key in edge_keys:
+            legacy[key] = legacy[key][
+                :, :-model.PAIR_RESULT_EDGE_DIM
+            ].clone()
+
+        upgraded = compatible_model_state_dict(model, legacy)
+        expected = model.state_dict()
+        for key in edge_keys:
+            self.assertEqual(upgraded[key].shape, expected[key].shape)
+            self.assertTrue(torch.equal(
+                upgraded[key][:, :-model.PAIR_RESULT_EDGE_DIM], legacy[key]
+            ))
+            self.assertTrue(bool(torch.equal(
+                upgraded[key][:, -model.PAIR_RESULT_EDGE_DIM:],
+                torch.zeros_like(
+                    upgraded[key][:, -model.PAIR_RESULT_EDGE_DIM:]
+                ),
+            )))
+        load_compatible_model_state_dict(model, legacy, strict=True)
 
     def test_evaluation_can_export_complete_decision_trajectories(self):
         model = BaselineGnnDqn(_small_model_config())
