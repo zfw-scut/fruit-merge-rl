@@ -15,7 +15,6 @@ from .config import (
     TrainingConfig,
 )
 from .model import BaselineGnnDqn
-from .merge_distance import MergeDistanceConfig, MergeDistancePredictor
 from .observations import TensorState
 from .decision_data import (
     ActionSelectionBatch,
@@ -50,8 +49,6 @@ __all__ = [
     'EmptyDecisionSelector',
     'GpuDecisionBuffer',
     'KeyDecisionCollector',
-    'MergeDistanceConfig',
-    'MergeDistancePredictor',
     'ModelConfig',
     'RewardConfig',
     'ReplayConfig',

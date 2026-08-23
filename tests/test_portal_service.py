@@ -16,7 +16,6 @@ from daxigua.portal.service import (
     scan_documents,
 )
 from daxigua.portal.analysis_data import scan_analysis_datasets
-from daxigua.rl.merge_distance_status import scan_merge_distance_runs
 from daxigua.rl.merge_potential_status import scan_merge_potential_runs
 from tools.open_project_portal import _read_cloud_ssh_config
 
@@ -156,106 +155,6 @@ class PortalServiceTests(unittest.TestCase):
             self.assertFalse(result['available'])
             self.assertIsNone(result['current'])
             self.assertEqual(result['runs'], [])
-
-    def test_merge_distance_training_manifest_and_history_are_normalized(self):
-        with TemporaryDirectory() as temporary:
-            project_root = Path(temporary)
-            run_dir = project_root / 'runs' / 'merge_distance' / 'pilot'
-            run_dir.mkdir(parents=True)
-            (run_dir / 'manifest.json').write_text(json.dumps({
-                'purpose': 'merge_distance_predictor_training',
-                'status': 'running',
-                'phase': 'training',
-                'created_at_utc': '2099-01-01T00:00:00+00:00',
-                'updated_at_utc': '2099-01-01T00:01:00+00:00',
-                'arguments': {'epochs': 12},
-                'current_epoch': 2,
-                'completed_epochs': 2,
-                'progress_fraction': 2 / 12,
-                'epoch_batch': 40,
-                'train_loss': 1.25,
-                'latest_validation': {
-                    'nll': 1.1,
-                    'lifecycle_weighted_nll': 1.05,
-                    'exact_bin_accuracy': 0.42,
-                    'adjacent_bin_accuracy': 0.73,
-                },
-                'parameter_count': 123_979,
-            }), encoding='utf-8')
-            (run_dir / 'metrics.jsonl').write_text(
-                json.dumps({
-                    'epoch': 1,
-                    'train_loss': 1.5,
-                    'validation': {
-                        'nll': 1.3,
-                        'lifecycle_weighted_nll': 1.2,
-                        'exact_bin_accuracy': 0.3,
-                        'adjacent_bin_accuracy': 0.6,
-                    },
-                }) + '\n' + json.dumps({
-                    'epoch': 2,
-                    'train_loss': 1.25,
-                    'validation': {
-                        'nll': 1.1,
-                        'lifecycle_weighted_nll': 1.05,
-                        'exact_bin_accuracy': 0.42,
-                        'adjacent_bin_accuracy': 0.73,
-                    },
-                }) + '\n',
-                encoding='utf-8',
-            )
-
-            result = scan_merge_distance_runs(project_root)
-
-            self.assertTrue(result['available'])
-            current = result['current']
-            self.assertEqual(current['kind'], 'training')
-            self.assertEqual(current['current_epoch'], 2)
-            self.assertAlmostEqual(current['validation_nll'], 1.1)
-            self.assertEqual(current['parameter_count'], 123_979)
-            self.assertEqual(len(current['history']), 2)
-            self.assertAlmostEqual(
-                current['history'][-1]['validation_exact_bin_accuracy'], 0.42
-            )
-
-    def test_merge_distance_collection_and_labeling_share_one_status(self):
-        with TemporaryDirectory() as temporary:
-            project_root = Path(temporary)
-            run_dir = project_root / 'runs' / 'analysis' / 'pilot'
-            predictor_dir = run_dir / 'predictor'
-            predictor_dir.mkdir(parents=True)
-            (run_dir / 'manifest.json').write_text(json.dumps({
-                'purpose': 'merge_distance_predictor_collection',
-                'status': 'complete',
-                'created_at_utc': '2099-01-01T00:00:00+00:00',
-                'updated_at_utc': '2099-01-01T00:01:00+00:00',
-                'parameters': {'episodes': 100, 'parallel_envs': 32},
-                'completed_episodes': 100,
-                'table_rows': {'scenes': 12_000, 'merge_sources': 8_000},
-            }), encoding='utf-8')
-            (predictor_dir / 'dataset_manifest.json').write_text(json.dumps({
-                'purpose': 'merge_distance_predictor_dataset',
-                'status': 'labeling',
-                'phase': 'labeling',
-                'created_at_utc': '2099-01-01T00:02:00+00:00',
-                'updated_at_utc': '2099-01-01T00:03:00+00:00',
-                'source_scene_shards': 20,
-                'completed_scene_shards': 8,
-                'scene_rows': 4_800,
-                'resolved_fruit_samples': 32_000,
-            }), encoding='utf-8')
-
-            result = scan_merge_distance_runs(project_root)
-
-            self.assertEqual(len(result['runs']), 2)
-            self.assertEqual(result['current']['kind'], 'labeling')
-            self.assertAlmostEqual(result['current']['progress_fraction'], 0.4)
-            collection = next(
-                item for item in result['runs']
-                if item['kind'] == 'collection'
-            )
-            self.assertEqual(collection['scene_rows'], 12_000)
-            self.assertEqual(collection['progress_fraction'], 1.0)
 
     def test_scan_documents_returns_current_markdown_content(self):
         documents = scan_documents(PROJECT_ROOT)

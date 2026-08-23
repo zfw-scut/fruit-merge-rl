@@ -126,8 +126,10 @@ def initialize_learner_weights(
             not isinstance(learner_state, dict)
             or 'online_model' not in learner_state):
         raise ValueError('source checkpoint has no online model weights')
-    learner.online_module.load_state_dict(
-        learner_state['online_model'], strict=True
+    from .model import load_compatible_model_state_dict
+
+    load_compatible_model_state_dict(
+        learner.online_module, learner_state['online_model'], strict=True
     )
     learner.target_module.load_state_dict(
         learner.online_module.state_dict(), strict=True

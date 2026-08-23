@@ -21,7 +21,7 @@ from daxigua.simulator import (
 
 from .checkpoint import load_checkpoint, sha256_file
 from .config import ModelConfig
-from .model import BaselineGnnDqn
+from .model import BaselineGnnDqn, load_compatible_model_state_dict
 from .observations import TensorState
 
 
@@ -109,7 +109,7 @@ def load_viewer_model(checkpoint_path, *, device='auto'):
         wall_width=geometry.wall_width,
         gravity_y=geometry.gravity_y,
     ).to(resolved_device)
-    model.load_state_dict(online_state, strict=True)
+    load_compatible_model_state_dict(model, online_state, strict=True)
     model.eval()
     return LoadedViewerModel(
         checkpoint_path=checkpoint_path,

@@ -3,21 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import torch
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def discover_merge_distance_checkpoint(project_root=PROJECT_ROOT):
-    """发现最近训练完成的本地合成步距预测器。"""
-
-    root = Path(project_root) / 'runs' / 'merge_distance'
-    candidates = list(root.glob('*/checkpoints/final.pt'))
-    if not candidates:
-        candidates = list(root.glob('*/checkpoints/best.pt'))
-    return max(candidates, key=lambda path: path.stat().st_mtime, default=None)
 
 
 def parse_args(argv=None):
@@ -61,15 +47,6 @@ def parse_args(argv=None):
         help='模型推理设备，默认 auto。',
     )
     parser.add_argument(
-        '--merge-distance-checkpoint',
-        help='可选：合成步距预测器 checkpoint；留空时自动发现最新成品。',
-    )
-    parser.add_argument(
-        '--merge-distance-device',
-        default='auto',
-        help='合成步距预测器推理设备，默认 auto。',
-    )
-    parser.add_argument(
         '--comparison',
         action='store_true',
         help='启用场景实验室双环境物理对照模式。',
@@ -97,7 +74,6 @@ def main(argv=None):
         reward_scale=args.reward_scale,
     )
     model_evaluator = None
-    merge_distance_evaluator = None
     model_controller = None
     comparison_model_controller = None
     live_session = ScenarioLabLiveSession(device=args.device)
@@ -132,32 +108,9 @@ def main(argv=None):
             comparison_model_controller = ScenarioComparisonModelController(
                 comparison_session, model_evaluator
             )
-    merge_distance_checkpoint = (
-        Path(args.merge_distance_checkpoint).resolve()
-        if args.merge_distance_checkpoint
-        else discover_merge_distance_checkpoint()
-    )
-    if merge_distance_checkpoint is not None:
-        from daxigua.rl.scenario_merge_distance_evaluator import (
-            ScenarioMergeDistanceEvaluator,
-        )
-
-        try:
-            merge_distance_evaluator = ScenarioMergeDistanceEvaluator(
-                merge_distance_checkpoint,
-                device=args.merge_distance_device,
-            )
-        except Exception as error:
-            if args.merge_distance_checkpoint:
-                raise
-            print(
-                f'自动加载合成步距预测器失败，已禁用该图层：{error}',
-                flush=True,
-            )
     server = ScenarioLabServer(
         evaluator,
         model_evaluator=model_evaluator,
-        merge_distance_evaluator=merge_distance_evaluator,
         model_controller=model_controller,
         comparison_model_controller=comparison_model_controller,
         live_session=live_session,
@@ -175,13 +128,6 @@ def main(argv=None):
         identity = model_evaluator.identity
         print(
             f"模型评估：{identity['checkpoint']} "
-            f"（{identity['checkpoint_sha256']}，{identity['device']}）",
-            flush=True,
-        )
-    if merge_distance_evaluator is not None:
-        identity = merge_distance_evaluator.identity
-        print(
-            f"合成步距预测：{identity['checkpoint']} "
             f"（{identity['checkpoint_sha256']}，{identity['device']}）",
             flush=True,
         )

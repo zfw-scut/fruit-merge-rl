@@ -13,8 +13,7 @@
 - 中央是训练同源Tensor/CUDA实时画布、动作锚点、动作滑杆和常用执行按钮；
 - 右侧按折叠区展示辅助动作预测、真实结果、Q值和模型身份；
 - 低频可视化统一进入“显示设置”抽屉，可独立开启网格、危险线、动作锚点、速度、
-  预测位置、真实位置、首次接触法向量、逐水果合成步距颜色滤镜和完整圆障碍加权
-  Voronoi 图。
+  预测位置、真实位置、首次接触法向量和完整圆障碍加权 Voronoi 图。
 
 场景空间几何与辅助动作效果不会再无条件叠在同一画面。默认只打开稳定场景实时预测、
 预测位置和真实结果；诊断者按当前问题选择其它图层。
@@ -43,17 +42,9 @@
 - 按选定动作真实投放，或启动/停止模型持续greedy决策。
 - 在场景几何停止明显变化后按需构造并显示 Voronoi / Free-Space Graph；颜色连续表达
   局部clearance，交汇节点可独立隐藏。
-- 开启合成步距颜色滤镜后，对稳定场景中的全部水果周期性执行冻结预测器推理；水果颜色
-  表示最大概率时间区间，悬停显示具体区间、区间置信度和最终参与合成概率。独立刷新按钮
-  可在自动模式开启时继续手动触发。
 
 实时预测只在模型可用、场景稳定且场景内容发生变化后防抖触发。切换A0～A20只读取同次
 前向传播的缓存结果，不会重复运行模型。关闭预测图层只影响绘制，不改变后端推理。
-
-合成步距实时预测使用独立通道：开关开启后约每0.9秒检查一次稳定场景，上一自动请求尚未
-完成时不会继续堆积；手动刷新不受Q值预测或真实21动作验证的忙碌状态影响。返回结果必须
-与请求时场景键和水果ID一致才会绘制，避免场景编辑后短暂套用旧颜色。预测器输出的是离散
-时间区间，界面不会把区间中点显示为精确步数。
 
 撤销与重做只覆盖暂停编辑形成的场景快照，不回滚已经执行的实时物理时间。运行中临时
 拖动水果会在松手时留下一个可撤销的暂停快照，但随后世界会继续推进；因此再次暂停后看到
@@ -72,7 +63,6 @@
 | `GET /api/live/events` | Server-Sent Events实时状态 |
 | `POST /api/live/command` | 暂停、恢复、载入、删除、投放 |
 | `POST /api/model/evaluate` | 21动作Q值与辅助效果预测 |
-| `POST /api/merge-distance/evaluate` | 当前场景逐水果合成步距区间预测 |
 | `POST /api/evaluate` | 21个真实克隆环境的动作效果 |
 | `POST /api/voronoi/evaluate` | 当前场景的完整圆障碍加权 Voronoi 图 |
 | `POST /api/model/control` | 持续模型决策启停 |
@@ -130,9 +120,7 @@ $env:PYTHONPATH = 'src'
 conda run -n python-torch python tools/open_scenario_lab.py `
     --device cuda `
     --checkpoint runs\cloud_example\checkpoints\final.pt `
-    --model-device cuda `
-    --merge-distance-checkpoint runs\merge_distance\example\checkpoints\final.pt `
-    --merge-distance-device cuda
+    --model-device cuda
 
 conda run -n python-torch python tools/open_project_portal.py
 ```
@@ -176,10 +164,6 @@ conda run -n python-torch python tools/open_scenario_lab.py `
 无CUDA的开发机可使用同一Tensor算法的`--device cpu --model-device cpu`回退路径。不指定`--checkpoint`时仍可编辑
 实时物理场景和运行真实21动作评估，但模型预测与持续决策按钮会禁用。`--port 0`可自动
 选择空闲端口；门户工具中心使用返回的实际URL连接服务。
-
-不指定`--merge-distance-checkpoint`时，启动器会自动发现本地最近完成的合成步距
-`final.pt`，没有成品时再尝试`best.pt`；两者都不存在时，只禁用步距预测能力，不影响场景
-编辑、物理评估或Q模型功能。工具中心也可分别选择Q模型与步距预测器的checkpoint和设备。
 
 ## 证据边界
 
