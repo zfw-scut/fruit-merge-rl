@@ -34,6 +34,7 @@ from .pair_failure import (
     PairFailureTracker,
     PairFailureUpdate,
 )
+from .pair_risk import PairRiskModel, PairRiskModelConfig
 
 __all__ = [
     'AnalysisExportConfig',
@@ -58,6 +59,8 @@ __all__ = [
     'PairFailureConfig',
     'PairFailureTracker',
     'PairFailureUpdate',
+    'PairRiskModel',
+    'PairRiskModelConfig',
     'RewardConfig',
     'ReplayConfig',
     'TensorState',
