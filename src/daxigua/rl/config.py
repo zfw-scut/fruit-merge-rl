@@ -388,6 +388,9 @@ class TrainingConfig:
     max_episode_drops: int = 0
     stage_pilot_envs: int = 256
     stage_pilot_max_drops: int = 128
+    # None keeps the historical random prewarm. A numeric value requires a
+    # separately loaded teacher to construct prewarm scenes with this epsilon.
+    stage_pilot_policy_epsilon: float | None = None
     model: ModelConfig = field(default_factory=ModelConfig)
     dqn: DqnConfig = field(default_factory=DqnConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
@@ -420,6 +423,12 @@ class TrainingConfig:
             raise ValueError('stage_pilot_envs must be positive')
         if self.stage_pilot_max_drops <= 0:
             raise ValueError('stage_pilot_max_drops must be positive')
+        if (
+                self.stage_pilot_policy_epsilon is not None
+                and not 0.0 <= self.stage_pilot_policy_epsilon <= 1.0):
+            raise ValueError(
+                'stage_pilot_policy_epsilon must be in [0, 1] or omitted'
+            )
         if self.model.max_fruits != 64:
             raise ValueError('the first baseline is frozen at 64 fruit slots')
         if self.dqn.active_learning_top_k > self.model.action_count:

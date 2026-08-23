@@ -337,6 +337,8 @@ class BaselineTrainer:
         self.branch_replay = None
         self.branch_generator = None
         self.branch_replay_training_threshold = 0
+        self.stage_pilot_model = None
+        self.stage_pilot_metadata = None
         if config.branch_learning.enabled:
             branch = config.branch_learning
             self.branch_generator = torch.Generator(device=self.device)
@@ -487,6 +489,79 @@ class BaselineTrainer:
         )
         return metadata
 
+    def load_stage_pilot_checkpoint(self, checkpoint_path):
+        """加载只用于预热场景构造的策略，不初始化新训练网络。"""
+
+        if self.config.stage_pilot_policy_epsilon is None:
+            raise ValueError(
+                'stage_pilot_policy_epsilon is required for a pilot teacher'
+            )
+        from .viewer import load_viewer_model
+
+        loaded = load_viewer_model(checkpoint_path, device=self.device)
+        if loaded.model_config != self.config.model:
+            raise ValueError(
+                'stage pilot checkpoint model config does not match training '
+                'model config'
+            )
+        self.stage_pilot_model = loaded.model
+        self.stage_pilot_metadata = {
+            'kind': 'prewarm_teacher_only',
+            'source_checkpoint': str(loaded.checkpoint_path),
+            'source_checkpoint_sha256': loaded.checkpoint_sha256,
+            'source_progress': loaded.progress,
+            'policy_epsilon': self.config.stage_pilot_policy_epsilon,
+            'excluded_from_training_initialization': [
+                'online_model',
+                'target_model',
+                'optimizer',
+                'replay',
+                'rng',
+                'training_progress',
+            ],
+        }
+        path = self.run_dir / 'stage_pilot_teacher.json'
+        temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+        temporary.write_text(
+            json.dumps(
+                _json_safe(self.stage_pilot_metadata),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding='utf-8',
+        )
+        os.replace(temporary, path)
+        identity_path = self.run_dir / 'run_identity.json'
+        identity = json.loads(identity_path.read_text(encoding='utf-8'))
+        identity['stage_pilot_teacher'] = self.stage_pilot_metadata
+        temporary = identity_path.with_name(
+            f'.{identity_path.name}.{os.getpid()}.tmp'
+        )
+        temporary.write_text(
+            json.dumps(_json_safe(identity), ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        os.replace(temporary, identity_path)
+        self.dashboard.event(
+            'stage_pilot_teacher_loaded',
+            '已加载仅用于预热场景构造的策略；新训练网络保持随机初始化',
+            source_checkpoint_sha256=loaded.checkpoint_sha256,
+            policy_epsilon=self.config.stage_pilot_policy_epsilon,
+        )
+        return dict(self.stage_pilot_metadata)
+
+    def release_stage_pilot_model(self):
+        if self.stage_pilot_model is None:
+            return False
+        self.stage_pilot_model = None
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+        self.dashboard.event(
+            'stage_pilot_teacher_released',
+            '预热策略已释放；后续采集和学习只使用随机初始化的新模型',
+        )
+        return True
+
     def _write_run_status(self, phase, message, **values):
         path = self.run_dir / 'run_status.json'
         temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
@@ -531,6 +606,42 @@ class BaselineTrainer:
             (self.config.max_envs,),
             device=self.device,
         )
+
+    @torch.no_grad()
+    def _prewarm_actions(self, enabled_mask):
+        """为预热槽位生成随机动作或独立 teacher 策略动作。"""
+
+        epsilon = self.config.stage_pilot_policy_epsilon
+        if epsilon is None:
+            return self._random_actions()
+        if self.stage_pilot_model is None:
+            raise RuntimeError(
+                'policy prewarm requires a separately loaded stage pilot '
+                'checkpoint'
+            )
+        rows = torch.nonzero(enabled_mask, as_tuple=False).flatten()
+        actions = torch.zeros(
+            self.config.max_envs, dtype=torch.int64, device=self.device
+        )
+        if rows.numel() == 0:
+            return actions
+        state = TensorState.from_observation(
+            self.simulator.observe(),
+            physics_fps=self.simulator_config.physics_fps,
+            rows=rows,
+        )
+        self.stage_pilot_model.eval()
+        q_values = self.stage_pilot_model(state)
+        greedy = q_values.argmax(dim=1)
+        random_actions = torch.randint(
+            self.config.model.action_count,
+            (rows.numel(),),
+            device=self.device,
+        )
+        explore = torch.rand(rows.numel(), device=self.device) < float(epsilon)
+        selected = torch.where(explore, random_actions, greedy)
+        actions.index_copy_(0, rows, selected)
+        return actions
 
     def _reset_finished(self, finished):
         if bool(finished.any().item()):
@@ -596,10 +707,15 @@ class BaselineTrainer:
         pilot_mask[:pilot_envs] = True
         self.dashboard.event(
             'pilot_started',
-            '开始随机局长阶段标定',
+            (
+                '开始策略局长阶段标定'
+                if self.config.stage_pilot_policy_epsilon is not None
+                else '开始随机局长阶段标定'
+            ),
             pilot_envs=pilot_envs,
             active_envs=self.active_envs,
             pilot_max_drops=pilot_max_drops,
+            policy_epsilon=self.config.stage_pilot_policy_epsilon,
         )
         self.simulator.reset(pilot_mask, seeds=self.config.seed + 100)
         finished = torch.zeros(
@@ -612,7 +728,7 @@ class BaselineTrainer:
             enabled = pilot_mask & ~finished
             if not bool(enabled.any().item()):
                 break
-            result = self._step(self._random_actions(), enabled)
+            result = self._step(self._prewarm_actions(enabled), enabled)
             time_limit = result.observation.step_count >= pilot_max_drops
             newly_finished = enabled & (result.physics.done | time_limit)
             lengths[newly_finished] = result.observation.step_count[newly_finished]
@@ -633,19 +749,28 @@ class BaselineTrainer:
         self.simulator.reset(self._enabled_mask(), seeds=self.config.seed + 200)
         self.dashboard.event(
             'pilot_finished',
-            '随机局长阶段标定完成',
+            (
+                '策略局长阶段标定完成'
+                if self.config.stage_pilot_policy_epsilon is not None
+                else '随机局长阶段标定完成'
+            ),
             thresholds=self.stage_thresholds,
             pilot_envs=pilot_envs,
             pilot_max_drops=pilot_max_drops,
+            policy_epsilon=self.config.stage_pilot_policy_epsilon,
         )
         return self.stage_thresholds
 
     @torch.no_grad()
-    def stagger_initial_states(self):
+    def stagger_initial_states(self, *, donor_envs=None):
         if self.device.type != 'cuda':
             return
+        if donor_envs is None:
+            prepared_envs = self.active_envs
+        else:
+            prepared_envs = min(self.active_envs, max(4, int(donor_envs)))
         q1, q2, q3 = self.stage_thresholds
-        upper = q3 * 2
+        upper = min(self.config.stage_pilot_max_drops, q3 * 2)
         if self.config.max_episode_drops > 0:
             upper = min(self.config.max_episode_drops, upper)
         upper = max(q3 + 1, upper)
@@ -654,10 +779,10 @@ class BaselineTrainer:
             self.config.max_envs, dtype=torch.int64, device=self.device
         )
         for stage, (low, high) in enumerate(bounds):
-            if stage >= self.active_envs:
+            if stage >= prepared_envs:
                 continue
             rows = torch.arange(
-                stage, self.active_envs, 4, device=self.device
+                stage, prepared_envs, 4, device=self.device
             )
             if rows.numel() == 0:
                 continue
@@ -666,22 +791,42 @@ class BaselineTrainer:
                 low, high, (rows.numel(),), device=self.device
             )
         original_targets = targets.clone()
+        prepared_mask = torch.zeros(
+            self.config.max_envs, dtype=torch.bool, device=self.device
+        )
+        prepared_mask[:prepared_envs] = True
         for _ in range(upper * 3):
-            pending = self._enabled_mask(
-                self.simulator.step_count < targets
-            )
+            pending = prepared_mask & (self.simulator.step_count < targets)
             if not bool(pending.any().item()):
                 adjusted = int(
-                    (targets[:self.active_envs]
-                     != original_targets[:self.active_envs]).sum().item()
+                    (targets[:prepared_envs]
+                     != original_targets[:prepared_envs]).sum().item()
                 )
+                if prepared_envs < self.active_envs:
+                    destination_rows = torch.arange(
+                        self.active_envs,
+                        dtype=torch.int64,
+                        device=self.device,
+                    )
+                    source_rows = destination_rows.remainder(prepared_envs)
+                    self.simulator.copy_rows_from(
+                        self.simulator,
+                        source_rows,
+                        destination_rows,
+                        validate_rows=False,
+                    )
                 self.dashboard.event(
                     'warmup_states_staggered',
                     '分散预热起始状态构造完成',
                     adjusted_unreachable_targets=adjusted,
+                    prepared_envs=prepared_envs,
+                    tiled_envs=self.active_envs - prepared_envs,
+                    policy_epsilon=(
+                        self.config.stage_pilot_policy_epsilon
+                    ),
                 )
                 return
-            result = self._step(self._random_actions(), pending)
+            result = self._step(self._prewarm_actions(pending), pending)
             failed = pending & result.physics.done
             targets = _lower_unreachable_prewarm_targets(
                 targets,
@@ -744,6 +889,8 @@ class BaselineTrainer:
                 counts[stage] += int(candidates.numel())
             ticket = self.replay.begin_append(current, mask=admit) \
                 if bool(admit.any().item()) else None
+            # teacher 只负责构造分散的初始场景；Replay 仍按训练原有的
+            # 无策略动作口径填充，避免改变四阶段采样语义。
             full_actions = self._random_actions()
             result = self._step(full_actions, self._enabled_mask())
             self.simulated_transitions += self.active_envs
@@ -1429,6 +1576,9 @@ class BaselineTrainer:
                 if self.branch_replay is None
                 else self.branch_replay.capacity
             ),
+            'metric_window_seconds': window,
+            'metric_window_transitions': window_transitions,
+            'metric_window_branch_transitions': window_branch_transitions,
             'env_steps_per_second': speed,
             'branch_steps_per_second': window_branch_transitions / window,
             'updates_per_second': window_updates / window,
@@ -1551,7 +1701,7 @@ class BaselineTrainer:
         self.metric_window_drops.clear()
         return payload
 
-    def run(self, *, final_evaluation=True):
+    def run(self, *, final_evaluation=True, finalize_artifacts=True):
         started = time.perf_counter()
         deadline = (
             started
@@ -1577,7 +1727,10 @@ class BaselineTrainer:
         if len(self.replay) < self.config.replay.warmup_transitions:
             self.estimate_stage_thresholds()
             self.stagger_initial_states()
+            self.release_stage_pilot_model()
             self.fill_warmup_replay()
+        else:
+            self.release_stage_pilot_model()
         if (
                 self.reward_computer is not None
                 and not self.reward_computer.initialized):
@@ -1808,8 +1961,22 @@ class BaselineTrainer:
                     }
                     last_log = window_started
 
-            self.save_checkpoint('latest.pt')
+            if window_transitions > 0:
+                self._publish_metrics(
+                    started=started,
+                    window_started=window_started,
+                    window_transitions=window_transitions,
+                    window_branch_transitions=window_branch_transitions,
+                    window_updates=window_updates,
+                    stage_seconds=stage_seconds,
+                )
+            if finalize_artifacts:
+                self.save_checkpoint('latest.pt')
             if final_evaluation:
+                if not finalize_artifacts:
+                    raise ValueError(
+                        'final evaluation requires artifact finalization'
+                    )
                 index_30fps = (
                     self.run_dir / 'analysis' / 'final_eval_30fps_index.pt'
                 )
@@ -1856,12 +2023,16 @@ class BaselineTrainer:
                     score_bin_width=self.config.analysis.score_bin_width,
                 )
                 self.dashboard.plot('evaluation_event_analysis', event_plot)
-            self._export_transition_sample()
+            if finalize_artifacts:
+                self._export_transition_sample()
             self.key_decision_collector.close()
-            final_path = self.save_checkpoint('final.pt')
-            loaded = load_checkpoint(final_path, map_location='cpu')
-            if int(loaded['progress']['transitions']) != self.transitions:
-                raise RuntimeError('final checkpoint round-trip validation failed')
+            if finalize_artifacts:
+                final_path = self.save_checkpoint('final.pt')
+                loaded = load_checkpoint(final_path, map_location='cpu')
+                if int(loaded['progress']['transitions']) != self.transitions:
+                    raise RuntimeError(
+                        'final checkpoint round-trip validation failed'
+                    )
             completed = (
                 self.transitions >= self.config.total_transitions
                 and (
@@ -1874,18 +2045,27 @@ class BaselineTrainer:
             terminal_phase = 'completed' if completed else 'stopped'
             terminal_message = (
                 (
-                    '训练、最终评估和产物校验均已正常完成'
-                    if final_evaluation else
-                    '训练和产物校验已正常完成（按参数跳过最终评估）'
+                    '训练短跑已正常完成（未生成正式训练产物）'
+                    if not finalize_artifacts else (
+                        '训练、最终评估和产物校验均已正常完成'
+                        if final_evaluation else
+                        '训练和产物校验已正常完成（按参数跳过最终评估）'
+                    )
                 )
                 if completed
                 else f'训练已安全停止：{self.stop_reason or "达到运行时间预算"}'
             )
-            manifest_path = self.run_dir / 'artifact_manifest.json'
+            manifest_path = (
+                self.run_dir / 'artifact_manifest.json'
+                if finalize_artifacts else None
+            )
             terminal_payload = self._write_run_status(
                 terminal_phase,
                 terminal_message,
-                manifest=str(manifest_path),
+                manifest=(
+                    str(manifest_path) if manifest_path is not None else None
+                ),
+                artifact_finalization=bool(finalize_artifacts),
                 completed_at=time.time(),
                 stop_reason=self.stop_reason,
             )
@@ -1893,19 +2073,22 @@ class BaselineTrainer:
             self.dashboard.event(
                 'training_finished' if completed else 'training_stopped',
                 terminal_message,
-                manifest=str(manifest_path),
-            )
-            self.dashboard.snapshot_curves(wait=True, timeout=30.0)
-            write_artifact_manifest(
-                self.run_dir,
-                tuple(
-                    path
-                    for pattern in ('*.json', '*.jsonl', '*.pt', '*.png')
-                    for path in self.run_dir.rglob(pattern)
-                    if '.mplconfig' not in path.parts
+                manifest=(
+                    str(manifest_path) if manifest_path is not None else None
                 ),
-                metadata=self._progress(),
             )
+            if finalize_artifacts:
+                self.dashboard.snapshot_curves(wait=True, timeout=30.0)
+                write_artifact_manifest(
+                    self.run_dir,
+                    tuple(
+                        path
+                        for pattern in ('*.json', '*.jsonl', '*.pt', '*.png')
+                        for path in self.run_dir.rglob(pattern)
+                        if '.mplconfig' not in path.parts
+                    ),
+                    metadata=self._progress(),
+                )
             return self._progress()
         except BaseException as error:
             failure = {

@@ -51,6 +51,12 @@ def parse_args():
         '--init-checkpoint', type=Path,
         help='只迁移在线模型权重；优化器、Replay、RNG和训练进度重新开始',
     )
+    initialization.add_argument(
+        '--prewarm-checkpoint', type=Path,
+        help=(
+            '仅用来源策略构造预热场景和Replay；新训练网络仍随机初始化'
+        ),
+    )
     parser.add_argument('--skip-final-evaluation', action='store_true')
     parser.add_argument(
         '--exit-after-completion', action='store_true',
@@ -212,6 +218,13 @@ def main():
         trainer.resume(args.resume)
     elif args.init_checkpoint is not None:
         trainer.initialize_from_checkpoint(args.init_checkpoint)
+    elif args.prewarm_checkpoint is not None:
+        trainer.load_stage_pilot_checkpoint(args.prewarm_checkpoint)
+    elif config.stage_pilot_policy_epsilon is not None:
+        raise ValueError(
+            'this config requires --prewarm-checkpoint; '
+            '--init-checkpoint would incorrectly migrate model weights'
+        )
     result = trainer.run(
         final_evaluation=not args.skip_final_evaluation
     )

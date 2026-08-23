@@ -85,9 +85,9 @@ def load_viewer_model(checkpoint_path, *, device='auto'):
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f'checkpoint not found: {checkpoint_path}')
     resolved_device = resolve_viewer_device(device)
-    checkpoint = load_checkpoint(
-        checkpoint_path, map_location=resolved_device
-    )
+    # checkpoint还包含target和optimizer；先留在CPU，只让下方重建出的
+    # 在线模型进入目标设备，避免viewer/prewarm teacher产生无关显存峰值。
+    checkpoint = load_checkpoint(checkpoint_path, map_location='cpu')
     if checkpoint.get('format_version') != 1:
         raise ValueError('unsupported checkpoint format_version')
     try:

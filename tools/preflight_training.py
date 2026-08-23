@@ -36,6 +36,7 @@ from daxigua.rl.trainer import (
     ranked_active_learning_candidates,
     training_simulator_config,
 )
+from daxigua.rl.viewer import load_viewer_model
 from daxigua.simulator import (
     SpatialRewardComputer,
     SpatialRewardConfig,
@@ -54,9 +55,14 @@ def parse_args():
     parser.add_argument('--smoke-batch-size', type=int, default=16)
     parser.add_argument('--evaluation-episodes', type=int, default=8)
     parser.add_argument('--evaluation-max-drops', type=int, default=16)
-    parser.add_argument(
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument(
         '--init-checkpoint', type=Path,
         help='在预检更新前验证weights-only迁移来源',
+    )
+    initialization.add_argument(
+        '--prewarm-checkpoint', type=Path,
+        help='验证只用于预热场景生成的teacher，不初始化待训练learner',
     )
     parser.add_argument(
         '--disable-compile',
@@ -113,12 +119,50 @@ def run_preflight(args):
         ),
     )
     initialization = None
+    stage_pilot_teacher = None
     if args.init_checkpoint is not None:
         initialization = initialize_learner_weights(
             learner,
             args.init_checkpoint,
             expected_model_config=config.to_dict()['model'],
             map_location=device,
+        )
+    elif args.prewarm_checkpoint is not None:
+        if config.stage_pilot_policy_epsilon is None:
+            raise ValueError(
+                'prewarm checkpoint requires stage_pilot_policy_epsilon'
+            )
+        loaded_teacher = load_viewer_model(
+            args.prewarm_checkpoint, device=device
+        )
+        if loaded_teacher.model_config != config.model:
+            raise ValueError(
+                'prewarm checkpoint model config does not match target model'
+            )
+        with torch.inference_mode():
+            teacher_q_values = loaded_teacher.model(
+                TensorState.from_observation(
+                    simulator.observe(),
+                    physics_fps=simulator_config.physics_fps,
+                )
+            )
+        if not bool(torch.isfinite(teacher_q_values).all().item()):
+            raise FloatingPointError(
+                'prewarm teacher produced non-finite Q values'
+            )
+        stage_pilot_teacher = {
+            'kind': 'prewarm_teacher_only',
+            'source_checkpoint': str(loaded_teacher.checkpoint_path),
+            'source_checkpoint_sha256': loaded_teacher.checkpoint_sha256,
+            'source_progress': loaded_teacher.progress,
+            'q_shape': list(teacher_q_values.shape),
+            'training_learner_random_initialization_preserved': True,
+        }
+        del loaded_teacher
+    elif config.stage_pilot_policy_epsilon is not None:
+        raise ValueError(
+            'this config requires --prewarm-checkpoint; the teacher is not '
+            'a weights-only initialization source'
         )
     model = learner.online_model
     replay = GpuReplayBuffer(
@@ -456,6 +500,7 @@ def run_preflight(args):
         'curve_snapshot': curve_snapshot,
         'training_physics_fps': simulator_config.physics_fps,
         'initialization': initialization,
+        'stage_pilot_teacher': stage_pilot_teacher,
         'evaluation_physics_fps': [30, 120],
         'accurate_replay_writes': 0,
         'reward_kind': config.reward.kind,

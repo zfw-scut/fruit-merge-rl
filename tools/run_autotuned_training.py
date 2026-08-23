@@ -16,6 +16,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from daxigua.rl.config import TrainingConfig
+from daxigua.rl.checkpoint import sha256_file
 from daxigua.rl.trainer import BaselineTrainer
 
 
@@ -37,6 +38,13 @@ def parse_args():
     parser.add_argument('--disable-dashboard', action='store_true')
     parser.add_argument('--curve-snapshot-interval', type=float)
     parser.add_argument('--disable-curve-snapshots', action='store_true')
+    initialization = parser.add_mutually_exclusive_group()
+    initialization.add_argument('--init-checkpoint', type=Path)
+    initialization.add_argument(
+        '--prewarm-checkpoint',
+        type=Path,
+        help='只用来源策略生成预热数据，新训练模型保持随机初始化',
+    )
     return parser.parse_args()
 
 
@@ -44,14 +52,28 @@ def main():
     args = parse_args()
     report = json.loads(args.autotune_report.read_text(encoding='utf-8'))
     base = TrainingConfig.from_toml(args.config)
+    if not report.get('complete', False):
+        raise ValueError('throughput calibration report is incomplete')
+    report_config = Path(report['config']).resolve()
+    if report_config != args.config.resolve():
+        raise ValueError('throughput report belongs to a different config')
+    if args.prewarm_checkpoint is not None:
+        expected_teacher_hash = report.get('prewarm_checkpoint_sha256')
+        if (
+                expected_teacher_hash
+                and sha256_file(args.prewarm_checkpoint)
+                != expected_teacher_hash):
+            raise ValueError(
+                'prewarm checkpoint hash differs from calibration input'
+            )
     active_envs = int(report['selected_num_envs'])
-    maximum_envs = int(report['maximum_successful_envs'])
-    maximum_envs = max(active_envs, maximum_envs)
-    replay_capacity = min(
-        2_097_152,
-        max(1_048_576, 256 * maximum_envs),
+    maximum_envs = (
+        max(active_envs, int(report['maximum_successful_envs']))
+        if base.autoscale.enabled else active_envs
     )
-    warmup = min(replay_capacity // 4, 524_288)
+    replay_capacity = int(
+        report.get('selected_replay_capacity', base.replay.capacity)
+    )
     config = replace(
         base,
         run_dir=args.run_dir or base.run_dir,
@@ -71,7 +93,6 @@ def main():
             base.replay,
             capacity=replay_capacity,
             batch_size=int(report['selected_batch_size']),
-            warmup_transitions=warmup,
         ),
         dqn=replace(
             base.dqn,
@@ -106,6 +127,15 @@ def main():
         ),
     )
     trainer = BaselineTrainer(config, project_root=PROJECT_ROOT)
+    if args.init_checkpoint is not None:
+        trainer.initialize_from_checkpoint(args.init_checkpoint)
+    elif args.prewarm_checkpoint is not None:
+        trainer.load_stage_pilot_checkpoint(args.prewarm_checkpoint)
+    elif config.stage_pilot_policy_epsilon is not None:
+        raise ValueError(
+            'this config requires --prewarm-checkpoint; the teacher must not '
+            'be loaded through --init-checkpoint'
+        )
 
     def stop_handler(signum, _frame):
         trainer.request_stop(f'signal_{signum}')
