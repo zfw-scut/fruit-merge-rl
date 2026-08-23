@@ -29,6 +29,11 @@ from .key_decisions import (
     EmptyDecisionSelector,
     KeyDecisionCollector,
 )
+from .pair_failure import (
+    PairFailureConfig,
+    PairFailureTracker,
+    PairFailureUpdate,
+)
 
 __all__ = [
     'AnalysisExportConfig',
@@ -50,6 +55,9 @@ __all__ = [
     'GpuDecisionBuffer',
     'KeyDecisionCollector',
     'ModelConfig',
+    'PairFailureConfig',
+    'PairFailureTracker',
+    'PairFailureUpdate',
     'RewardConfig',
     'ReplayConfig',
     'TensorState',
