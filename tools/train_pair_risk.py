@@ -64,6 +64,15 @@ def parse_args(argv=None):
         default=True,
     )
     train.add_argument('--early-stop-patience', type=int, default=5)
+    train.add_argument(
+        '--balanced-training',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            '按等级×标签平衡总loss贡献，并让同一确认事件的连续'
+            '正样本合计只贡献一次事件权重。'
+        ),
+    )
 
     evaluate = subparsers.add_parser('evaluate')
     evaluate.add_argument('dataset_dir', type=Path)
@@ -198,6 +207,108 @@ def _iter_split_batches(
             )
 
 
+def build_training_balance(paths):
+    """统计训练集的等级/标签单元和正例事件重复数。"""
+
+    cell_samples = torch.zeros(12, 2, dtype=torch.int64)
+    positive_event_parts = []
+    positive_level_parts = []
+    for path in paths:
+        columns = _load_shard(path)
+        selected = columns['split'].eq(int(SPLIT_TRAIN))
+        if not selected.any():
+            continue
+        labels = columns['label'][selected].long()
+        levels = columns['level'][selected].long()
+        flat = levels * 2 + labels
+        cell_samples.view(-1).add_(torch.bincount(
+            flat, minlength=cell_samples.numel()
+        ))
+        positive = labels.bool()
+        if positive.any():
+            positive_event_parts.append(
+                columns['event_id'][selected][positive].long()
+            )
+            positive_level_parts.append(levels[positive])
+
+    if not positive_event_parts:
+        raise ValueError('balanced training requires positive events')
+    positive_events = torch.cat(positive_event_parts)
+    positive_levels = torch.cat(positive_level_parts)
+    if int(positive_events.min().item()) < 0:
+        raise ValueError('positive pair-risk samples require event ids')
+    event_counts = torch.bincount(positive_events)
+    event_levels = torch.full(
+        (event_counts.numel(),), -1, dtype=torch.int64
+    )
+    event_levels[positive_events] = positive_levels
+    unique_events = torch.zeros(12, dtype=torch.int64)
+    present_events = torch.nonzero(event_counts > 0, as_tuple=False).flatten()
+    unique_events.add_(torch.bincount(
+        event_levels[present_events], minlength=12
+    ))
+
+    cell_mass = cell_samples.double()
+    cell_mass[:, 1] = unique_events.double()
+    target_cells = torch.zeros_like(cell_mass, dtype=torch.bool)
+    target_cells[7:12] = cell_mass[7:12] > 0
+    cell_count = int(target_cells.sum().item())
+    if cell_count <= 1:
+        raise ValueError('balanced training requires multiple label cells')
+    total_samples = int(cell_samples[7:12].sum().item())
+    target_mass = total_samples / cell_count
+    group_scale = torch.zeros_like(cell_mass, dtype=torch.float32)
+    group_scale[target_cells] = (
+        target_mass / cell_mass[target_cells]
+    ).float()
+    summary = {
+        'strategy': 'level_label_and_positive_event_balanced',
+        'training_samples': total_samples,
+        'balanced_cells': cell_count,
+        'target_weight_mass_per_cell': target_mass,
+        'by_level': {
+            str(level): {
+                'negative_samples': int(cell_samples[level, 0].item()),
+                'positive_samples': int(cell_samples[level, 1].item()),
+                'positive_events': int(unique_events[level].item()),
+            }
+            for level in range(7, 12)
+        },
+    }
+    return {
+        'event_counts': event_counts,
+        'group_scale': group_scale,
+        'summary': summary,
+    }
+
+
+def training_balance_to(balance, device):
+    if balance is None:
+        return None
+    return {
+        'event_counts': balance['event_counts'].to(device),
+        'group_scale': balance['group_scale'].to(device),
+        'summary': balance['summary'],
+    }
+
+
+def balanced_sample_weights(batch, balance):
+    """返回均值约为1的逐样本权重，不复制或丢弃训练行。"""
+
+    labels = batch['label'].bool()
+    levels = batch['level'].long()
+    weights = balance['group_scale'][levels, labels.long()]
+    positive = labels & batch['event_id'].ge(0)
+    if positive.any():
+        event_ids = batch['event_id'][positive].long()
+        if int(event_ids.max().item()) >= balance['event_counts'].numel():
+            raise ValueError('pair-risk event id exceeds balance table')
+        repeats = balance['event_counts'][event_ids].clamp_min(1)
+        weights = weights.clone()
+        weights[positive] /= repeats.to(weights.dtype)
+    return weights
+
+
 def _event_warning_metrics(probabilities, event_ids, leads, threshold=0.5):
     detections = {}
     all_events = set()
@@ -287,11 +398,20 @@ def evaluate_model(
         'by_level': {},
         'elapsed_seconds': time.perf_counter() - started,
     }
+    level_average_precisions = []
     for level in range(7, 12):
         mask = levels.eq(level)
-        result['by_level'][str(level)] = risk_metrics(
+        level_result = risk_metrics(
             logits[mask], labels[mask]
         )
+        result['by_level'][str(level)] = level_result
+        value = level_result.get('average_precision')
+        if value is not None and math.isfinite(float(value)):
+            level_average_precisions.append(float(value))
+    result['macro_average_precision'] = (
+        sum(level_average_precisions) / len(level_average_precisions)
+        if level_average_precisions else math.nan
+    )
     return result
 
 
@@ -344,9 +464,11 @@ def train(args):
         weight_decay=args.weight_decay,
         fused=device.type == 'cuda',
     )
-    positives, negatives = _training_counts(dataset_manifest)
-    pos_weight_value = min(20.0, max(1.0, negatives / positives))
-    pos_weight = torch.tensor(pos_weight_value, device=device)
+    balanced_training = bool(getattr(args, 'balanced_training', True))
+    balance = (
+        training_balance_to(build_training_balance(paths), device)
+        if balanced_training else None
+    )
     generator = torch.Generator().manual_seed(args.seed + 1)
     history = []
     best_score = -math.inf
@@ -362,12 +484,16 @@ def train(args):
         'weight_decay': args.weight_decay,
         'grad_clip_norm': args.grad_clip_norm,
         'seed': args.seed,
-        'pos_weight': pos_weight_value,
+        'balanced_training': balanced_training,
+        'training_balance': (
+            balance['summary'] if balance is not None else None
+        ),
         'autocast_bfloat16': bool(args.autocast_bfloat16),
     }
     for epoch in range(1, int(args.epochs) + 1):
         model.train()
         loss_sum = 0.0
+        loss_weight_sum = 0.0
         samples = 0
         epoch_started = time.perf_counter()
         for batch in _iter_split_batches(
@@ -380,10 +506,21 @@ def train(args):
             optimizer.zero_grad(set_to_none=True)
             with _autocast(device, args.autocast_bfloat16):
                 logits = model(batch)
-                loss = F.binary_cross_entropy_with_logits(
+                losses = F.binary_cross_entropy_with_logits(
                     logits,
                     batch['label'].float(),
-                    pos_weight=pos_weight,
+                    reduction='none',
+                )
+                sample_weights = (
+                    balanced_sample_weights(batch, balance)
+                    if balance is not None else torch.ones_like(losses)
+                )
+                weight_sum = sample_weights.sum().clamp_min(1e-6)
+                # 全数据权重均值为1；固定以配置batch归一化，避免稀有单元
+                # 出现的batch被再次按自身权重和归一化而抵消全局平衡。
+                loss = (
+                    (losses * sample_weights).sum()
+                    / float(args.batch_size)
                 )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
@@ -391,7 +528,8 @@ def train(args):
             )
             optimizer.step()
             count = int(logits.numel())
-            loss_sum += float(loss.item()) * count
+            loss_sum += float((losses * sample_weights).sum().item())
+            loss_weight_sum += float(weight_sum.item())
             samples += count
         validation = evaluate_model(
             model,
@@ -400,17 +538,20 @@ def train(args):
             args.batch_size * 2,
             device,
             autocast_bfloat16=args.autocast_bfloat16,
-            pos_weight=pos_weight,
+            pos_weight=None,
         )
         row = {
             'epoch': epoch,
-            'train_loss': loss_sum / max(1, samples),
+            'train_loss': loss_sum / max(1e-6, loss_weight_sum),
             'train_samples': samples,
+            'train_weight_mass': loss_weight_sum,
             'epoch_seconds': time.perf_counter() - epoch_started,
             'validation': validation,
         }
         history.append(row)
-        score = float(validation.get('average_precision', math.nan))
+        score = float(validation.get(
+            'macro_average_precision', math.nan
+        ))
         if not math.isfinite(score):
             score = -float(validation.get('loss', math.inf))
         improved = score > best_score
@@ -434,7 +575,10 @@ def train(args):
             'epoch': epoch,
             'target_epochs': args.epochs,
             'best_epoch': best_epoch,
-            'best_validation_average_precision': best_score,
+            'best_validation_macro_average_precision': best_score,
+            'validation_average_precision': validation.get(
+                'average_precision'
+            ),
             'elapsed_seconds': time.perf_counter() - started,
             'latest': row,
         }
@@ -454,12 +598,12 @@ def train(args):
         args.batch_size * 2,
         device,
         autocast_bfloat16=args.autocast_bfloat16,
-        pos_weight=pos_weight,
+        pos_weight=None,
     )
     final = {
         'status': 'complete',
         'best_epoch': best_epoch,
-        'best_validation_average_precision': best_score,
+        'best_validation_macro_average_precision': best_score,
         'test': test_result,
         'elapsed_seconds': time.perf_counter() - started,
         'checkpoint': str((output_dir / 'best.pt').resolve()),
@@ -482,10 +626,6 @@ def evaluate_checkpoint(args):
         PairRiskModelConfig(**checkpoint['model_config'])
     ).to(device)
     model.load_state_dict(checkpoint['model_state_dict'], strict=True)
-    positives, negatives = _training_counts(manifest)
-    pos_weight = torch.tensor(
-        min(20.0, max(1.0, negatives / positives)), device=device
-    )
     split = SPLIT_VALIDATION if args.split == 'validation' else SPLIT_TEST
     result = evaluate_model(
         model,
@@ -494,7 +634,7 @@ def evaluate_checkpoint(args):
         args.batch_size,
         device,
         autocast_bfloat16=args.autocast_bfloat16,
-        pos_weight=pos_weight,
+        pos_weight=None,
     )
     print(json.dumps(_json_safe(result), ensure_ascii=False, indent=2))
     return result

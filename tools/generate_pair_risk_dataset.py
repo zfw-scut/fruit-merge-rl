@@ -346,6 +346,9 @@ def collect(args):
     confirmed_counter = torch.zeros(
         (), dtype=torch.int64, device=loaded.device
     )
+    confirmed_by_level = torch.zeros(
+        12, dtype=torch.int64, device=loaded.device
+    )
     confirmed_total = 0
     status = 'complete'
     failure = None
@@ -386,6 +389,13 @@ def collect(args):
             confirmed_counter.add_(
                 (update.confirmed & enabled[:, None]).sum()
             )
+            confirmed_levels = update.levels[
+                update.confirmed & enabled[:, None]
+            ].long()
+            if confirmed_levels.numel() > 0:
+                confirmed_by_level.add_(torch.bincount(
+                    confirmed_levels, minlength=12
+                ))
             accumulators['pair_risk_exposures'].append(
                 extract_pair_exposures(
                     after,
@@ -474,6 +484,10 @@ def collect(args):
                     transitions=transitions,
                     decision_steps=decision_steps,
                     confirmed_events=confirmed_total,
+                    confirmed_events_by_level={
+                        str(level): int(confirmed_by_level[level].item())
+                        for level in range(7, 12)
+                    },
                     elapsed_seconds=elapsed,
                     env_steps_per_second=transitions / max(elapsed, 1e-9),
                     table_rows={
@@ -486,6 +500,10 @@ def collect(args):
                     'transitions': transitions,
                     'confirmed_events': confirmed_total,
                     'target_confirmed_events': args.target_confirmed_events,
+                    'confirmed_events_by_level': {
+                        str(level): int(confirmed_by_level[level].item())
+                        for level in range(7, 12)
+                    },
                     'env_steps_per_second': transitions / max(elapsed, 1e-9),
                     'exposure_rows': writers[
                         'pair_risk_exposures'
@@ -527,6 +545,10 @@ def collect(args):
             transitions=transitions,
             decision_steps=decision_steps,
             confirmed_events=confirmed_total,
+            confirmed_events_by_level={
+                str(level): int(confirmed_by_level[level].item())
+                for level in range(7, 12)
+            },
             elapsed_seconds=elapsed,
             env_steps_per_second=transitions / max(elapsed, 1e-9),
             table_rows={name: writer.total_rows for name, writer in writers.items()},

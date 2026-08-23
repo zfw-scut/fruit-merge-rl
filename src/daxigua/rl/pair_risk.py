@@ -463,13 +463,108 @@ def _event_index(dataset_dir):
     return episode_end, indexed, next_event_id
 
 
-def _split_for_episode(episode_id):
-    bucket = int(episode_id) % 10
-    if bucket == 0:
-        return SPLIT_TEST
-    if bucket == 1:
-        return SPLIT_VALIDATION
-    return SPLIT_TRAIN
+def _stable_episode_key(episode_id):
+    return (
+        int(episode_id) * 6_364_136_223_846_793_005
+        + 1_442_695_040_888_963_407
+    ) & ((1 << 64) - 1)
+
+
+def _split_targets(count):
+    count = int(count)
+    if count <= 1:
+        return {
+            SPLIT_TRAIN: count,
+            SPLIT_VALIDATION: 0,
+            SPLIT_TEST: 0,
+        }
+    if count == 2:
+        return {
+            SPLIT_TRAIN: 1,
+            SPLIT_VALIDATION: 1,
+            SPLIT_TEST: 0,
+        }
+    validation = max(1, round(count * 0.1))
+    test = max(1, round(count * 0.1))
+    if validation + test >= count:
+        validation = 1
+        test = 1
+    return {
+        SPLIT_TRAIN: count - validation - test,
+        SPLIT_VALIDATION: validation,
+        SPLIT_TEST: test,
+    }
+
+
+def stratified_episode_splits(episode_ids, events_by_pair):
+    """按完整对局分组，并优先平衡稀有等级的事件对局。"""
+
+    episode_ids = tuple(sorted(int(value) for value in episode_ids))
+    levels_by_episode = {episode: set() for episode in episode_ids}
+    for (episode, _first, _second), events in events_by_pair.items():
+        levels_by_episode.setdefault(int(episode), set()).update(
+            int(event['level']) for event in events
+        )
+    episodes_by_level = {
+        level: [
+            episode for episode in episode_ids
+            if level in levels_by_episode.get(episode, ())
+        ]
+        for level in range(7, 12)
+    }
+    assignments = {}
+    # 先处理最稀有等级，防止它被常见等级的划分提前耗尽。
+    level_order = sorted(
+        range(7, 12), key=lambda level: len(episodes_by_level[level])
+    )
+    split_order = (SPLIT_VALIDATION, SPLIT_TEST, SPLIT_TRAIN)
+    for level in level_order:
+        level_episodes = episodes_by_level[level]
+        targets = _split_targets(len(level_episodes))
+        current = {
+            split: sum(
+                assignments.get(episode) == split
+                for episode in level_episodes
+            )
+            for split in split_order
+        }
+        unassigned = sorted(
+            (
+                episode for episode in level_episodes
+                if episode not in assignments
+            ),
+            key=_stable_episode_key,
+        )
+        for episode in unassigned:
+            split = max(
+                split_order,
+                key=lambda value: (
+                    targets[value] - current[value],
+                    targets[value] > 0,
+                    value == SPLIT_TRAIN,
+                ),
+            )
+            assignments[episode] = split
+            current[split] += 1
+
+    overall_targets = _split_targets(len(episode_ids))
+    overall = {
+        split: sum(value == split for value in assignments.values())
+        for split in split_order
+    }
+    for episode in sorted(
+            (value for value in episode_ids if value not in assignments),
+            key=_stable_episode_key):
+        split = max(
+            split_order,
+            key=lambda value: (
+                overall_targets[value] - overall[value],
+                value == SPLIT_TRAIN,
+            ),
+        )
+        assignments[episode] = split
+        overall[split] += 1
+    return assignments
 
 
 def finalize_pair_risk_dataset(
@@ -486,6 +581,25 @@ def finalize_pair_risk_dataset(
     if forecast_horizon <= 0 or confirmation_drops <= 0:
         raise ValueError('risk label horizons must be positive')
     episode_end, events_by_pair, event_count = _event_index(dataset_dir)
+    episode_splits = stratified_episode_splits(
+        episode_end.keys(), events_by_pair
+    )
+    events_by_level = {str(level): 0 for level in range(7, 12)}
+    events_by_split_level = {
+        split: {str(level): 0 for level in range(7, 12)}
+        for split in ('train', 'validation', 'test')
+    }
+    split_names = {
+        SPLIT_TRAIN: 'train',
+        SPLIT_VALIDATION: 'validation',
+        SPLIT_TEST: 'test',
+    }
+    for (episode, _first, _second), events in events_by_pair.items():
+        split_name = split_names[episode_splits[int(episode)]]
+        for event in events:
+            level = str(int(event['level']))
+            events_by_level[level] += 1
+            events_by_split_level[split_name][level] += 1
     output_dir = dataset_dir / 'labeled'
     output_dir.mkdir(parents=True, exist_ok=True)
     if any(output_dir.glob('pair_risk_samples-*.pt')):
@@ -507,11 +621,6 @@ def finalize_pair_risk_dataset(
     censored = 0
     post_confirmation_skipped = 0
     raw_rows = 0
-    split_names = {
-        SPLIT_TRAIN: 'train',
-        SPLIT_VALIDATION: 'validation',
-        SPLIT_TEST: 'test',
-    }
     try:
         for path in table_shards(
                 dataset_dir, 'pair_risk_exposures', area='raw'):
@@ -536,7 +645,7 @@ def finalize_pair_risk_dataset(
             for index, (episode, step, first, second) in enumerate(metadata):
                 episode = int(episode)
                 step = int(step)
-                split_values[index] = _split_for_episode(episode)
+                split_values[index] = episode_splits[episode]
                 intervals = events_by_pair.get(
                     (episode, int(first), int(second)), ()
                 )
@@ -598,11 +707,21 @@ def finalize_pair_risk_dataset(
         'confirmation_drops': confirmation_drops,
         'raw_exposure_rows': raw_rows,
         'confirmed_events': event_count,
+        'confirmed_events_by_level': events_by_level,
+        'confirmed_events_by_split_level': events_by_split_level,
         'labeled_rows': writer.total_rows,
         'censored_rows': censored,
         'post_confirmation_rows_skipped': post_confirmation_skipped,
         'shards': writer.shard_count,
         'counts': counts,
+        'split_strategy': 'episode_grouped_rare_level_stratified_v1',
+        'episode_split_counts': {
+            split_name: sum(
+                value == split_value
+                for value in episode_splits.values()
+            )
+            for split_value, split_name in split_names.items()
+        },
     }
     _atomic_json(output_dir / 'manifest.json', result)
     return result

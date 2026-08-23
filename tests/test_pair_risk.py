@@ -23,8 +23,14 @@ from daxigua.rl.pair_risk import (
     extract_pair_exposures,
     finalize_pair_risk_dataset,
     risk_metrics,
+    stratified_episode_splits,
 )
-from tools.train_pair_risk import train
+from tools.train_pair_risk import (
+    balanced_sample_weights,
+    build_training_balance,
+    train,
+    training_balance_to,
+)
 
 
 def _model_columns(batch=3, fruits=6):
@@ -201,6 +207,72 @@ class PairRiskLabelTests(unittest.TestCase):
                 (root / 'labeled' / 'manifest.json').read_text('utf-8')
             )
             self.assertEqual(manifest['counts']['train']['8']['positive'], 3)
+            self.assertEqual(manifest['confirmed_events_by_level']['8'], 1)
+            self.assertEqual(manifest['episode_split_counts']['train'], 1)
+
+    def test_event_episode_split_balances_rare_level_without_leakage(self):
+        episodes = tuple(range(20))
+        events = {
+            (episode, episode * 2 + 1, episode * 2 + 2): [{
+                'level': 11,
+                'onset': 10,
+                'confirmed': 34,
+                'end': 50,
+                'event_id': episode,
+            }]
+            for episode in range(10)
+        }
+        splits = stratified_episode_splits(episodes, events)
+        event_splits = [splits[episode] for episode in range(10)]
+        self.assertEqual(event_splits.count(0), 8)
+        self.assertEqual(event_splits.count(1), 1)
+        self.assertEqual(event_splits.count(2), 1)
+        self.assertEqual(len(splits), len(episodes))
+
+
+class PairRiskBalanceTests(unittest.TestCase):
+    def test_level_label_and_event_weights_have_equal_total_mass(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'pair_risk_samples-00000.pt'
+            levels = torch.tensor(
+                [7] * 7 + [8] * 6, dtype=torch.int8
+            )
+            labels = torch.tensor(
+                [0, 0, 0, 0, 1, 1, 1,
+                 0, 0, 1, 1, 1, 1],
+                dtype=torch.bool,
+            )
+            event_ids = torch.tensor(
+                [-1, -1, -1, -1, 0, 0, 1,
+                 -1, -1, 2, 3, 3, 3],
+                dtype=torch.int64,
+            )
+            columns = {
+                'split': torch.zeros(13, dtype=torch.int8),
+                'level': levels,
+                'label': labels,
+                'event_id': event_ids,
+            }
+            torch.save({
+                'format_version': 1,
+                'table': 'pair_risk_samples',
+                'columns': columns,
+            }, path)
+            balance = training_balance_to(
+                build_training_balance((path,)), torch.device('cpu')
+            )
+            weights = balanced_sample_weights(columns, balance)
+            for level in (7, 8):
+                for label in (False, True):
+                    mask = levels.eq(level) & labels.eq(label)
+                    self.assertAlmostEqual(
+                        float(weights[mask].sum()), 13 / 4, places=5
+                    )
+            for event_id in range(4):
+                mask = event_ids.eq(event_id)
+                self.assertAlmostEqual(
+                    float(weights[mask].sum()), 13 / 8, places=5
+                )
 
 
 class PairRiskTrainingSmokeTests(unittest.TestCase):
