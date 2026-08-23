@@ -35,6 +35,8 @@ from tools.benchmark_pair_risk_collection import _gpu_summary
 from tools.render_pair_risk_gallery import (
     confusion_kind,
     select_unique_candidates,
+    timeline_target_specs,
+    warning_time_bucket,
 )
 
 
@@ -335,6 +337,37 @@ class PairRiskBalanceTests(unittest.TestCase):
         ]
         selected = select_unique_candidates(candidates, 2)
         self.assertEqual([row['event_id'] for row in selected], [3, 4])
+
+    def test_gallery_warning_time_buckets(self):
+        self.assertEqual(warning_time_bucket(False, 0), 'no_event')
+        self.assertEqual(warning_time_bucket(True, -3), 'at_or_after_onset')
+        self.assertEqual(warning_time_bucket(True, 0), 'at_or_after_onset')
+        self.assertEqual(warning_time_bucket(True, 4), 'lead_1_4')
+        self.assertEqual(warning_time_bucket(True, 12), 'lead_5_12')
+        self.assertEqual(warning_time_bucket(True, 24), 'lead_13_24')
+
+    def test_gallery_timeline_targets_follow_label_semantics(self):
+        positive = {'step': 100, 'label': True, 'lead_to_onset': 20}
+        self.assertEqual(timeline_target_specs(
+            positive,
+            forecast_horizon=24,
+            confirmation_drops=24,
+            confirmed_step=144,
+        ), [
+            {'role': 'prediction', 'target_step': 100},
+            {'role': 'onset', 'target_step': 120},
+            {'role': 'confirmation', 'target_step': 144},
+        ])
+        negative = {'step': 200, 'label': False, 'lead_to_onset': 0}
+        self.assertEqual(timeline_target_specs(
+            negative,
+            forecast_horizon=24,
+            confirmation_drops=24,
+        ), [
+            {'role': 'prediction', 'target_step': 200},
+            {'role': 'forecast_midpoint', 'target_step': 212},
+            {'role': 'forecast_end', 'target_step': 224},
+        ])
 
 
 class PairRiskTrainingSmokeTests(unittest.TestCase):

@@ -22,10 +22,15 @@ from matplotlib.patches import Circle, Rectangle  # noqa: E402
 import torch  # noqa: E402
 
 from daxigua.rl.pair_risk import (  # noqa: E402
+    EVENT_CONFIRMED,
     PairRiskModel,
     PairRiskModelConfig,
     SPLIT_TEST,
     SPLIT_VALIDATION,
+)
+from daxigua.rl.merge_potential_stats import (  # noqa: E402
+    load_table_columns,
+    table_shards,
 )
 
 
@@ -41,6 +46,24 @@ CONFUSION_TITLES = {
     'TN': 'Correct safe',
 }
 CORRECT_KINDS = frozenset(('TP', 'TN'))
+POSITIVE_TIME_BUCKETS = (
+    'at_or_after_onset', 'lead_1_4', 'lead_5_12', 'lead_13_24',
+)
+NEGATIVE_TIME_BUCKET = 'no_event'
+TIME_BUCKET_TITLES = {
+    'at_or_after_onset': 'At or after detected onset',
+    'lead_1_4': 'Early warning: 1–4 drops',
+    'lead_5_12': 'Early warning: 5–12 drops',
+    'lead_13_24': 'Early warning: 13–24 drops',
+    'no_event': 'No onset in forecast horizon',
+}
+FRAME_ROLE_TITLES = {
+    'prediction': 'Prediction frame',
+    'onset': 'Traditional onset',
+    'confirmation': 'Traditional confirmation',
+    'forecast_midpoint': 'Forecast midpoint',
+    'forecast_end': 'Forecast horizon end',
+}
 
 
 def parse_args(argv=None):
@@ -94,6 +117,51 @@ def confusion_kind(predicted, label):
     return 'FN' if bool(label) else 'TN'
 
 
+def warning_time_bucket(label, lead_to_onset):
+    """把样本按相对堵塞起点的距离分组。"""
+
+    if not bool(label):
+        return NEGATIVE_TIME_BUCKET
+    lead = int(lead_to_onset)
+    if lead <= 0:
+        return 'at_or_after_onset'
+    if lead <= 4:
+        return 'lead_1_4'
+    if lead <= 12:
+        return 'lead_5_12'
+    return 'lead_13_24'
+
+
+def timeline_target_specs(
+        candidate, *, forecast_horizon, confirmation_drops,
+        confirmed_step=None):
+    """返回三联图各帧的语义角色和目标投放位置。"""
+
+    step = int(candidate['step'])
+    result = [{'role': 'prediction', 'target_step': step}]
+    if bool(candidate['label']):
+        onset = step + int(candidate['lead_to_onset'])
+        confirmation = (
+            int(confirmed_step)
+            if confirmed_step is not None
+            else onset + int(confirmation_drops)
+        )
+        result.extend((
+            {'role': 'onset', 'target_step': onset},
+            {'role': 'confirmation', 'target_step': confirmation},
+        ))
+    else:
+        horizon = int(forecast_horizon)
+        result.extend((
+            {
+                'role': 'forecast_midpoint',
+                'target_step': step + max(1, horizon // 2),
+            },
+            {'role': 'forecast_end', 'target_step': step + horizon},
+        ))
+    return result
+
+
 def _priority(kind, probability):
     probability = float(probability)
     return probability if kind in ('TP', 'FP') else -probability
@@ -108,9 +176,9 @@ def _identity(candidate):
     )
 
 
-def select_unique_candidates(candidates, count):
+def select_unique_candidates(candidates, count, *, seen=None):
     selected = []
-    seen = set()
+    seen = set() if seen is None else seen
     for candidate in sorted(
             candidates, key=lambda item: item['priority'], reverse=True):
         identity = _identity(candidate)
@@ -133,13 +201,16 @@ def _candidate(columns, row, probability, kind):
         name: columns[name][row].item() for name in scalar_names
     }
     for name in (
-            'positions', 'levels', 'fruit_ids', 'physics_radii', 'active',
-            'fruit_queue'):
+            'positions', 'levels', 'fruit_ids', 'physics_radii', 'age_frames',
+            'active', 'fruit_queue'):
         result[name] = columns[name][row].detach().cpu().clone()
     result.update({
         'probability': float(probability),
         'kind': str(kind),
         'priority': _priority(kind, probability),
+        'time_bucket': warning_time_bucket(
+            result['label'], result['lead_to_onset']
+        ),
     })
     return result
 
@@ -184,12 +255,29 @@ def collect_candidates(args):
         raise FileNotFoundError('pair-risk dataset has no labeled shards')
     pool_limit = int(args.per_bucket) * int(args.pool_multiplier)
     pools = {
-        (level, kind): []
+        (level, kind, bucket): []
         for level in range(7, 12)
         for kind in CONFUSION_ORDER
+        for bucket in (
+            POSITIVE_TIME_BUCKETS
+            if kind in ('TP', 'FN') else (NEGATIVE_TIME_BUCKET,)
+        )
     }
     counts = {
         str(level): {kind: 0 for kind in CONFUSION_ORDER}
+        for level in range(7, 12)
+    }
+    time_counts = {
+        str(level): {
+            kind: {
+                bucket: 0
+                for bucket in (
+                    POSITIVE_TIME_BUCKETS
+                    if kind in ('TP', 'FN') else (NEGATIVE_TIME_BUCKET,)
+                )
+            }
+            for kind in CONFUSION_ORDER
+        }
         for level in range(7, 12)
     }
     for path in paths:
@@ -229,41 +317,258 @@ def collect_candidates(args):
                     counts[str(level)][kind] += int(matches.numel())
                     if matches.numel() == 0:
                         continue
-                    priorities = (
-                        probabilities[matches]
-                        if kind in ('TP', 'FP')
-                        else -probabilities[matches]
-                    )
-                    keep = min(pool_limit, int(matches.numel()))
-                    chosen = matches[torch.topk(priorities, keep).indices]
-                    bucket = pools[(level, kind)]
-                    for local_row in chosen.tolist():
+                    grouped_matches = {}
+                    for local_row in matches.tolist():
                         source_row = int(rows[local_row].item())
-                        bucket.append(_candidate(
-                            columns, source_row,
-                            float(probabilities[local_row].item()), kind,
-                        ))
-                    bucket.sort(
-                        key=lambda item: item['priority'], reverse=True
+                        bucket_name = warning_time_bucket(
+                            bool(labels[local_row].item()),
+                            int(columns['lead_to_onset'][source_row].item()),
+                        )
+                        grouped_matches.setdefault(bucket_name, []).append(
+                            local_row
+                        )
+                    for bucket_name, bucket_rows in grouped_matches.items():
+                        time_counts[str(level)][kind][bucket_name] += len(
+                            bucket_rows
+                        )
+                        bucket_matches = torch.tensor(
+                            bucket_rows, dtype=torch.long
+                        )
+                        priorities = (
+                            probabilities[bucket_matches]
+                            if kind in ('TP', 'FP')
+                            else -probabilities[bucket_matches]
+                        )
+                        keep = min(pool_limit, int(bucket_matches.numel()))
+                        chosen = bucket_matches[
+                            torch.topk(priorities, keep).indices
+                        ]
+                        bucket = pools[(level, kind, bucket_name)]
+                        for local_row in chosen.tolist():
+                            source_row = int(rows[local_row].item())
+                            bucket.append(_candidate(
+                                columns, source_row,
+                                float(probabilities[local_row].item()), kind,
+                            ))
+                        bucket.sort(
+                            key=lambda item: item['priority'], reverse=True
+                        )
+                        del bucket[pool_limit:]
+    selected = {}
+    for level in range(7, 12):
+        for kind in CONFUSION_ORDER:
+            buckets = (
+                POSITIVE_TIME_BUCKETS
+                if kind in ('TP', 'FN') else (NEGATIVE_TIME_BUCKET,)
+            )
+            seen = set()
+            for bucket_name in buckets:
+                selected[(level, kind, bucket_name)] = (
+                    select_unique_candidates(
+                        pools[(level, kind, bucket_name)],
+                        args.per_bucket,
+                        seen=seen,
                     )
-                    del bucket[pool_limit:]
-    selected = {
-        (level, kind): select_unique_candidates(
-            pools[(level, kind)], args.per_bucket
-        )
-        for level in range(7, 12)
-        for kind in CONFUSION_ORDER
+                )
+    return model, selected, counts, time_counts, device
+
+
+def _event_confirmation_index(dataset_dir):
+    columns = load_table_columns(
+        dataset_dir,
+        'pair_risk_events',
+        (
+            'event_kind', 'episode_id', 'onset_step', 'event_step',
+            'fruit_id_i', 'fruit_id_j',
+        ),
+        area='raw',
+    )
+    result = {}
+    for kind, episode, onset, event_step, first, second in zip(
+            columns['event_kind'].tolist(),
+            columns['episode_id'].tolist(),
+            columns['onset_step'].tolist(),
+            columns['event_step'].tolist(),
+            columns['fruit_id_i'].tolist(),
+            columns['fruit_id_j'].tolist()):
+        if int(kind) != EVENT_CONFIRMED:
+            continue
+        result[(
+            int(episode), int(first), int(second), int(onset)
+        )] = int(event_step)
+    return result
+
+
+def _copy_scene(columns, row, candidate):
+    result = {
+        'episode_id': int(columns['episode_id'][row].item()),
+        'step': int(columns['step'][row].item()),
+        'danger_progress': float(columns['danger_progress'][row].item()),
+        'over_danger_line': bool(columns['over_danger_line'][row].item()),
     }
-    return model.config, selected, counts
+    for name in (
+            'positions', 'levels', 'fruit_ids', 'physics_radii', 'age_frames',
+            'active', 'fruit_queue'):
+        result[name] = columns[name][row].detach().cpu().clone()
+    active = result['active'].bool()
+    fruit_ids = result['fruit_ids'].long()
+    slots = []
+    for target_id in (
+            int(candidate['fruit_id_i']), int(candidate['fruit_id_j'])):
+        matches = torch.nonzero(
+            active & fruit_ids.eq(target_id), as_tuple=False
+        ).flatten()
+        slots.append(int(matches[0].item()) if matches.numel() else -1)
+    result['pair_slot_i'], result['pair_slot_j'] = slots
+    result['target_pair_present'] = all(slot >= 0 for slot in slots)
+    result['probability'] = None
+    return result
 
 
-def _draw_scene(axis, candidate, board):
+def _frame_model_columns(frames, device):
+    result = {}
+    for name in PairRiskModel.REQUIRED_COLUMNS:
+        values = []
+        for frame in frames:
+            value = frame[name]
+            if torch.is_tensor(value):
+                values.append(value)
+            else:
+                values.append(torch.as_tensor(value))
+        result[name] = torch.stack(values).to(device, non_blocking=True)
+    return result
+
+
+@torch.inference_mode()
+def attach_timeline_frames(
+        dataset_dir, selected, model, device, *, forecast_horizon,
+        confirmation_drops, exposure_stride, batch_size,
+        autocast_bfloat16):
+    """为每个候选补齐起点/确认或窗口中点/终点场景。"""
+
+    confirmation_index = _event_confirmation_index(dataset_dir)
+    candidates = [
+        candidate
+        for values in selected.values()
+        for candidate in values
+    ]
+    requests_by_episode = {}
+    for gallery_id, candidate in enumerate(candidates):
+        candidate['gallery_id'] = gallery_id
+        candidate['forecast_horizon'] = int(forecast_horizon)
+        candidate['confirmation_drops'] = int(confirmation_drops)
+        confirmed_step = None
+        if bool(candidate['label']):
+            onset = int(candidate['step']) + int(candidate['lead_to_onset'])
+            confirmed_step = confirmation_index.get((
+                int(candidate['episode_id']), int(candidate['fruit_id_i']),
+                int(candidate['fruit_id_j']), onset,
+            ))
+        specs = timeline_target_specs(
+            candidate,
+            forecast_horizon=forecast_horizon,
+            confirmation_drops=confirmation_drops,
+            confirmed_step=confirmed_step,
+        )
+        candidate['onset_step'] = (
+            int(candidate['step']) + int(candidate['lead_to_onset'])
+            if bool(candidate['label']) else None
+        )
+        candidate['confirmed_step'] = confirmed_step
+        candidate['label_resolution_step'] = (
+            int(candidate['step']) + int(forecast_horizon)
+            + int(confirmation_drops)
+            if not bool(candidate['label']) else None
+        )
+        timeline = []
+        for spec in specs:
+            entry = dict(spec)
+            entry['frame'] = candidate if spec['role'] == 'prediction' else None
+            entry['distance'] = 0 if spec['role'] == 'prediction' else None
+            timeline.append(entry)
+            if spec['role'] != 'prediction':
+                requests_by_episode.setdefault(
+                    int(candidate['episode_id']), []
+                ).append((candidate, entry))
+        candidate['timeline'] = timeline
+
+    episode_ids = torch.tensor(
+        sorted(requests_by_episode), dtype=torch.int64
+    )
+    max_distance = max(1, int(exposure_stride))
+    if episode_ids.numel() > 0:
+        for path in table_shards(
+                dataset_dir, 'pair_risk_exposures', area='raw'):
+            payload = torch.load(path, map_location='cpu', weights_only=False)
+            if (
+                    payload.get('format_version') != 1
+                    or payload.get('table') != 'pair_risk_exposures'):
+                raise ValueError(f'invalid pair-risk shard: {path}')
+            columns = payload['columns']
+            rows = torch.nonzero(
+                torch.isin(columns['episode_id'], episode_ids),
+                as_tuple=False,
+            ).flatten()
+            seen_episode_steps = set()
+            for row in rows.tolist():
+                episode = int(columns['episode_id'][row].item())
+                step = int(columns['step'][row].item())
+                scene_identity = (episode, step)
+                if scene_identity in seen_episode_steps:
+                    continue
+                seen_episode_steps.add(scene_identity)
+                for candidate, entry in requests_by_episode[episode]:
+                    distance = abs(step - int(entry['target_step']))
+                    if distance > max_distance:
+                        continue
+                    if (
+                            entry['distance'] is not None
+                            and distance >= int(entry['distance'])):
+                        continue
+                    entry['frame'] = _copy_scene(columns, row, candidate)
+                    entry['distance'] = distance
+
+    scored_frames = []
+    for candidate in candidates:
+        candidate['probability'] = float(candidate['probability'])
+        for entry in candidate['timeline'][1:]:
+            frame = entry['frame']
+            if frame is not None and frame['target_pair_present']:
+                scored_frames.append(frame)
+    for frames in (
+            scored_frames[index:index + int(batch_size)]
+            for index in range(0, len(scored_frames), int(batch_size))):
+        autocast = (
+            torch.autocast(device_type='cuda', dtype=torch.bfloat16)
+            if device.type == 'cuda' and autocast_bfloat16
+            else nullcontext()
+        )
+        with autocast:
+            logits = model(_frame_model_columns(frames, device))
+        probabilities = torch.sigmoid(logits.float()).cpu().tolist()
+        for frame, probability in zip(frames, probabilities):
+            frame['probability'] = float(probability)
+    return candidates
+
+
+def _draw_scene(axis, frame, candidate, board, *, role, target_step):
     width = float(board['board_width'])
     height = float(board['board_height'])
     wall = float(board['wall_width'])
     spawn_y = float(board.get('spawn_y', 252.0))
     correct = candidate['kind'] in CORRECT_KINDS
     accent = '#21a179' if correct else '#e63946'
+    if frame is None:
+        axis.set_facecolor('#f7f1e5')
+        axis.axis('off')
+        axis.text(
+            0.5, 0.5,
+            f"{FRAME_ROLE_TITLES[role]}\n"
+            f"target drop={int(target_step)}\nscene unavailable",
+            ha='center', va='center', transform=axis.transAxes,
+            fontsize=10, color='#6b6259', weight='bold',
+        )
+        return
     axis.set_facecolor('#f7f1e5')
     axis.add_patch(Rectangle(
         (wall, 0), width - 2.0 * wall, height - wall,
@@ -273,21 +578,21 @@ def _draw_scene(axis, candidate, board):
         spawn_y, color='#c0392b', linewidth=1.0,
         linestyle='--', alpha=0.75,
     )
-    pair_slots = {
-        int(candidate['pair_slot_i']), int(candidate['pair_slot_j'])
+    pair_ids = {
+        int(candidate['fruit_id_i']), int(candidate['fruit_id_j'])
     }
     pair_positions = []
     active_slots = torch.nonzero(
-        candidate['active'], as_tuple=False
+        frame['active'], as_tuple=False
     ).flatten().tolist()
     for slot in active_slots:
-        level = int(candidate['levels'][slot].item())
+        level = int(frame['levels'][slot].item())
         x, y = (
-            float(value) for value in candidate['positions'][slot].tolist()
+            float(value) for value in frame['positions'][slot].tolist()
         )
-        radius = float(candidate['physics_radii'][slot].item())
-        selected = slot in pair_slots
-        fruit_id = int(candidate['fruit_ids'][slot].item())
+        radius = float(frame['physics_radii'][slot].item())
+        fruit_id = int(frame['fruit_ids'][slot].item())
+        selected = fruit_id in pair_ids
         axis.add_patch(Circle(
             (x, y), radius,
             facecolor=COLORS[max(0, min(10, level - 1))],
@@ -309,19 +614,20 @@ def _draw_scene(axis, candidate, board):
             [pair_positions[0][1], pair_positions[1][1]],
             color=accent, linewidth=2.0, linestyle=':', zorder=5,
         )
-    lead = int(candidate['lead_to_onset'])
-    lead_text = (
-        f'onset in {lead} drops' if lead > 0
-        else ('at onset' if lead == 0 else f'{-lead} drops after onset')
+    probability = frame.get('probability')
+    probability_text = (
+        f'p={float(probability):.3f}'
+        if probability is not None else 'p=n/a'
     )
-    if not bool(candidate['label']):
-        lead_text = 'no event in label horizon'
+    actual_step = int(frame['step'])
+    step_text = f'drop={actual_step}'
+    if actual_step != int(target_step):
+        step_text += f' (target {int(target_step)})'
+    if len(pair_positions) != 2:
+        step_text += ' · target pair absent'
     axis.set_title(
-        f"L{int(candidate['level'])} {candidate['kind']} · "
-        f"p={float(candidate['probability']):.3f}\n"
-        f"episode={int(candidate['episode_id'])} · "
-        f"drop={int(candidate['step'])} · {lead_text}",
-        fontsize=9, color=accent, weight='bold',
+        f"{FRAME_ROLE_TITLES[role]}\n{step_text} · {probability_text}",
+        fontsize=9, color=accent, weight='bold', pad=5,
     )
     axis.set_xlim(0, width)
     axis.set_ylim(height, 0)
@@ -331,49 +637,95 @@ def _draw_scene(axis, candidate, board):
 
 
 def render_candidate(candidate, board, output_path):
-    figure, axis = plt.subplots(figsize=(5.4, 9.2))
-    _draw_scene(axis, candidate, board)
-    figure.tight_layout()
+    figure, axes = plt.subplots(1, 3, figsize=(12.5, 8.3), squeeze=False)
+    for axis, entry in zip(axes[0], candidate['timeline']):
+        _draw_scene(
+            axis, entry['frame'], candidate, board,
+            role=entry['role'], target_step=entry['target_step'],
+        )
+    lead = int(candidate['lead_to_onset'])
+    if bool(candidate['label']):
+        relation = (
+            f'onset in {lead} drops' if lead > 0
+            else ('at onset' if lead == 0 else f'{-lead} drops after onset')
+        )
+    else:
+        relation = (
+            f"no onset through +{int(candidate['forecast_horizon'])} drops; "
+            f"label resolved at drop {int(candidate['label_resolution_step'])}"
+        )
+    correct = candidate['kind'] in CORRECT_KINDS
+    accent = '#21a179' if correct else '#e63946'
+    figure.suptitle(
+        f"L{int(candidate['level'])} {candidate['kind']} · "
+        f"forecast p={float(candidate['probability']):.3f} · "
+        f"episode={int(candidate['episode_id'])} · "
+        f"prediction drop={int(candidate['step'])}\n"
+        f"{TIME_BUCKET_TITLES[candidate['time_bucket']]} · {relation}",
+        fontsize=13, color=accent, weight='bold', y=0.995,
+    )
+    figure.tight_layout(rect=(0, 0, 1, 0.94))
     figure.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close(figure)
 
 
-def render_overview(selected, board, output_path):
-    figure, axes = plt.subplots(
-        5, 4, figsize=(15.5, 28.0), squeeze=False
+def render_group_overview(selected, board, bucket_name, output_path):
+    kinds = (
+        ('FP', 'TN') if bucket_name == NEGATIVE_TIME_BUCKET
+        else ('TP', 'FN')
     )
+    figure, axes = plt.subplots(5, 6, figsize=(21.0, 27.0), squeeze=False)
     for row, level in enumerate(range(7, 12)):
-        for column, kind in enumerate(CONFUSION_ORDER):
-            axis = axes[row][column]
-            candidates = selected[(level, kind)]
-            if candidates:
-                _draw_scene(axis, candidates[0], board)
-            else:
-                axis.axis('off')
-                axis.text(
-                    0.5, 0.5, f'L{level} {kind}\nno sample',
-                    ha='center', va='center', transform=axis.transAxes,
-                )
-            if row == 0:
-                axis.text(
-                    0.5, 1.08, CONFUSION_TITLES[kind],
-                    ha='center', va='bottom', transform=axis.transAxes,
-                    fontsize=13, weight='bold',
-                )
+        for kind_index, kind in enumerate(kinds):
+            candidates = selected[(level, kind, bucket_name)]
+            candidate = candidates[0] if candidates else None
+            for frame_index in range(3):
+                column = kind_index * 3 + frame_index
+                axis = axes[row][column]
+                if candidate is None:
+                    axis.axis('off')
+                    axis.text(
+                        0.5, 0.5, f'L{level} {kind}\nno sample',
+                        ha='center', va='center', transform=axis.transAxes,
+                    )
+                else:
+                    entry = candidate['timeline'][frame_index]
+                    _draw_scene(
+                        axis, entry['frame'], candidate, board,
+                        role=entry['role'],
+                        target_step=entry['target_step'],
+                    )
+                if row == 0:
+                    role = (
+                        candidate['timeline'][frame_index]['role']
+                        if candidate is not None else (
+                            ('prediction', 'forecast_midpoint', 'forecast_end')
+                            if bucket_name == NEGATIVE_TIME_BUCKET else
+                            ('prediction', 'onset', 'confirmation')
+                        )[frame_index]
+                    )
+                    axis.text(
+                        0.5, 1.11,
+                        f"{CONFUSION_TITLES[kind]}\n"
+                        f"{FRAME_ROLE_TITLES[role]}",
+                        ha='center', va='bottom',
+                        transform=axis.transAxes, fontsize=11, weight='bold',
+                    )
     figure.suptitle(
-        'Pair-risk model validation gallery · extreme test examples',
-        fontsize=17, weight='bold', y=0.995,
+        f"Pair-risk temporal validation · {TIME_BUCKET_TITLES[bucket_name]}",
+        fontsize=17, weight='bold', y=0.998,
     )
-    figure.tight_layout(rect=(0, 0, 1, 0.987))
+    figure.tight_layout(rect=(0, 0, 1, 0.988))
     figure.savefig(output_path, dpi=120, bbox_inches='tight')
     plt.close(figure)
 
 
 def _report_candidate(candidate, filename):
-    return {
+    result = {
         'file': filename,
         'kind': candidate['kind'],
         'level': int(candidate['level']),
+        'time_bucket': candidate['time_bucket'],
         'probability': float(candidate['probability']),
         'label': bool(candidate['label']),
         'episode_id': int(candidate['episode_id']),
@@ -382,7 +734,28 @@ def _report_candidate(candidate, filename):
         'lead_to_onset': int(candidate['lead_to_onset']),
         'fruit_id_i': int(candidate['fruit_id_i']),
         'fruit_id_j': int(candidate['fruit_id_j']),
+        'onset_step': candidate['onset_step'],
+        'confirmed_step': candidate['confirmed_step'],
+        'label_resolution_step': candidate['label_resolution_step'],
+        'frames': [],
     }
+    for entry in candidate['timeline']:
+        frame = entry['frame']
+        result['frames'].append({
+            'role': entry['role'],
+            'target_step': int(entry['target_step']),
+            'shown_step': int(frame['step']) if frame is not None else None,
+            'probability': (
+                float(frame['probability'])
+                if frame is not None and frame.get('probability') is not None
+                else None
+            ),
+            'target_pair_present': (
+                bool(frame.get('target_pair_present', True))
+                if frame is not None else False
+            ),
+        })
+    return result
 
 
 def run(args):
@@ -393,7 +766,29 @@ def run(args):
     collection_manifest = _load_json(
         Path(args.dataset_dir).resolve() / 'manifest.json'
     )
-    model_config, selected, counts = collect_candidates(args)
+    labeled_manifest = _load_json(
+        Path(args.dataset_dir).resolve() / 'labeled' / 'manifest.json'
+    )
+    model, selected, counts, time_counts, device = collect_candidates(args)
+    forecast_horizon = int(labeled_manifest['forecast_horizon'])
+    confirmation_drops = int(labeled_manifest['confirmation_drops'])
+    exposure_stride = int(
+        (collection_manifest.get('parameters') or {}).get(
+            'exposure_stride', 4
+        )
+    )
+    attach_timeline_frames(
+        Path(args.dataset_dir).resolve(),
+        selected,
+        model,
+        device,
+        forecast_horizon=forecast_horizon,
+        confirmation_drops=confirmation_drops,
+        exposure_stride=exposure_stride,
+        batch_size=args.batch_size,
+        autocast_bfloat16=args.autocast_bfloat16,
+    )
+    model_config = model.config
     simulator = collection_manifest.get('simulator_config') or {}
     board = {
         'board_width': float(simulator.get(
@@ -410,22 +805,41 @@ def run(args):
     report_rows = []
     for level in range(7, 12):
         for kind in CONFUSION_ORDER:
-            for index, candidate in enumerate(selected[(level, kind)], 1):
-                filename = f'L{level}_{kind}_{index:02d}.png'
-                render_candidate(candidate, board, output_dir / filename)
-                report_rows.append(_report_candidate(candidate, filename))
-    overview = output_dir / 'gallery_overview.png'
-    render_overview(selected, board, overview)
+            buckets = (
+                POSITIVE_TIME_BUCKETS
+                if kind in ('TP', 'FN') else (NEGATIVE_TIME_BUCKET,)
+            )
+            for bucket_name in buckets:
+                for index, candidate in enumerate(
+                        selected[(level, kind, bucket_name)], 1):
+                    filename = (
+                        f'L{level}_{kind}_{bucket_name}_{index:02d}.png'
+                    )
+                    render_candidate(candidate, board, output_dir / filename)
+                    report_rows.append(
+                        _report_candidate(candidate, filename)
+                    )
+    overview_names = []
+    for bucket_name in (*POSITIVE_TIME_BUCKETS, NEGATIVE_TIME_BUCKET):
+        filename = f'overview_{bucket_name}.png'
+        render_group_overview(
+            selected, board, bucket_name, output_dir / filename
+        )
+        overview_names.append(filename)
     report = {
-        'format_version': 1,
-        'purpose': 'pair_risk_prediction_scene_gallery',
+        'format_version': 2,
+        'purpose': 'pair_risk_prediction_temporal_gallery',
         'dataset_dir': str(Path(args.dataset_dir).resolve()),
         'checkpoint': str(Path(args.checkpoint).resolve()),
         'split': args.split,
         'threshold': float(args.threshold),
         'per_bucket': int(args.per_bucket),
+        'forecast_horizon': forecast_horizon,
+        'confirmation_drops': confirmation_drops,
+        'exposure_stride': exposure_stride,
         'confusion_counts': counts,
-        'overview': overview.name,
+        'confusion_counts_by_time_bucket': time_counts,
+        'overviews': overview_names,
         'images': report_rows,
     }
     _atomic_json(output_dir / 'report.json', report)
