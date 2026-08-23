@@ -31,6 +31,7 @@ from tools.train_pair_risk import (
     train,
     training_balance_to,
 )
+from tools.benchmark_pair_risk_collection import _gpu_summary
 
 
 def _model_columns(batch=3, fruits=6):
@@ -273,6 +274,32 @@ class PairRiskBalanceTests(unittest.TestCase):
                 self.assertAlmostEqual(
                     float(weights[mask].sum()), 13 / 8, places=5
                 )
+
+    def test_collection_gpu_summary_uses_continuous_samples(self):
+        summary = _gpu_summary([
+            {
+                'gpu_utilization_percent': 40,
+                'memory_used_mib': 1000,
+                'power_watts': 120,
+            },
+            {
+                'gpu_utilization_percent': 80,
+                'memory_used_mib': 2000,
+                'power_watts': 180,
+            },
+            {
+                'gpu_utilization_percent': 100,
+                'memory_used_mib': 3000,
+                'power_watts': 240,
+            },
+        ])
+        self.assertEqual(summary['samples'], 3)
+        self.assertAlmostEqual(
+            summary['gpu_utilization_percent']['mean'], 220 / 3
+        )
+        self.assertEqual(
+            summary['memory_used_mib']['median'], 2000
+        )
 
 
 class PairRiskTrainingSmokeTests(unittest.TestCase):
