@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import importlib.util
 import json
 import random
@@ -504,6 +505,28 @@ class AutoScaleAndCheckpointTest(unittest.TestCase):
         trainer.config = TrainingConfig(max_episode_drops=1000)
         self.assertEqual(
             trainer._training_drop_limit_reached(steps).tolist(),
+            [False, True, True],
+        )
+
+    def test_fixed_fruit_capacity_is_an_explicit_episode_boundary(self):
+        trainer = object.__new__(BaselineTrainer)
+        trainer.config = TrainingConfig(
+            max_envs=3,
+            active_envs=3,
+            max_episode_drops=0,
+        )
+        trainer.active_envs = 3
+        result = SimpleNamespace(
+            physics=SimpleNamespace(
+                done=torch.tensor((False, True, False)),
+            ),
+            observation=SimpleNamespace(
+                fruit_count=torch.tensor((63, 63, 64)),
+                step_count=torch.tensor((100, 200, 300)),
+            ),
+        )
+        self.assertEqual(
+            trainer._episode_finished(result).tolist(),
             [False, True, True],
         )
 

@@ -386,6 +386,7 @@ class BaselineTrainer:
         self.branch_source_states = 0
         self.simulated_transitions = 0
         self.episodes = 0
+        self.capacity_terminated_episodes = 0
         self.update_credit = 0.0
         self.best_accurate_score = float('-inf')
         self.last_fast_eval_score = None
@@ -730,7 +731,12 @@ class BaselineTrainer:
                 break
             result = self._step(self._prewarm_actions(enabled), enabled)
             time_limit = result.observation.step_count >= pilot_max_drops
-            newly_finished = enabled & (result.physics.done | time_limit)
+            capacity = self._representation_capacity_reached(
+                result.observation
+            )
+            newly_finished = enabled & (
+                result.physics.done | capacity | time_limit
+            )
             lengths[newly_finished] = result.observation.step_count[newly_finished]
             finished |= newly_finished
         active_lengths = lengths[:pilot_envs].to(torch.float32)
@@ -827,7 +833,12 @@ class BaselineTrainer:
                 )
                 return
             result = self._step(self._prewarm_actions(pending), pending)
-            failed = pending & result.physics.done
+            failed = pending & (
+                result.physics.done
+                | self._representation_capacity_reached(
+                    result.observation
+                )
+            )
             targets = _lower_unreachable_prewarm_targets(
                 targets,
                 result.observation.step_count,
@@ -901,7 +912,12 @@ class BaselineTrainer:
             )
             active_actions = full_actions[:self.active_envs]
             rewards = self._compute_rewards(result)
-            terminals = result.physics.done[:self.active_envs]
+            capacity = self._representation_capacity_reached(
+                result.observation
+            )
+            terminals = (
+                result.physics.done | capacity
+            )[:self.active_envs]
             if ticket is not None:
                 action_effects = self._build_action_effect_targets(
                     current,
@@ -923,7 +939,8 @@ class BaselineTrainer:
                 result.observation.step_count
             )
             self._reset_finished(
-                self._enabled_mask() & (result.physics.done | timeout)
+                self._enabled_mask()
+                & (result.physics.done | capacity | timeout)
             )
         if sum(counts) < target:
             raise RuntimeError(
@@ -1153,7 +1170,10 @@ class BaselineTrainer:
                 branch_next,
                 branch_actions,
                 rewards,
-                result.physics.done,
+                result.physics.done
+                | self._representation_capacity_reached(
+                    result.observation
+                ),
                 stages,
                 action_effects,
             )
@@ -1195,9 +1215,17 @@ class BaselineTrainer:
             return torch.zeros_like(step_count, dtype=torch.bool)
         return step_count >= self.config.max_episode_drops
 
+    def _representation_capacity_reached(self, observation):
+        """识别已填满固定 Fruit Graph 槽位的技术终止局。"""
+
+        return observation.fruit_count >= self.config.model.max_fruits
+
     def _episode_finished(self, result):
         return (
             result.physics.done[:self.active_envs]
+            | self._representation_capacity_reached(
+                result.observation
+            )[:self.active_envs]
             | self._training_drop_limit_reached(
                 result.observation.step_count[:self.active_envs]
             )
@@ -1205,6 +1233,12 @@ class BaselineTrainer:
 
     def _record_episodes(self, result):
         finished = self._episode_finished(result)
+        capacity_terminated = self._representation_capacity_reached(
+            result.observation
+        )[:self.active_envs]
+        self.capacity_terminated_episodes += int(
+            (finished & capacity_terminated).sum().item()
+        )
         if bool(finished.any().item()):
             finished_scores = [
                 int(value)
@@ -1267,7 +1301,12 @@ class BaselineTrainer:
                 self._initialize_reward()
                 return
             result = self._step(self._random_actions(), pending)
-            failed = pending & result.physics.done
+            failed = pending & (
+                result.physics.done
+                | self._representation_capacity_reached(
+                    result.observation
+                )
+            )
             self._reset_finished(failed)
             self.simulated_transitions += int(pending.sum().item())
         raise RuntimeError('autoscale pre-roll did not reach its target stages')
@@ -1292,6 +1331,9 @@ class BaselineTrainer:
             ),
             'branch_source_states': self.branch_source_states,
             'episodes': self.episodes,
+            'capacity_terminated_episodes': (
+                self.capacity_terminated_episodes
+            ),
             'updates': self.learner.update_count,
             'active_envs': self.active_envs,
             'best_accurate_score': self.best_accurate_score,
@@ -1356,6 +1398,9 @@ class BaselineTrainer:
                 )
         self.simulated_transitions = int(progress['simulated_transitions'])
         self.episodes = int(progress['episodes'])
+        self.capacity_terminated_episodes = int(
+            progress.get('capacity_terminated_episodes', 0)
+        )
         self.best_accurate_score = float(progress['best_accurate_score'])
         self.last_fast_eval_score = progress.get('last_fast_eval_score')
         self.last_accurate_eval_score = progress.get('last_accurate_eval_score')
@@ -1831,7 +1876,12 @@ class BaselineTrainer:
                 stage_seconds['reward_seconds'] += (
                     time.perf_counter() - reward_started
                 )
-                terminals = result.physics.done[:self.active_envs]
+                terminals = (
+                    result.physics.done
+                    | self._representation_capacity_reached(
+                        result.observation
+                    )
+                )[:self.active_envs]
                 action_effects = self._build_action_effect_targets(
                     current,
                     next_state,

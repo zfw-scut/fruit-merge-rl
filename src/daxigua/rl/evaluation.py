@@ -226,6 +226,7 @@ def evaluate_policy(
     )
 
     timeout_episodes = 0
+    capacity_terminated_episodes = 0
     completed = 0
     transitions = 0
     trajectory_count = min(
@@ -307,7 +308,10 @@ def evaluate_policy(
         )
 
         time_limit = observation.step_count >= max_episode_drops
-        finished = active_rows & (result.physics.done | time_limit)
+        capacity_limit = observation.fruit_count >= max_fruits
+        finished = active_rows & (
+            result.physics.done | capacity_limit | time_limit
+        )
         if recording_rows.numel() > 0:
             recorded_terminal = finished.index_select(0, recording_rows)
             trajectory_frames.append({
@@ -334,7 +338,7 @@ def evaluate_policy(
                     'max_levels': observation.max_level.index_select(
                         0, completed_rows
                     ).detach().cpu(),
-                    'timeout': time_limit.index_select(
+                    'timeout': (time_limit | capacity_limit).index_select(
                         0, completed_rows
                     ).detach().cpu(),
                 })
@@ -366,8 +370,12 @@ def evaluate_policy(
             finished_rows
         ].sum(dim=0).detach().cpu()
         timeout_episodes += int(
-            (time_limit[finished_rows] & ~result.physics.done[finished_rows])
+            ((time_limit | capacity_limit)[finished_rows]
+             & ~result.physics.done[finished_rows])
             .sum().item()
+        )
+        capacity_terminated_episodes += int(
+            capacity_limit[finished_rows].sum().item()
         )
         completed += int(finished_rows.numel())
         if completed >= episodes:
@@ -487,6 +495,7 @@ def evaluate_policy(
             ((output_scores >= 7000) & (l11_created == 0)).sum().item()
         ),
         'recorded_trajectory_episodes': trajectory_count,
+        'capacity_terminated_episodes': capacity_terminated_episodes,
     }
     if trajectory_output_path is not None:
         _atomic_torch_save(trajectory_output_path, {
