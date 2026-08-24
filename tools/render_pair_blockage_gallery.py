@@ -133,14 +133,8 @@ def _autocast_context(device, enabled):
     return nullcontext()
 
 
-def _candidate(columns, index, probability, kind):
+def _scene_frame(columns, index):
     return {
-        'kind': kind,
-        'probability': float(probability),
-        'priority': (
-            float(probability) if kind in ('TP', 'FP')
-            else 1.0 - float(probability)
-        ),
         'label': bool(columns['label'][index].item()),
         'episode_id': int(columns['episode_id'][index].item()),
         'step': int(columns['step'][index].item()),
@@ -159,6 +153,19 @@ def _candidate(columns, index, probability, kind):
         ),
         'offset_to_end': int(columns['offset_to_end'][index].item()),
     }
+
+
+def _candidate(columns, index, probability, kind):
+    candidate = _scene_frame(columns, index)
+    candidate.update({
+        'kind': kind,
+        'probability': float(probability),
+        'priority': (
+            float(probability) if kind in ('TP', 'FP')
+            else 1.0 - float(probability)
+        ),
+    })
+    return candidate
 
 
 def _append_pool(pool, candidates, limit):
@@ -277,6 +284,168 @@ def collect_candidates(args):
     return model, selected, counts, device
 
 
+def _pair_key(frame):
+    first, second = sorted((
+        int(frame['fruit_id_i']), int(frame['fruit_id_j'])
+    ))
+    return int(frame['episode_id']), first, second
+
+
+def _predict_frames(
+        model, frames, device, *, threshold, autocast_bfloat16):
+    if not frames:
+        return
+    columns = {
+        'positions': torch.stack([frame['positions'] for frame in frames]),
+        'levels': torch.stack([frame['levels'] for frame in frames]),
+        'physics_radii': torch.stack([
+            frame['physics_radii'] for frame in frames
+        ]),
+        'active': torch.stack([frame['active'] for frame in frames]),
+        'pair_slot_i': torch.tensor([
+            frame['pair_slot_i'] for frame in frames
+        ], dtype=torch.int64),
+        'pair_slot_j': torch.tensor([
+            frame['pair_slot_j'] for frame in frames
+        ], dtype=torch.int64),
+    }
+    model_columns = {
+        name: value.to(device, non_blocking=True)
+        for name, value in columns.items()
+    }
+    with torch.inference_mode(), _autocast_context(
+            device, autocast_bfloat16):
+        probabilities = torch.sigmoid(model(model_columns)).float().cpu()
+    for frame, probability in zip(frames, probabilities.tolist()):
+        frame['probability'] = float(probability)
+        frame['kind'] = confusion_kind(
+            probability >= float(threshold), frame['label']
+        )
+
+
+def attach_positive_transitions(
+        dataset_dir, selected, model, device, *, threshold,
+        autocast_bfloat16=True):
+    """为TP/FN样本补齐堵塞前一帧与事件起点帧。"""
+
+    candidates = [
+        candidate
+        for values in selected.values()
+        for candidate in values
+        if candidate['label']
+    ]
+    if not candidates:
+        return {'positive_cases': 0, 'complete_cases': 0}
+    requests_by_pair = {}
+    target_episodes = set()
+    for candidate in candidates:
+        candidate['onset_step'] = (
+            int(candidate['step'])
+            - int(candidate['offset_from_onset'])
+        )
+        candidate['before_onset_frame'] = None
+        candidate['onset_frame'] = None
+        key = _pair_key(candidate)
+        requests_by_pair.setdefault(key, []).append(candidate)
+        target_episodes.add(key[0])
+
+    episode_values = torch.tensor(
+        sorted(target_episodes), dtype=torch.int64
+    )
+    for path in table_shards(
+            Path(dataset_dir).resolve(), BLOCKAGE_TABLE,
+            area=BLOCKAGE_AREA):
+        payload = torch.load(path, map_location='cpu', weights_only=False)
+        columns = payload['columns']
+        relevant = torch.nonzero(
+            torch.isin(columns['episode_id'], episode_values),
+            as_tuple=False,
+        ).flatten()
+        for index in relevant.tolist():
+            key = (
+                int(columns['episode_id'][index].item()),
+                *sorted((
+                    int(columns['fruit_id_i'][index].item()),
+                    int(columns['fruit_id_j'][index].item()),
+                )),
+            )
+            requests = requests_by_pair.get(key)
+            if not requests:
+                continue
+            step = int(columns['step'][index].item())
+            event_id = int(columns['event_id'][index].item())
+            is_blocked = bool(columns['label'][index].item())
+            for candidate in requests:
+                if step < candidate['onset_step'] and not is_blocked:
+                    current = candidate['before_onset_frame']
+                    if current is None or step > int(current['step']):
+                        candidate['before_onset_frame'] = _scene_frame(
+                            columns, index
+                        )
+                if event_id == int(candidate['event_id']):
+                    current = candidate['onset_frame']
+                    offset = int(
+                        columns['offset_from_onset'][index].item()
+                    )
+                    if (
+                            current is None
+                            or offset < int(current['offset_from_onset'])):
+                        candidate['onset_frame'] = _scene_frame(
+                            columns, index
+                        )
+
+    inference_frames = []
+    seen = set()
+    for candidate in candidates:
+        for name in ('before_onset_frame', 'onset_frame'):
+            frame = candidate[name]
+            if frame is None:
+                continue
+            identity = (
+                *_pair_key(frame), int(frame['step'])
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            inference_frames.append(frame)
+    _predict_frames(
+        model, inference_frames, device,
+        threshold=threshold,
+        autocast_bfloat16=autocast_bfloat16,
+    )
+    probability_by_identity = {
+        (*_pair_key(frame), int(frame['step'])): (
+            frame['probability'], frame['kind']
+        )
+        for frame in inference_frames
+    }
+    complete = 0
+    for candidate in candidates:
+        for name in ('before_onset_frame', 'onset_frame'):
+            frame = candidate[name]
+            if frame is None:
+                continue
+            probability, kind = probability_by_identity[
+                (*_pair_key(frame), int(frame['step']))
+            ]
+            frame['probability'] = probability
+            frame['kind'] = kind
+        candidate['transition'] = (
+            {'role': 'before_onset',
+             'frame': candidate['before_onset_frame']},
+            {'role': 'onset', 'frame': candidate['onset_frame']},
+            {'role': 'classified', 'frame': candidate},
+        )
+        if (
+                candidate['before_onset_frame'] is not None
+                and candidate['onset_frame'] is not None):
+            complete += 1
+    return {
+        'positive_cases': len(candidates),
+        'complete_cases': complete,
+    }
+
+
 def _board_config(dataset_dir, model_config):
     collection_manifest = _load_json(Path(dataset_dir) / 'manifest.json')
     simulator = collection_manifest.get('simulator_config') or {}
@@ -292,7 +461,7 @@ def _board_config(dataset_dir, model_config):
     }
 
 
-def draw_scene(axis, candidate, board, *, show_title=True):
+def draw_scene(axis, candidate, board, *, show_title=True, title=None):
     width = float(board['board_width'])
     height = float(board['board_height'])
     wall = float(board['wall_width'])
@@ -356,8 +525,10 @@ def draw_scene(axis, candidate, board, *, show_title=True):
         )
     if show_title:
         axis.set_title(
-            f"L{int(candidate['level'])} {kind} · "
-            f"score={float(candidate['probability']):.3f}",
+            title or (
+                f"L{int(candidate['level'])} {kind} · "
+                f"score={float(candidate['probability']):.3f}"
+            ),
             fontsize=10, color=accent, weight='bold', pad=5,
         )
     axis.set_xlim(0, width)
@@ -402,41 +573,139 @@ def _semantic_lines(candidate, threshold):
     return lines
 
 
+def _transition_title(role, frame, candidate):
+    role_titles = {
+        'before_onset': 'Before onset',
+        'onset': 'Detected onset',
+        'classified': 'Classified frame',
+    }
+    if frame is None:
+        return f'{role_titles[role]}\nscene unavailable'
+    label = 'BLOCKED' if frame['label'] else 'SAFE'
+    same = (
+        role == 'classified'
+        and int(frame['step']) == int(candidate['onset_step'])
+    )
+    same_text = ' · same as onset' if same else ''
+    return (
+        f'{role_titles[role]}{same_text}\n'
+        f'drop={int(frame["step"])} · '
+        f'score={float(frame["probability"]):.3f} · {label}'
+    )
+
+
+def _draw_missing_scene(axis, title):
+    axis.set_facecolor('#f7f1e5')
+    axis.axis('off')
+    axis.text(
+        0.5, 0.5, title,
+        ha='center', va='center', transform=axis.transAxes,
+        fontsize=10, color='#6b6259', weight='bold',
+    )
+
+
+def _draw_info(axis, candidate, threshold, *, compact=False):
+    axis.axis('off')
+    kind = candidate['kind']
+    accent = '#21a179' if kind in CORRECT_KINDS else '#e63946'
+    axis.text(
+        0.0, 0.98,
+        f"L{int(candidate['level'])} {kind}\n"
+        f"{CONFUSION_TITLES[kind]}",
+        ha='left', va='top', transform=axis.transAxes,
+        fontsize=15 if compact else 17,
+        color=accent, weight='bold', linespacing=1.35,
+    )
+    axis.text(
+        0.0, 0.79, '\n'.join(_semantic_lines(candidate, threshold)),
+        ha='left', va='top', transform=axis.transAxes,
+        fontsize=9.2 if compact else 10.5,
+        color='#312a25', linespacing=1.48,
+    )
+    axis.text(
+        0.0, 0.025,
+        'Every score classifies that displayed frame as blocked now.\n'
+        'The preceding frame is context, not a future-risk forecast.',
+        ha='left', va='bottom', transform=axis.transAxes,
+        fontsize=8.4 if compact else 9.3,
+        color='#6b6259', linespacing=1.4,
+    )
+
+
 def render_candidate(candidate, board, threshold, output_path):
+    transition = candidate.get('transition')
+    if candidate['label'] and transition:
+        figure, axes = plt.subplots(
+            1, 4, figsize=(14.2, 8.4),
+            gridspec_kw={'width_ratios': (2.1, 2.1, 2.1, 1.65)},
+            squeeze=False,
+        )
+        for axis, entry in zip(axes[0][:3], transition):
+            frame = entry['frame']
+            title = _transition_title(
+                entry['role'], frame, candidate
+            )
+            if frame is None:
+                _draw_missing_scene(axis, title)
+            else:
+                draw_scene(axis, frame, board, title=title)
+        _draw_info(axes[0][3], candidate, threshold, compact=True)
+        figure.tight_layout()
+        figure.savefig(output_path, dpi=155, bbox_inches='tight')
+        plt.close(figure)
+        return
+
     figure, axes = plt.subplots(
         1, 2, figsize=(8.5, 9.0),
         gridspec_kw={'width_ratios': (3.0, 1.75)}, squeeze=False,
     )
     draw_scene(axes[0][0], candidate, board, show_title=False)
-    info = axes[0][1]
-    info.axis('off')
-    kind = candidate['kind']
-    accent = '#21a179' if kind in CORRECT_KINDS else '#e63946'
-    info.text(
-        0.0, 0.98,
-        f"L{int(candidate['level'])} {kind}\n"
-        f"{CONFUSION_TITLES[kind]}",
-        ha='left', va='top', transform=info.transAxes,
-        fontsize=17, color=accent, weight='bold', linespacing=1.35,
-    )
-    info.text(
-        0.0, 0.80, '\n'.join(_semantic_lines(candidate, threshold)),
-        ha='left', va='top', transform=info.transAxes,
-        fontsize=10.5, color='#312a25', linespacing=1.55,
-    )
-    info.text(
-        0.0, 0.035,
-        'Semantics: classify whether this frame is already inside\n'
-        'a blockage event, not risk within the next 24 drops.',
-        ha='left', va='bottom', transform=info.transAxes,
-        fontsize=9.3, color='#6b6259', linespacing=1.45,
-    )
+    _draw_info(axes[0][1], candidate, threshold)
     figure.tight_layout()
     figure.savefig(output_path, dpi=160, bbox_inches='tight')
     plt.close(figure)
 
 
 def render_kind_overview(selected, board, kind, output_path):
+    if kind in BLOCKED_KINDS:
+        figure, axes = plt.subplots(
+            5, 3, figsize=(9.8, 23.5), squeeze=False
+        )
+        for row, level in enumerate(range(7, 12)):
+            candidate = (
+                selected[(level, kind)][0]
+                if selected[(level, kind)] else None
+            )
+            for column, role in enumerate((
+                    'before_onset', 'onset', 'classified')):
+                axis = axes[row][column]
+                if candidate is None:
+                    _draw_missing_scene(axis, f'L{level} {kind}\nno sample')
+                    continue
+                entry = candidate['transition'][column]
+                frame = entry['frame']
+                title = _transition_title(role, frame, candidate)
+                if frame is None:
+                    _draw_missing_scene(axis, title)
+                else:
+                    draw_scene(axis, frame, board, title=title)
+                if column == 0:
+                    axis.text(
+                        -0.06, 0.5, f'L{level} {kind}',
+                        rotation=90, ha='right', va='center',
+                        transform=axis.transAxes,
+                        fontsize=12, weight='bold',
+                    )
+        figure.suptitle(
+            f'PB-GEO current-blockage transition gallery · {kind} · '
+            f'{CONFUSION_TITLES[kind]}',
+            fontsize=15, weight='bold', y=0.998,
+        )
+        figure.tight_layout(rect=(0, 0, 1, 0.985))
+        figure.savefig(output_path, dpi=125, bbox_inches='tight')
+        plt.close(figure)
+        return
+
     figure, axes = plt.subplots(1, 5, figsize=(15.5, 7.0), squeeze=False)
     for column, level in enumerate(range(7, 12)):
         candidate = selected[(level, kind)][0] if selected[(
@@ -446,7 +715,7 @@ def render_kind_overview(selected, board, kind, output_path):
         if candidate is None:
             axis.axis('off')
             axis.text(
-                0.5, 0.5, f'L{level} {kind}\n无样本',
+                0.5, 0.5, f'L{level} {kind}\nno sample',
                 ha='center', va='center', transform=axis.transAxes,
             )
         else:
@@ -462,7 +731,7 @@ def render_kind_overview(selected, board, kind, output_path):
 
 
 def _report_candidate(candidate, filename):
-    return {
+    result = {
         'file': filename,
         'kind': candidate['kind'],
         'level': int(candidate['level']),
@@ -476,6 +745,23 @@ def _report_candidate(candidate, filename):
         'offset_from_onset': int(candidate['offset_from_onset']),
         'offset_to_end': int(candidate['offset_to_end']),
     }
+    transition = candidate.get('transition')
+    if transition:
+        result['transition'] = []
+        for entry in transition:
+            frame = entry['frame']
+            result['transition'].append({
+                'role': entry['role'],
+                'available': frame is not None,
+                'step': int(frame['step']) if frame is not None else None,
+                'label': bool(frame['label']) if frame is not None else None,
+                'probability': (
+                    float(frame['probability'])
+                    if frame is not None else None
+                ),
+                'kind': frame['kind'] if frame is not None else None,
+            })
+    return result
 
 
 def run(args):
@@ -484,6 +770,11 @@ def run(args):
         raise FileExistsError(f'gallery output is not empty: {output_dir}')
     output_dir.mkdir(parents=True, exist_ok=True)
     model, selected, counts, device = collect_candidates(args)
+    transition_summary = attach_positive_transitions(
+        args.dataset_dir, selected, model, device,
+        threshold=args.threshold,
+        autocast_bfloat16=args.autocast_bfloat16,
+    )
     board = _board_config(args.dataset_dir, model.config)
     report_rows = []
     for level in range(7, 12):
@@ -502,10 +793,13 @@ def run(args):
         )
         overview_names.append(filename)
     report = {
-        'format_version': 1,
+        'format_version': 2,
         'purpose': 'pair_blockage_current_geometry_human_gallery',
         'label_semantics': 'confirmed_event_onset_le_t_le_event_end',
         'prediction_semantics': 'blocked_now_score',
+        'transition_semantics': (
+            'positive_cases_show_previous_exposure_onset_and_classified_frame'
+        ),
         'dataset_dir': str(Path(args.dataset_dir).resolve()),
         'checkpoint': str(Path(args.checkpoint).resolve()),
         'device': str(device),
@@ -513,6 +807,7 @@ def run(args):
         'threshold': float(args.threshold),
         'per_bucket': int(args.per_bucket),
         'confusion_counts': counts,
+        'transition_summary': transition_summary,
         'overviews': overview_names,
         'images': report_rows,
     }

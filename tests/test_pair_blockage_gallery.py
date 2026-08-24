@@ -7,10 +7,19 @@ import unittest
 import torch
 
 from tools.render_pair_blockage_gallery import (
+    attach_positive_transitions,
     candidate_identity,
     confusion_kind,
     render_candidate,
     select_distinct_candidates,
+)
+from daxigua.rl.merge_potential_stats import ShardedTensorWriter
+from daxigua.rl.pair_blockage import (
+    BLOCKAGE_AREA,
+    BLOCKAGE_LABELED_DTYPES,
+    BLOCKAGE_TABLE,
+    PairBlockageModel,
+    PairBlockageModelConfig,
 )
 
 
@@ -85,6 +94,87 @@ class PairBlockageGalleryTests(unittest.TestCase):
             render_candidate(_candidate(), board, 0.5, output)
             self.assertTrue(output.exists())
             self.assertGreater(output.stat().st_size, 10_000)
+
+    def test_positive_transition_gallery_renders_three_frames(self):
+        board = {
+            'board_width': 560.0,
+            'board_height': 1120.0,
+            'wall_width': 20.0,
+            'spawn_y': 252.0,
+        }
+        candidate = _candidate(offset_from_onset=8)
+        candidate['onset_step'] = 72
+        before = _candidate(
+            kind='TN', probability=0.1, label=False, event_id=-1,
+            step=68, offset_from_onset=0, offset_to_end=0,
+        )
+        onset = _candidate(
+            kind='FN', probability=0.3, step=72,
+            offset_from_onset=0, offset_to_end=24,
+        )
+        candidate['transition'] = (
+            {'role': 'before_onset', 'frame': before},
+            {'role': 'onset', 'frame': onset},
+            {'role': 'classified', 'frame': candidate},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'transition.png'
+            render_candidate(candidate, board, 0.5, output)
+            self.assertTrue(output.exists())
+            self.assertGreater(output.stat().st_size, 20_000)
+
+    def test_transition_frames_are_recovered_from_labeled_shard(self):
+        before = _candidate(
+            kind='TN', probability=0.1, label=False, event_id=-1,
+            step=68, offset_from_onset=0, offset_to_end=0,
+        )
+        onset = _candidate(
+            kind='FN', probability=0.3, step=72,
+            offset_from_onset=0, offset_to_end=24,
+        )
+        current = _candidate(step=80, offset_from_onset=8)
+        frames = (before, onset, current)
+        columns = {}
+        scalar_names = (
+            'episode_id', 'step', 'pair_slot_i', 'pair_slot_j',
+            'fruit_id_i', 'fruit_id_j', 'level', 'label', 'event_id',
+            'offset_from_onset', 'offset_to_end',
+        )
+        tensor_names = ('positions', 'levels', 'physics_radii', 'active')
+        for name in scalar_names:
+            columns[name] = torch.tensor(
+                [frame[name] for frame in frames],
+                dtype=BLOCKAGE_LABELED_DTYPES[name],
+            )
+        columns['split'] = torch.full(
+            (3,), 2, dtype=BLOCKAGE_LABELED_DTYPES['split']
+        )
+        for name in tensor_names:
+            columns[name] = torch.stack([
+                frame[name] for frame in frames
+            ]).to(BLOCKAGE_LABELED_DTYPES[name])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            writer = ShardedTensorWriter(
+                root / BLOCKAGE_AREA, BLOCKAGE_TABLE,
+                BLOCKAGE_LABELED_DTYPES,
+                shard_rows=10, background=False,
+            )
+            writer.append(columns)
+            writer.close()
+            model = PairBlockageModel(
+                PairBlockageModelConfig(max_fruits=4)
+            )
+            summary = attach_positive_transitions(
+                root, {(8, 'TP'): [current]}, model,
+                torch.device('cpu'), threshold=0.5,
+                autocast_bfloat16=False,
+            )
+        self.assertEqual(summary, {
+            'positive_cases': 1, 'complete_cases': 1,
+        })
+        self.assertEqual(current['before_onset_frame']['step'], 68)
+        self.assertEqual(current['onset_frame']['step'], 72)
 
 
 if __name__ == '__main__':
