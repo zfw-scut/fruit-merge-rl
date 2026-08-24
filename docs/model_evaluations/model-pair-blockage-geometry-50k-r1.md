@@ -55,6 +55,7 @@ precision只有0.1025，因此不能把统一阈值输出直接作为行为段�
   不同语义的历史对照，二者不可互换；
 - `【决策】` 暂不输入Policy，也不作为反事实最终因果判断；
 - `【事实】` 当前语义的冻结测试集TP/FP/FN/TN场景画廊已经按L7～L11生成并迁回本地；
+  其中TP/FN同时提供起点前记录、确认起点和当前分类记录；
 - `【建议】` 下一步结合画廊人工检查L7/L8误报与事件起点附近的迟检，再在冻结验证集
   选择逐等级阈值或做简单校准；
 - `【反证条件】` 若逐等级校准后L7/L8仍无法在可接受误报下保持事件召回，或画廊显示
@@ -66,4 +67,4 @@ precision只有0.1025，因此不能把统一阈值输出直接作为行为段�
 `e50701bbc07f5c24431167ad7597bdc8724f034159b1c9f242bec10e7f81f1b2`。本地同时保留
 `evaluation.json`、`blocked_now_manifest.json`和`training_benchmark.json`；大体积派生
 标签和原始轨迹未迁回。当前语义画廊位于
-`runs/analysis/gallery_current_geometry_50k_env5000_20260825`。
+`runs/analysis/gallery_current_geometry_transitions_v4_50k_env5000_20260825`。
