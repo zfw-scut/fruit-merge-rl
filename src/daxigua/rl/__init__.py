@@ -34,6 +34,7 @@ from .pair_failure import (
     PairFailureTracker,
     PairFailureUpdate,
 )
+from .pair_blockage import PairBlockageModel, PairBlockageModelConfig
 from .pair_risk import PairRiskModel, PairRiskModelConfig
 
 __all__ = [
@@ -59,6 +60,8 @@ __all__ = [
     'PairFailureConfig',
     'PairFailureTracker',
     'PairFailureUpdate',
+    'PairBlockageModel',
+    'PairBlockageModelConfig',
     'PairRiskModel',
     'PairRiskModelConfig',
     'RewardConfig',
