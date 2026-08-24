@@ -705,11 +705,13 @@ def _transition_title(role, frame, candidate):
         f'{float(probability):.3f}'
         if probability is not None else 'n/a'
     )
+    onset_frame = candidate.get('onset_frame')
     same = (
         role == 'classified'
-        and int(frame['step']) == int(candidate['onset_step'])
+        and onset_frame is not None
+        and int(frame['step']) == int(onset_frame['step'])
     )
-    same_text = ' · same as onset' if same else ''
+    same_text = ' (same record)' if same else ''
     return (
         f'{role_titles[role]}{same_text}\n'
         f'drop={int(frame["step"])} · '
