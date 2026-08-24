@@ -46,6 +46,8 @@ TOOL_DEFINITIONS: dict[str, dict[str, Any]] = {
              'options': ['play_vs_training', 'backend_parity']},
             {'id': 'model_device', 'label': '模型设备', 'type': 'select', 'default': 'auto',
              'options': ['auto', 'cuda', 'cpu']},
+            {'id': 'pair_risk_device', 'label': '堵塞风险设备', 'type': 'select',
+             'default': 'cpu', 'options': ['cpu', 'auto', 'cuda']},
             {'id': 'port', 'label': '服务端口', 'type': 'number', 'default': 8769,
              'min': 1024, 'max': 65535, 'step': 1},
             {'id': 'reward_scale', 'label': '空间奖励缩放', 'type': 'range',
@@ -210,6 +212,11 @@ def build_tool_command(tool_id: str, params: dict[str, Any]) -> tuple[list[str],
         port = _int_value(params, 'port', 1024, 65535)
         device = _choice(params, 'device', ('cuda', 'cpu'))
         model_device = _choice(params, 'model_device', ('auto', 'cuda', 'cpu'))
+        pair_risk_device = params.get('pair_risk_device', 'cpu')
+        if pair_risk_device not in ('cpu', 'auto', 'cuda'):
+            raise ValueError(
+                "pair_risk_device 只能是 ('cpu', 'auto', 'cuda')"
+            )
         reward_scale = _float_value(params, 'reward_scale', 0.1, 2.0)
         comparison = params.get('comparison', 'on')
         if comparison not in ('on', 'off'):
@@ -225,7 +232,9 @@ def build_tool_command(tool_id: str, params: dict[str, Any]) -> tuple[list[str],
             )
         command = [python, 'tools/open_scenario_lab.py', '--host',
                    '127.0.0.1', '--port', str(port), '--device', device,
-                   '--model-device', model_device, '--reward-scale', str(reward_scale)]
+                   '--model-device', model_device,
+                   '--pair-risk-device', pair_risk_device,
+                   '--reward-scale', str(reward_scale)]
         if comparison == 'on':
             command.extend([
                 '--comparison',

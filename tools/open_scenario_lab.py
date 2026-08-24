@@ -3,7 +3,24 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import torch
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _discover_pair_risk_checkpoint():
+    candidates = []
+    for directory in ('pair_risk', 'pair-risk'):
+        candidates.extend(
+            (PROJECT_ROOT / 'runs' / directory).glob('**/best.pt')
+        )
+    return max(
+        (path for path in candidates if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        default=None,
+    )
 
 
 def parse_args(argv=None):
@@ -47,6 +64,19 @@ def parse_args(argv=None):
         help='模型推理设备，默认 auto。',
     )
     parser.add_argument(
+        '--pair-risk-checkpoint',
+        default='auto',
+        help=(
+            '可选：水果对堵塞风险 checkpoint；默认 auto，从 '
+            'runs/pair_risk 或 runs/pair-risk 自动发现。'
+        ),
+    )
+    parser.add_argument(
+        '--pair-risk-device',
+        default='cpu',
+        help='堵塞风险推理设备，默认 cpu。',
+    )
+    parser.add_argument(
         '--comparison',
         action='store_true',
         help='启用场景实验室双环境物理对照模式。',
@@ -74,6 +104,7 @@ def main(argv=None):
         reward_scale=args.reward_scale,
     )
     model_evaluator = None
+    pair_risk_evaluator = None
     model_controller = None
     comparison_model_controller = None
     live_session = ScenarioLabLiveSession(device=args.device)
@@ -108,9 +139,26 @@ def main(argv=None):
             comparison_model_controller = ScenarioComparisonModelController(
                 comparison_session, model_evaluator
             )
+    pair_risk_checkpoint = (
+        _discover_pair_risk_checkpoint()
+        if args.pair_risk_checkpoint == 'auto'
+        else (
+            Path(args.pair_risk_checkpoint)
+            if args.pair_risk_checkpoint else None
+        )
+    )
+    if pair_risk_checkpoint is not None:
+        from daxigua.rl.scenario_pair_risk_evaluator import (
+            ScenarioPairRiskEvaluator,
+        )
+
+        pair_risk_evaluator = ScenarioPairRiskEvaluator(
+            pair_risk_checkpoint, device=args.pair_risk_device
+        )
     server = ScenarioLabServer(
         evaluator,
         model_evaluator=model_evaluator,
+        pair_risk_evaluator=pair_risk_evaluator,
         model_controller=model_controller,
         comparison_model_controller=comparison_model_controller,
         live_session=live_session,
@@ -129,6 +177,14 @@ def main(argv=None):
         print(
             f"模型评估：{identity['checkpoint']} "
             f"（{identity['checkpoint_sha256']}，{identity['device']}）",
+            flush=True,
+        )
+    if pair_risk_evaluator is not None:
+        identity = pair_risk_evaluator.identity
+        print(
+            f"堵塞风险预测：{identity['checkpoint_path']} "
+            f"（未来{identity['forecast_horizon']}次投放，"
+            f"{identity['device']}）",
             flush=True,
         )
     try:

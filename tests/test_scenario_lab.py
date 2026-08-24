@@ -1,4 +1,5 @@
 import json
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -29,6 +30,10 @@ from daxigua.rl.scenario_model_controller import (
 )
 from daxigua.rl.config import ModelConfig
 from daxigua.rl.model import BaselineGnnDqn
+from daxigua.rl.pair_risk import PairRiskModel, PairRiskModelConfig
+from daxigua.rl.scenario_pair_risk_evaluator import (
+    ScenarioPairRiskEvaluator,
+)
 from daxigua.rl.scenario_model_evaluator import ScenarioModelEvaluator
 from daxigua.rl.viewer import LoadedViewerModel
 
@@ -46,6 +51,114 @@ class ScenarioLabFrontendTests(unittest.TestCase):
         self.assertGreater(specs[0]['merged_physics_radius'], 0)
 
 class ScenarioLabBackendContractTests(unittest.TestCase):
+    def test_pair_risk_evaluator_batches_same_level_high_fruit_pairs(self):
+        config = PairRiskModelConfig(
+            context_hidden_dim=8,
+            head_hidden_dim=8,
+            level_embedding_dim=4,
+            physics_fps=30.0,
+        )
+        model = PairRiskModel(config)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / 'best.pt'
+            torch.save({
+                'format_version': 1,
+                'model_type': 'pair_conditioned_deep_sets_risk_v1',
+                'model_config': {
+                    name: getattr(config, name)
+                    for name in config.__dataclass_fields__
+                },
+                'model_state_dict': model.state_dict(),
+                'dataset_manifest': {'forecast_horizon': 24},
+            }, checkpoint)
+            evaluator = ScenarioPairRiskEvaluator(
+                checkpoint, device='cpu'
+            )
+            raw_scene = {
+                'fps': 120,
+                'queue': [1, 2, 3, 4],
+                'danger_progress': 0.25,
+                'over_danger_line': False,
+                'fruits': [
+                    {
+                        'id': 11, 'level': 7, 'x': 120.0, 'y': 900.0,
+                        'age_frames': 120,
+                    },
+                    {
+                        'id': 12, 'level': 7, 'x': 410.0, 'y': 900.0,
+                        'age_frames': 240,
+                    },
+                    {'id': 13, 'level': 8, 'x': 280.0, 'y': 1040.0},
+                ],
+            }
+            scene = validate_scenario(raw_scene)
+            candidates = evaluator._candidate_pairs(scene)
+            columns = evaluator._columns(scene, candidates)
+            result = evaluator.evaluate(raw_scene)
+
+        self.assertEqual([(0, 1)], candidates)
+        self.assertEqual(30.0, float(columns['age_frames'][0, 0]))
+        self.assertEqual(60.0, float(columns['age_frames'][0, 1]))
+        self.assertEqual(24, result['forecast_horizon'])
+        self.assertEqual(1, result['pair_count'])
+        self.assertEqual(11, result['pairs'][0]['fruit_id_i'])
+        self.assertEqual(12, result['pairs'][0]['fruit_id_j'])
+        self.assertGreaterEqual(result['pairs'][0]['probability'], 0.0)
+        self.assertLessEqual(result['pairs'][0]['probability'], 1.0)
+
+    def test_pair_risk_http_api_exposes_read_only_forecast(self):
+        class FakePairRiskEvaluator:
+            identity = {
+                'checkpoint': 'risk-best.pt',
+                'device': 'cpu',
+                'forecast_horizon': 24,
+            }
+
+            @staticmethod
+            def evaluate(_scene):
+                return {
+                    'format_version': 1,
+                    'forecast_horizon': 24,
+                    'pair_count': 1,
+                    'pairs': [{
+                        'fruit_id_i': 1,
+                        'fruit_id_j': 2,
+                        'level': 7,
+                        'probability': 0.75,
+                    }],
+                }
+
+        server = ScenarioLabServer(
+            SimpleNamespace(device='cpu'),
+            pair_risk_evaluator=FakePairRiskEvaluator(),
+            host='127.0.0.1',
+            port=0,
+        ).start()
+        try:
+            with urlopen(server.url + 'api/health', timeout=2.0) as response:
+                health = json.loads(response.read())
+            request = Request(
+                server.url + 'api/pair-risk/evaluate',
+                data=json.dumps({
+                    'scene': {
+                        'fps': 120,
+                        'queue': [1, 2, 3, 4],
+                        'fruits': [],
+                    },
+                }).encode('utf-8'),
+                headers={'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with urlopen(request, timeout=2.0) as response:
+                result = json.loads(response.read())
+        finally:
+            server.close()
+
+        self.assertTrue(health['pair_risk_available'])
+        self.assertEqual('risk-best.pt', health['pair_risk']['checkpoint'])
+        self.assertEqual(1, result['pair_count'])
+        self.assertEqual(0.75, result['pairs'][0]['probability'])
+
     def test_weighted_voronoi_builder_keeps_every_active_site(self):
         builder = WeightedVoronoiGraphBuilder(
             SimulatorConfig(), device='cpu', sample_spacing=8.0
@@ -565,7 +678,9 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             second = session.execute({'type': 'drop', 'level': 2, 'x': 380})
             snapshot = session.snapshot()
             sequence = snapshot['sequence']
-            later = session.wait_for_snapshot(sequence, timeout=0.2)
+            # CPU 场景实验室和门户同时运行时，Windows 调度偶尔会超过
+            # 200 ms；这里只验证恢复推进，不把墙钟延迟作为性能断言。
+            later = session.wait_for_snapshot(sequence, timeout=0.75)
         finally:
             session.close()
 
@@ -706,7 +821,7 @@ class ScenarioLabBackendContractTests(unittest.TestCase):
             still_paused = session.snapshot()
             session.execute({'type': 'resume'})
             moving = session.snapshot()
-            deadline = time.monotonic() + 0.2
+            deadline = time.monotonic() + 0.75
             while (
                     moving['physics_frame'] <= still_paused['physics_frame']
                     and time.monotonic() < deadline):

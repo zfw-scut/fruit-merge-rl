@@ -13,7 +13,7 @@
 - 中央是训练同源Tensor/CUDA实时画布、动作锚点、动作滑杆和常用执行按钮；
 - 右侧按折叠区展示辅助动作预测、真实结果、Q值和模型身份；
 - 低频可视化统一进入“显示设置”抽屉，可独立开启网格、危险线、动作锚点、速度、
-  预测位置、真实位置、首次接触法向量和完整圆障碍加权 Voronoi 图。
+  预测位置、真实位置、首次接触法向量、完整圆障碍加权 Voronoi 图和水果对未来堵塞风险。
 
 场景空间几何与辅助动作效果不会再无条件叠在同一画面。默认只打开稳定场景实时预测、
 预测位置和真实结果；诊断者按当前问题选择其它图层。
@@ -42,6 +42,8 @@
 - 按选定动作真实投放，或启动/停止模型持续greedy决策。
 - 在场景几何停止明显变化后按需构造并显示 Voronoi / Free-Space Graph；颜色连续表达
   局部clearance，交汇节点可独立隐藏。
+- 在稳定场景中用冻结的轻量模型批量预测全部L7～L11同级水果对；虚线、颜色和中点百分比
+  表示未来24次投放内发生堵塞起始的风险，悬停水果可查看与各同级伙伴的具体概率。
 
 实时预测只在模型可用、场景稳定且场景内容发生变化后防抖触发。切换A0～A20只读取同次
 前向传播的缓存结果，不会重复运行模型。关闭预测图层只影响绘制，不改变后端推理。
@@ -65,6 +67,7 @@
 | `POST /api/model/evaluate` | 21动作Q值与辅助效果预测 |
 | `POST /api/evaluate` | 21个真实克隆环境的动作效果 |
 | `POST /api/voronoi/evaluate` | 当前场景的完整圆障碍加权 Voronoi 图 |
+| `POST /api/pair-risk/evaluate` | L7～L11同级水果对的未来堵塞起始风险 |
 | `POST /api/model/control` | 持续模型决策启停 |
 
 服务只接受`localhost`或`127.0.0.1`来源的跨端口请求。根路径返回`410`及门户`#lab`
@@ -86,6 +89,21 @@ React/SVG渲染成本限制。API的`physics_backend`、`physics_device`和
 物理后端名称。
 `/api/evaluate`与`/api/model/evaluate`都读取请求时的场景快照；前者执行真实物理，
 后者只做模型推理，二者都不会隐式推进实时世界。
+
+## 水果对堵塞风险诊断层
+
+显示设置中的“L7～L11 同级水果对堵塞风险”默认关闭。开启后只在实时画布、场景稳定时
+运行；位置、危险进度或水果年龄跨过约0.5秒量化间隔后，前端防抖请求一次CPU批量推理。
+该调用与Q网络预测相互独立，不占用场景实验室的模型预测按钮，也不修改物理世界。
+
+后端复用`PairRiskModel`训练时的定长64水果输入和Pair-conditioned Deep Sets结构。场景
+实验室通常运行120 FPS，而风险模型来自30 FPS数据，因此适配层先把`age_frames`恢复为
+物理时间，再换算到checkpoint记录的训练帧率；危险线进度、是否越线、q0～q3和全部活动
+水果也按训练契约传入。每个场景内的候选水果对在一次前向中批量完成。
+
+颜色由绿到红连续表达概率，百分比不是“当前已经堵塞”的二分类结论，而是该水果对在
+未来预测窗口内出现传统长期停滞事件起点的模型风险。尤其L7/L8在统一0.5阈值下仍有明显
+误报，因此界面不据此自动宣告失败、不驱动Policy，也不替代真实后续轨迹的因果验证。
 
 ## Voronoi / Free-Space Graph 原型
 
@@ -120,10 +138,15 @@ $env:PYTHONPATH = 'src'
 conda run -n python-torch python tools/open_scenario_lab.py `
     --device cuda `
     --checkpoint runs\cloud_example\checkpoints\final.pt `
-    --model-device cuda
+    --model-device cuda `
+    --pair-risk-device cpu
 
 conda run -n python-torch python tools/open_project_portal.py
 ```
+
+风险checkpoint默认从`runs/pair_risk/**/best.pt`或`runs/pair-risk/**/best.pt`中按修改时间
+自动发现；也可用`--pair-risk-checkpoint <path>`显式指定。没有找到权重时场景实验室仍可
+正常启动，健康接口会报告风险模型不可用，显示设置则保留开关并给出未加载提示。
 
 ## 双环境物理对照
 

@@ -20,6 +20,7 @@ class ScenarioLabServer:
             evaluator,
             *,
             model_evaluator=None,
+            pair_risk_evaluator=None,
             model_controller=None,
             comparison_model_controller=None,
             voronoi_evaluator=None,
@@ -30,6 +31,7 @@ class ScenarioLabServer:
             title='合成大西瓜 · Reward V2.1场景实验室'):
         self.evaluator = evaluator
         self.model_evaluator = model_evaluator
+        self.pair_risk_evaluator = pair_risk_evaluator
         self.model_controller = model_controller
         self.comparison_model_controller = comparison_model_controller
         self.live_session = live_session or ScenarioLabLiveSession(
@@ -143,6 +145,13 @@ class ScenarioLabServer:
                         ),
                         'model_available': model_identity is not None,
                         'model': model_identity,
+                        'pair_risk_available': (
+                            owner.pair_risk_evaluator is not None
+                        ),
+                        'pair_risk': (
+                            owner.pair_risk_evaluator.identity
+                            if owner.pair_risk_evaluator is not None else None
+                        ),
                         'model_continuous_available': (
                             owner.model_controller is not None
                         ),
@@ -249,6 +258,7 @@ class ScenarioLabServer:
                         '/api/evaluate',
                         '/api/voronoi/evaluate',
                         '/api/model/evaluate',
+                        '/api/pair-risk/evaluate',
                         '/api/model/control',
                         '/api/comparison/model/control',
                         '/api/live/command',
@@ -330,6 +340,12 @@ class ScenarioLabServer:
                         if owner.model_evaluator is None:
                             raise RuntimeError('模型 checkpoint 尚未加载')
                         payload = owner.model_evaluator.evaluate(
+                            request.get('scene')
+                        )
+                    elif self.path == '/api/pair-risk/evaluate':
+                        if owner.pair_risk_evaluator is None:
+                            raise RuntimeError('堵塞风险 checkpoint 尚未加载')
+                        payload = owner.pair_risk_evaluator.evaluate(
                             request.get('scene')
                         )
                     elif self.path == '/api/voronoi/evaluate':

@@ -120,6 +120,8 @@ type Health = {
   comparison_available?: boolean;
   voronoi_available?: boolean;
   voronoi_device?: string;
+  pair_risk_available?: boolean;
+  pair_risk?: Record<string, unknown> | null;
 };
 
 type ComparisonProfile = {
@@ -244,6 +246,24 @@ type VoronoiEvaluation = {
   };
 };
 
+type PairRiskPair = {
+  fruit_id_i: number;
+  fruit_id_j: number;
+  level: number;
+  probability: number;
+};
+
+type PairRiskEvaluation = {
+  format_version: number;
+  semantics: "onset_within_forecast_horizon";
+  forecast_horizon: number;
+  inference_ms: number;
+  eligible_levels: number[];
+  pair_count: number;
+  pairs: PairRiskPair[];
+  model: Record<string, unknown>;
+};
+
 type ViewSettings = {
   showGrid: boolean;
   showDanger: boolean;
@@ -255,10 +275,11 @@ type ViewSettings = {
   realtimePrediction: boolean;
   showVoronoi: boolean;
   showVoronoiVertices: boolean;
+  showPairRisk: boolean;
 };
 
 const DEFAULT_GEOMETRY: Geometry = { board_width: 560, board_height: 1120, wall_width: 8, spawn_y: 156, action_count: 21, queue_length: 4, max_fruits: 64 };
-const DEFAULT_SETTINGS: ViewSettings = { showGrid: true, showDanger: true, showAnchors: true, showVelocity: false, showPrediction: true, showActual: true, showNormal: true, realtimePrediction: true, showVoronoi: false, showVoronoiVertices: true };
+const DEFAULT_SETTINGS: ViewSettings = { showGrid: true, showDanger: true, showAnchors: true, showVelocity: false, showPrediction: true, showActual: true, showNormal: true, realtimePrediction: true, showVoronoi: false, showVoronoiVertices: true, showPairRisk: false };
 const CONTACT_LABELS: Record<string, string> = { none: "未接触", floor: "地面", left_wall: "左墙", right_wall: "右墙", fruit: "水果", dynamic_fruit: "水果" };
 
 function number(value: unknown, digits = 1) {
@@ -274,6 +295,29 @@ function percentage(value: unknown) {
 function voronoiColor(clearance: number) {
   const scale = Math.max(0, Math.min(1, clearance / 120));
   return `hsl(${12 + scale * 178} 72% ${49 - scale * 8}%)`;
+}
+
+function pairRiskColor(probability: number) {
+  const risk = Math.max(0, Math.min(1, probability));
+  return `hsl(${132 - risk * 127} 72% ${44 + risk * 5}%)`;
+}
+
+function pairRiskSceneKey(state: LiveState) {
+  const ageQuantum = Math.max(1, Math.round(state.physics_fps * .5));
+  return JSON.stringify({
+    queue: state.queue,
+    danger: Math.round(state.danger_progress * 50),
+    over: state.over_danger_line,
+    step: state.step_count,
+    fruits: state.fruits.map((fruit) => [
+      fruit.id,
+      fruit.level,
+      Math.round(fruit.x * 2),
+      Math.round(fruit.y * 2),
+      Math.round(fruit.physics_radius * 10),
+      Math.floor(fruit.age_frames / ageQuantum),
+    ]),
+  });
 }
 
 function sceneKey(state: LiveState) {
@@ -304,6 +348,8 @@ function buildScene(state: LiveState, action: number, fruits = state.fruits, que
     probe_action: action,
     score: state.score,
     step_count: state.step_count,
+    danger_progress: state.danger_progress,
+    over_danger_line: state.over_danger_line,
     fruits: fruits.map((fruit) => ({ ...fruit })),
   };
 }
@@ -371,6 +417,10 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const [voronoiSourceKey, setVoronoiSourceKey] = useState("");
   const [voronoiBusy, setVoronoiBusy] = useState(false);
   const [voronoiError, setVoronoiError] = useState<string | null>(null);
+  const [pairRisk, setPairRisk] = useState<PairRiskEvaluation | null>(null);
+  const [pairRiskSourceStep, setPairRiskSourceStep] = useState(-1);
+  const [pairRiskBusy, setPairRiskBusy] = useState(false);
+  const [pairRiskError, setPairRiskError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [canvasMode, setCanvasMode] = useState<"live" | "after">("live");
@@ -380,6 +430,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   });
   const predictionKey = useRef("");
   const voronoiKey = useRef("");
+  const pairRiskKey = useRef("");
   const boardRef = useRef<SVGSVGElement>(null);
   const liveRef = useRef<LiveState | null>(null);
   const actionRef = useRef(selectedAction);
@@ -397,6 +448,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const textures = config?.textures ?? [];
   const voronoiSpacing = config?.voronoi?.sample_spacing ?? 4;
   const liveVoronoiKey = live ? voronoiSceneKey(live, voronoiSpacing) : "";
+  const livePairRiskKey = live?.stable ? pairRiskSceneKey(live) : "";
   const voronoiSettleDelay = live?.paused ? 0 : 120;
 
   useEffect(() => { liveRef.current = live; }, [live]);
@@ -523,6 +575,33 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
     const timer = window.setTimeout(() => void evaluateVoronoi(), voronoiSettleDelay);
     return () => window.clearTimeout(timer);
   }, [evaluateVoronoi, health?.voronoi_available, liveVoronoiKey, settings.showVoronoi, voronoiBusy, voronoiSettleDelay]);
+
+  const evaluatePairRisk = useCallback(async () => {
+    const state = liveRef.current;
+    if (!state?.stable || !health?.pair_risk_available || pairRiskBusy) return;
+    const key = pairRiskSceneKey(state);
+    setPairRiskBusy(true);
+    try {
+      const result = await api<PairRiskEvaluation>("/api/pair-risk/evaluate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scene: buildScene(state, selectedAction) }) });
+      const current = liveRef.current;
+      if (!current?.stable || pairRiskSceneKey(current) !== key) return;
+      pairRiskKey.current = key;
+      setPairRisk(result);
+      setPairRiskSourceStep(state.step_count);
+      setPairRiskError(null);
+    } catch (reason) {
+      setPairRiskError(String(reason));
+    } finally {
+      setPairRiskBusy(false);
+    }
+  }, [api, health?.pair_risk_available, pairRiskBusy, selectedAction]);
+
+  useEffect(() => {
+    if (!settings.showPairRisk || !livePairRiskKey || !health?.pair_risk_available || pairRiskBusy) return;
+    if (livePairRiskKey === pairRiskKey.current) return;
+    const timer = window.setTimeout(() => void evaluatePairRisk(), 260);
+    return () => window.clearTimeout(timer);
+  }, [evaluatePairRisk, health?.pair_risk_available, livePairRiskKey, pairRiskBusy, settings.showPairRisk]);
 
   const evaluatePhysics = async () => {
     if (!live) return;
@@ -975,6 +1054,12 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
   const afterFruits = selectedEvaluation?.result_fruits;
   const displayFruits = canvasMode === "after" && afterFruits?.length ? afterFruits : live?.fruits ?? [];
   const displayedVoronoi = settings.showVoronoi && canvasMode === "live" && voronoiSourceKey === liveVoronoiKey ? voronoi : null;
+  const displayedPairRisk = settings.showPairRisk && canvasMode === "live" && live?.stable && pairRiskSourceStep === live.step_count ? pairRisk : null;
+  const pairRiskByFruit = new Map<number, PairRiskPair[]>();
+  for (const pair of displayedPairRisk?.pairs ?? []) {
+    pairRiskByFruit.set(pair.fruit_id_i, [...(pairRiskByFruit.get(pair.fruit_id_i) ?? []), pair]);
+    pairRiskByFruit.set(pair.fruit_id_j, [...(pairRiskByFruit.get(pair.fruit_id_j) ?? []), pair]);
+  }
   const qChart = useMemo(() => modelChart(model, selectedAction), [model, selectedAction]);
   const selectedSpec = specs.find((item) => item.level === selectedLevel);
   const left = geometry.wall_width + (selectedSpec?.radius ?? 20) + 2;
@@ -1046,7 +1131,10 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
               </g>}
               {settings.showAnchors && Array.from({ length: geometry.action_count }, (_, index) => { const x = left + (right - left) * index / Math.max(1, geometry.action_count - 1); return <g key={index} className={index === selectedAction ? "lab-anchor is-selected" : "lab-anchor"}><line x1={x} x2={x} y1={geometry.spawn_y - 28} y2={geometry.spawn_y + 28} /><text x={x} y={geometry.spawn_y - 38}>A{index}</text></g>; })}
               <line x1={actionX} x2={actionX} y1="0" y2={geometry.spawn_y} className="lab-probe-line" />
-              {displayFruits.map((fruit) => { const draft = gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? gesture : fruit; const radius = specs.find((item) => item.level === fruit.level)?.radius ?? fruit.physics_radius; return <g key={fruit.id} data-fruit-id={fruit.id} transform={`translate(${draft.x} ${draft.y}) rotate(${fruit.angle * 180 / Math.PI})`} className={`${selectedFruit === fruit.id ? "lab-fruit is-selected" : "lab-fruit"}${gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? " is-dragging" : ""}`} onPointerDown={(event) => onFruitPointerDown(event, fruit)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><circle r={radius + 4} /><image href={textures[fruit.level]} x={-radius} y={-radius} width={radius * 2} height={radius * 2} /><text y={4}>L{fruit.level}</text>{settings.showVelocity && <line x1="0" y1="0" x2={fruit.vx * .05} y2={fruit.vy * .05} className="lab-velocity" />}</g>; })}
+              {displayFruits.map((fruit) => { const draft = gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? gesture : fruit; const radius = specs.find((item) => item.level === fruit.level)?.radius ?? fruit.physics_radius; const risks = pairRiskByFruit.get(fruit.id) ?? []; const riskTitle = risks.length ? risks.map((pair) => { const otherId = pair.fruit_id_i === fruit.id ? pair.fruit_id_j : pair.fruit_id_i; return `与 #${otherId}：未来${displayedPairRisk?.forecast_horizon ?? 24}次投放内堵塞起始风险 ${(pair.probability * 100).toFixed(1)}%`; }).join("\n") : `L${fruit.level} #${fruit.id}`; return <g key={fruit.id} data-fruit-id={fruit.id} transform={`translate(${draft.x} ${draft.y}) rotate(${fruit.angle * 180 / Math.PI})`} className={`${selectedFruit === fruit.id ? "lab-fruit is-selected" : "lab-fruit"}${gesture?.kind === "fruit" && gesture.fruitId === fruit.id ? " is-dragging" : ""}`} onPointerDown={(event) => onFruitPointerDown(event, fruit)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}><title>{riskTitle}</title><circle r={radius + 4} /><image href={textures[fruit.level]} x={-radius} y={-radius} width={radius * 2} height={radius * 2} /><text y={4}>L{fruit.level}</text>{settings.showVelocity && <line x1="0" y1="0" x2={fruit.vx * .05} y2={fruit.vy * .05} className="lab-velocity" />}</g>; })}
+              {displayedPairRisk && <g className="lab-pair-risk-layer" aria-label={`未来${displayedPairRisk.forecast_horizon}次投放内的水果对堵塞起始风险`}>
+                {[...displayedPairRisk.pairs].sort((first, second) => first.probability - second.probability).map((pair) => { const first = displayFruits.find((fruit) => fruit.id === pair.fruit_id_i); const second = displayFruits.find((fruit) => fruit.id === pair.fruit_id_j); if (!first || !second) return null; const x = (first.x + second.x) * .5; const y = (first.y + second.y) * .5; const color = pairRiskColor(pair.probability); return <g key={`${pair.fruit_id_i}-${pair.fruit_id_j}`}><line x1={first.x} y1={first.y} x2={second.x} y2={second.y} stroke={color} opacity={.35 + pair.probability * .6} /><rect x={x - 22} y={y - 10} width="44" height="20" rx="10" fill={color} /><text x={x} y={y + 3.5}>{(pair.probability * 100).toFixed(0)}%</text><title>{`L${pair.level} #${pair.fruit_id_i} ↔ #${pair.fruit_id_j} · 未来${displayedPairRisk.forecast_horizon}次投放内堵塞起始风险 ${(pair.probability * 100).toFixed(1)}%`}</title></g>; })}
+              </g>}
               {ghostPoint && dropGesture && <g transform={`translate(${ghostPoint.x} ${ghostPoint.y})`} className="lab-fruit is-ghost"><circle r={(ghostSpec?.radius ?? 20) + 4} /><image href={textures[dropGesture.level]} x={-(ghostSpec?.radius ?? 20)} y={-(ghostSpec?.radius ?? 20)} width={(ghostSpec?.radius ?? 20) * 2} height={(ghostSpec?.radius ?? 20) * 2} /><text y={4}>L{dropGesture.level}</text></g>}
               {settings.showPrediction && prediction?.first_contact?.position && <g className="lab-overlay prediction"><circle cx={prediction.first_contact.position.x} cy={prediction.first_contact.position.y} r="14" /><text x={prediction.first_contact.position.x + 18} y={prediction.first_contact.position.y - 12}>预测接触</text>{settings.showNormal && prediction.first_contact.normal && <line x1={prediction.first_contact.position.x} y1={prediction.first_contact.position.y} x2={prediction.first_contact.position.x + prediction.first_contact.normal.x * 54} y2={prediction.first_contact.position.y + prediction.first_contact.normal.y * 54} />}</g>}
               {settings.showActual && actual?.first_contact?.position && <g className="lab-overlay actual"><circle cx={actual.first_contact.position.x} cy={actual.first_contact.position.y} r="11" /><text x={actual.first_contact.position.x + 16} y={actual.first_contact.position.y + 24}>真实接触</text>{settings.showNormal && actual.first_contact.normal && <line x1={actual.first_contact.position.x} y1={actual.first_contact.position.y} x2={actual.first_contact.position.x + actual.first_contact.normal.x * 54} y2={actual.first_contact.position.y + actual.first_contact.normal.y * 54} />}</g>}
@@ -1071,6 +1159,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
             <div><span>得分增量</span><b>{number(prediction?.outcome?.score_delta)} / {actual?.outcome?.score_delta ?? "—"}</b></div>
           </div>
           <details className="lab-collapsible" open={settings.showVoronoi}><summary><ChevronDown size={14} /> Voronoi / Free-Space Graph</summary>{displayedVoronoi ? <><div className="lab-voronoi-summary"><span>构建设备<b>{displayedVoronoi.device}</b></span><span>完整站点<b>{displayedVoronoi.stats.fruit_site_count} 水果 + 3 边界</b></span><span>可见水果站点<b>{displayedVoronoi.stats.visible_fruit_site_count} / {displayedVoronoi.stats.fruit_site_count}</b></span><span>图规模<b>{displayedVoronoi.stats.edge_count} 边 · {displayedVoronoi.stats.vertex_count} 交汇点</b></span><span>采样间距<b>{number(displayedVoronoi.sample_spacing)} px</b></span><span>构建耗时<b>{number(displayedVoronoi.compute_ms, 2)} ms{displayedVoronoi.cache_hit ? " · cache" : ""}</b></span></div><div className="lab-voronoi-legend"><i className="is-narrow" />窄 clearance <i className="is-wide" />宽 clearance</div><p className="lab-muted">圆面加权距离；左右壁与桶底参与，顶部开放。规则栅格只用于 GPU 数值构图，画布节点是恢复出的空间交汇点。</p></> : <p className="lab-muted">{voronoiError ?? (voronoiBusy ? "正在构建当前场景的完整图……" : settings.showVoronoi ? "等待场景几何停止明显变化后构图。" : "在显示设置中开启该图层。")}</p>}</details>
+          <details className="lab-collapsible" open={settings.showPairRisk}><summary><ChevronDown size={14} /> 水果对未来堵塞风险</summary>{displayedPairRisk ? <><div className="lab-pair-risk-summary"><span>预测范围<b>未来 {displayedPairRisk.forecast_horizon} 次投放</b></span><span>同级高等级对<b>{displayedPairRisk.pair_count} 对</b></span><span>最高风险<b>{displayedPairRisk.pairs.length ? percentage(displayedPairRisk.pairs[0].probability) : "无候选对"}</b></span><span>CPU推理耗时<b>{number(displayedPairRisk.inference_ms, 2)} ms</b></span></div>{displayedPairRisk.pairs.length > 0 && <div className="lab-pair-risk-list">{displayedPairRisk.pairs.slice(0, 6).map((pair) => <div key={`${pair.fruit_id_i}-${pair.fruit_id_j}`}><i style={{ background: pairRiskColor(pair.probability) }} /><span>L{pair.level} · #{pair.fruit_id_i} ↔ #{pair.fruit_id_j}</span><b>{percentage(pair.probability)}</b></div>)}</div>}<p className="lab-muted">这是未来窗口内“堵塞起始”的连续风险，不表示当前已经堵塞，也不作为最终因果判断。</p></> : <p className="lab-muted">{pairRiskError ?? (pairRiskBusy ? "正在批量预测当前水果对……" : !health?.pair_risk_available ? "本次场景服务未找到堵塞风险 checkpoint。" : settings.showPairRisk ? live?.stable ? "当前没有可显示结果。" : "等待场景稳定后预测。" : "在显示设置中开启该图层。")}</p>}</details>
           <details className="lab-collapsible" open><summary><ChevronDown size={14} /> 模型动作偏好</summary>{model ? <><div className="lab-model-head"><span>推荐 A{model.action}</span><b>Q {number(model.selected_q, 5)}</b><small>{number(model.inference_ms, 2)} ms</small></div><EChart option={qChart} className="lab-q-chart" /></> : <p className="lab-muted">加载带模型的服务后，稳定场景会自动预测全部21个动作。</p>}</details>
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景与模型身份</summary><div className="lab-identity"><span>实时物理<b>{live?.physics_backend === "tensor_cuda" ? "Tensor / CUDA" : live?.physics_backend === "tensor_cpu" ? "Tensor / CPU" : "—"}</b></span><span>物理帧率<b>{live?.physics_fps ?? "—"} FPS</b></span><span>训练物理同源<b>{live?.training_physics_equivalent ? "是" : "—"}</b></span><span>场上水果<b>{live?.fruits.length ?? 0} / {geometry.max_fruits}</b></span><span>模型checkpoint<b>{String(health?.model?.checkpoint ?? "未加载")}</b></span><span>模型训练量<b>{number(health?.model?.training_transitions, 0)}</b></span></div></details>
           <details className="lab-collapsible"><summary><ChevronDown size={14} /> 场景文件与编辑</summary><div className="lab-file-actions"><button onClick={exportScene}><Download size={14} />导出JSON</button><label><Import size={14} />导入JSON<input type="file" accept="application/json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void importScene(file); }} /></label><button disabled={selectedFruit === null} onClick={() => void removeSelected()}><Trash2 size={14} />删除选中水果</button></div><p className="lab-muted">从水果栏拖到画布，松开即放置；场上水果可拖动，右键删除，滚轮切级。暂停后支持擦除、撤销与重做；触摸端可拖动或长按删除。</p></details>
@@ -1078,7 +1167,7 @@ export function ScenarioWorkspace({ tool, onConfigure }: Props) {
       </div>}
 
       <AnimatePresence>
-        {settingsOpen && <motion.div className="lab-settings-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><motion.aside className="lab-settings-drawer" initial={{ x: 36, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 36, opacity: 0 }}><div className="lab-settings-head"><div><span>VISUAL LAYERS</span><h2>场景显示设置</h2><p>只勾选当前诊断需要的图层，避免预测、真实效果和几何辅助相互遮挡。</p></div><button onClick={() => setSettingsOpen(false)}><X size={17} /></button></div><div className="lab-settings-groups"><section><h3>基础画布</h3>{settingLabel("空间网格", settings.showGrid, (value) => setSettings((current) => ({ ...current, showGrid: value })))}{settingLabel("危险线", settings.showDanger, (value) => setSettings((current) => ({ ...current, showDanger: value })))}{settingLabel("21个动作锚点", settings.showAnchors, (value) => setSettings((current) => ({ ...current, showAnchors: value })))}{settingLabel("水果速度向量", settings.showVelocity, (value) => setSettings((current) => ({ ...current, showVelocity: value })))}</section><section><h3>自由空间几何</h3>{settingLabel("完整加权 Voronoi 图", settings.showVoronoi, (value) => setSettings((current) => ({ ...current, showVoronoi: value })))}{settingLabel("显示空间交汇节点", settings.showVoronoiVertices, (value) => setSettings((current) => ({ ...current, showVoronoiVertices: value })))}</section><section><h3>辅助动作预测</h3>{settingLabel("稳定场景实时预测", settings.realtimePrediction, (value) => setSettings((current) => ({ ...current, realtimePrediction: value })))}{settingLabel("预测接触与生成位置", settings.showPrediction, (value) => setSettings((current) => ({ ...current, showPrediction: value })))}{settingLabel("真实动作效果", settings.showActual, (value) => setSettings((current) => ({ ...current, showActual: value })))}{settingLabel("接触法向量", settings.showNormal, (value) => setSettings((current) => ({ ...current, showNormal: value })))}</section></div><button className="ghost-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RefreshCw size={14} />恢复默认图层</button></motion.aside></motion.div>}
+        {settingsOpen && <motion.div className="lab-settings-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSettingsOpen(false); }}><motion.aside className="lab-settings-drawer" initial={{ x: 36, opacity: 0 }} animate={{ x: 0, opacity: 1 }} exit={{ x: 36, opacity: 0 }}><div className="lab-settings-head"><div><span>VISUAL LAYERS</span><h2>场景显示设置</h2><p>只勾选当前诊断需要的图层，避免预测、真实效果和几何辅助相互遮挡。</p></div><button onClick={() => setSettingsOpen(false)}><X size={17} /></button></div><div className="lab-settings-groups"><section><h3>基础画布</h3>{settingLabel("空间网格", settings.showGrid, (value) => setSettings((current) => ({ ...current, showGrid: value })))}{settingLabel("危险线", settings.showDanger, (value) => setSettings((current) => ({ ...current, showDanger: value })))}{settingLabel("21个动作锚点", settings.showAnchors, (value) => setSettings((current) => ({ ...current, showAnchors: value })))}{settingLabel("水果速度向量", settings.showVelocity, (value) => setSettings((current) => ({ ...current, showVelocity: value })))}</section><section><h3>自由空间几何</h3>{settingLabel("完整加权 Voronoi 图", settings.showVoronoi, (value) => setSettings((current) => ({ ...current, showVoronoi: value })))}{settingLabel("显示空间交汇节点", settings.showVoronoiVertices, (value) => setSettings((current) => ({ ...current, showVoronoiVertices: value })))}</section><section><h3>长期风险预测</h3>{settingLabel("L7～L11 同级水果对堵塞风险", settings.showPairRisk, (value) => setSettings((current) => ({ ...current, showPairRisk: value })))}<p className="lab-settings-note">稳定场景下每约 0.5 秒刷新；默认使用 CPU，不参与 Policy。</p></section><section><h3>辅助动作预测</h3>{settingLabel("稳定场景实时预测", settings.realtimePrediction, (value) => setSettings((current) => ({ ...current, realtimePrediction: value })))}{settingLabel("预测接触与生成位置", settings.showPrediction, (value) => setSettings((current) => ({ ...current, showPrediction: value })))}{settingLabel("真实动作效果", settings.showActual, (value) => setSettings((current) => ({ ...current, showActual: value })))}{settingLabel("接触法向量", settings.showNormal, (value) => setSettings((current) => ({ ...current, showNormal: value })))}</section></div><button className="ghost-button" onClick={() => setSettings(DEFAULT_SETTINGS)}><RefreshCw size={14} />恢复默认图层</button></motion.aside></motion.div>}
       </AnimatePresence>
     </section>
   );

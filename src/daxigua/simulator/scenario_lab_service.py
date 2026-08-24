@@ -114,6 +114,14 @@ def validate_scenario(scene):
                 minimum=0,
             ),
         })
+    danger_progress = _finite_number(
+        'danger_progress', scene.get('danger_progress', 0.0)
+    )
+    if not 0.0 <= danger_progress <= 1.0:
+        raise ValueError('danger_progress must be between 0 and 1')
+    over_danger_line = scene.get('over_danger_line', False)
+    if not isinstance(over_danger_line, bool):
+        raise TypeError('over_danger_line must be a boolean')
     return {
         'name': str(scene.get('name', '未命名场景'))[:80],
         'fps': fps,
@@ -126,6 +134,8 @@ def validate_scenario(scene):
         'step_count': _integer(
             'step_count', scene.get('step_count', 0), minimum=0
         ),
+        'danger_progress': danger_progress,
+        'over_danger_line': over_danger_line,
     }
 
 
