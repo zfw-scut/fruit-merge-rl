@@ -62,6 +62,7 @@ def parse_args(argv=None):
     parser.add_argument('--per-bucket', type=int, default=3)
     parser.add_argument('--batch-size', type=int, default=32768)
     parser.add_argument('--pool-multiplier', type=int, default=64)
+    parser.add_argument('--transition-reserve-multiplier', type=int, default=16)
     parser.add_argument(
         '--autocast-bfloat16',
         action=argparse.BooleanOptionalAction,
@@ -135,6 +136,7 @@ def _autocast_context(device, enabled):
 
 def _scene_frame(columns, index):
     return {
+        'pair_present': True,
         'label': bool(columns['label'][index].item()),
         'episode_id': int(columns['episode_id'][index].item()),
         'step': int(columns['step'][index].item()),
@@ -277,10 +279,12 @@ def collect_candidates(args):
                         _append_pool(
                             pools[(level, kind)], candidates, pool_limit
                         )
-    selected = {
-        key: select_distinct_candidates(value, args.per_bucket)
-        for key, value in pools.items()
-    }
+    selected = {}
+    for (level, kind), values in pools.items():
+        count = int(args.per_bucket)
+        if kind in BLOCKED_KINDS:
+            count *= int(args.transition_reserve_multiplier)
+        selected[(level, kind)] = select_distinct_candidates(values, count)
     return model, selected, counts, device
 
 
@@ -291,22 +295,63 @@ def _pair_key(frame):
     return int(frame['episode_id']), first, second
 
 
+def _raw_pre_event_frame(columns, index, candidate):
+    fruit_ids = columns['fruit_ids'][index]
+    matches_i = torch.nonzero(
+        fruit_ids.eq(int(candidate['fruit_id_i'])), as_tuple=False
+    ).flatten()
+    matches_j = torch.nonzero(
+        fruit_ids.eq(int(candidate['fruit_id_j'])), as_tuple=False
+    ).flatten()
+    slot_i = int(matches_i[0].item()) if matches_i.numel() else -1
+    slot_j = int(matches_j[0].item()) if matches_j.numel() else -1
+    return {
+        'pair_present': slot_i >= 0 and slot_j >= 0,
+        'probability': None,
+        'kind': None,
+        'label': False,
+        'episode_id': int(columns['episode_id'][index].item()),
+        'step': int(columns['step'][index].item()),
+        'pair_slot_i': slot_i,
+        'pair_slot_j': slot_j,
+        'fruit_id_i': int(candidate['fruit_id_i']),
+        'fruit_id_j': int(candidate['fruit_id_j']),
+        'level': int(candidate['level']),
+        'positions': columns['positions'][index].clone(),
+        'levels': columns['levels'][index].clone(),
+        'physics_radii': columns['physics_radii'][index].clone(),
+        'active': columns['active'][index].clone(),
+        'event_id': -1,
+        'offset_from_onset': 0,
+        'offset_to_end': 0,
+    }
+
+
 def _predict_frames(
         model, frames, device, *, threshold, autocast_bfloat16):
-    if not frames:
+    for frame in frames:
+        if not frame.get('pair_present', True):
+            frame['probability'] = None
+            frame['kind'] = None
+    predictable = [
+        frame for frame in frames if frame.get('pair_present', True)
+    ]
+    if not predictable:
         return
     columns = {
-        'positions': torch.stack([frame['positions'] for frame in frames]),
-        'levels': torch.stack([frame['levels'] for frame in frames]),
-        'physics_radii': torch.stack([
-            frame['physics_radii'] for frame in frames
+        'positions': torch.stack([
+            frame['positions'] for frame in predictable
         ]),
-        'active': torch.stack([frame['active'] for frame in frames]),
+        'levels': torch.stack([frame['levels'] for frame in predictable]),
+        'physics_radii': torch.stack([
+            frame['physics_radii'] for frame in predictable
+        ]),
+        'active': torch.stack([frame['active'] for frame in predictable]),
         'pair_slot_i': torch.tensor([
-            frame['pair_slot_i'] for frame in frames
+            frame['pair_slot_i'] for frame in predictable
         ], dtype=torch.int64),
         'pair_slot_j': torch.tensor([
-            frame['pair_slot_j'] for frame in frames
+            frame['pair_slot_j'] for frame in predictable
         ], dtype=torch.int64),
     }
     model_columns = {
@@ -316,7 +361,7 @@ def _predict_frames(
     with torch.inference_mode(), _autocast_context(
             device, autocast_bfloat16):
         probabilities = torch.sigmoid(model(model_columns)).float().cpu()
-    for frame, probability in zip(frames, probabilities.tolist()):
+    for frame, probability in zip(predictable, probabilities.tolist()):
         frame['probability'] = float(probability)
         frame['kind'] = confusion_kind(
             probability >= float(threshold), frame['label']
@@ -394,12 +439,47 @@ def attach_positive_transitions(
                             columns, index
                         )
 
+    missing_by_episode = {}
+    for candidate in candidates:
+        if candidate['before_onset_frame'] is None:
+            missing_by_episode.setdefault(
+                int(candidate['episode_id']), []
+            ).append(candidate)
+    if missing_by_episode:
+        missing_episodes = torch.tensor(
+            sorted(missing_by_episode), dtype=torch.int64
+        )
+        for path in table_shards(
+                Path(dataset_dir).resolve(), 'pair_risk_exposures',
+                area='raw'):
+            payload = torch.load(
+                path, map_location='cpu', weights_only=False
+            )
+            columns = payload['columns']
+            relevant = torch.nonzero(
+                torch.isin(columns['episode_id'], missing_episodes),
+                as_tuple=False,
+            ).flatten()
+            for index in relevant.tolist():
+                episode = int(columns['episode_id'][index].item())
+                step = int(columns['step'][index].item())
+                for candidate in missing_by_episode.get(episode, ()):
+                    if step >= int(candidate['onset_step']):
+                        continue
+                    current = candidate['before_onset_frame']
+                    if current is None or step > int(current['step']):
+                        candidate['before_onset_frame'] = (
+                            _raw_pre_event_frame(
+                                columns, index, candidate
+                            )
+                        )
+
     inference_frames = []
     seen = set()
     for candidate in candidates:
         for name in ('before_onset_frame', 'onset_frame'):
             frame = candidate[name]
-            if frame is None:
+            if frame is None or not frame.get('pair_present', True):
                 continue
             identity = (
                 *_pair_key(frame), int(frame['step'])
@@ -425,11 +505,12 @@ def attach_positive_transitions(
             frame = candidate[name]
             if frame is None:
                 continue
-            probability, kind = probability_by_identity[
-                (*_pair_key(frame), int(frame['step']))
-            ]
-            frame['probability'] = probability
-            frame['kind'] = kind
+            if frame.get('pair_present', True):
+                probability, kind = probability_by_identity[
+                    (*_pair_key(frame), int(frame['step']))
+                ]
+                frame['probability'] = probability
+                frame['kind'] = kind
         candidate['transition'] = (
             {'role': 'before_onset',
              'frame': candidate['before_onset_frame']},
@@ -444,6 +525,29 @@ def attach_positive_transitions(
         'positive_cases': len(candidates),
         'complete_cases': complete,
     }
+
+
+def trim_gallery_selection(selected, count):
+    """正例优先选择具有完整起点前后对照的高置信事件。"""
+
+    result = {}
+    for key, candidates in selected.items():
+        kind = key[1]
+        if kind in BLOCKED_KINDS:
+            candidates = sorted(
+                candidates,
+                key=lambda item: (
+                    item.get('before_onset_frame') is not None,
+                    item.get('onset_frame') is not None,
+                    int(item['step']) != int(item.get(
+                        'onset_step', item['step']
+                    )),
+                    item['priority'],
+                ),
+                reverse=True,
+            )
+        result[key] = candidates[:int(count)]
+    return result
 
 
 def _board_config(dataset_dir, model_config):
@@ -581,7 +685,15 @@ def _transition_title(role, frame, candidate):
     }
     if frame is None:
         return f'{role_titles[role]}\nscene unavailable'
-    label = 'BLOCKED' if frame['label'] else 'SAFE'
+    if not frame.get('pair_present', True):
+        label = 'TARGET PAIR NOT YET COMPLETE'
+    else:
+        label = 'BLOCKED' if frame['label'] else 'SAFE'
+    probability = frame.get('probability')
+    probability_text = (
+        f'{float(probability):.3f}'
+        if probability is not None else 'n/a'
+    )
     same = (
         role == 'classified'
         and int(frame['step']) == int(candidate['onset_step'])
@@ -590,7 +702,7 @@ def _transition_title(role, frame, candidate):
     return (
         f'{role_titles[role]}{same_text}\n'
         f'drop={int(frame["step"])} · '
-        f'score={float(frame["probability"]):.3f} · {label}'
+        f'score={probability_text} · {label}'
     )
 
 
@@ -757,7 +869,10 @@ def _report_candidate(candidate, filename):
                 'label': bool(frame['label']) if frame is not None else None,
                 'probability': (
                     float(frame['probability'])
-                    if frame is not None else None
+                    if (
+                        frame is not None
+                        and frame.get('probability') is not None
+                    ) else None
                 ),
                 'kind': frame['kind'] if frame is not None else None,
             })
@@ -770,11 +885,27 @@ def run(args):
         raise FileExistsError(f'gallery output is not empty: {output_dir}')
     output_dir.mkdir(parents=True, exist_ok=True)
     model, selected, counts, device = collect_candidates(args)
-    transition_summary = attach_positive_transitions(
+    transition_scan = attach_positive_transitions(
         args.dataset_dir, selected, model, device,
         threshold=args.threshold,
         autocast_bfloat16=args.autocast_bfloat16,
     )
+    selected = trim_gallery_selection(selected, args.per_bucket)
+    rendered_positive = [
+        candidate
+        for values in selected.values()
+        for candidate in values
+        if candidate['label']
+    ]
+    transition_summary = {
+        **transition_scan,
+        'rendered_positive_cases': len(rendered_positive),
+        'rendered_complete_cases': sum(
+            candidate.get('before_onset_frame') is not None
+            and candidate.get('onset_frame') is not None
+            for candidate in rendered_positive
+        ),
+    }
     board = _board_config(args.dataset_dir, model.config)
     report_rows = []
     for level in range(7, 12):
