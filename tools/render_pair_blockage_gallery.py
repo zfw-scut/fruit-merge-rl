@@ -534,16 +534,27 @@ def trim_gallery_selection(selected, count):
     for key, candidates in selected.items():
         kind = key[1]
         if kind in BLOCKED_KINDS:
-            candidates = sorted(
-                candidates,
-                key=lambda item: (
-                    item.get('before_onset_frame') is not None,
-                    item.get('onset_frame') is not None,
+            def transition_quality(item):
+                before = item.get('before_onset_frame')
+                onset = item.get('onset_frame')
+                gap = (
+                    int(item['onset_step']) - int(before['step'])
+                    if before is not None else 1_000_000
+                )
+                return (
+                    before is not None,
+                    before is not None
+                    and before.get('pair_present', True),
+                    onset is not None,
+                    -gap,
                     int(item['step']) != int(item.get(
                         'onset_step', item['step']
                     )),
                     item['priority'],
-                ),
+                )
+            candidates = sorted(
+                candidates,
+                key=transition_quality,
                 reverse=True,
             )
         result[key] = candidates[:int(count)]
@@ -679,14 +690,14 @@ def _semantic_lines(candidate, threshold):
 
 def _transition_title(role, frame, candidate):
     role_titles = {
-        'before_onset': 'Before onset',
-        'onset': 'Detected onset',
+        'before_onset': 'Pre-onset record',
+        'onset': 'Confirmed onset',
         'classified': 'Classified frame',
     }
     if frame is None:
         return f'{role_titles[role]}\nscene unavailable'
     if not frame.get('pair_present', True):
-        label = 'TARGET PAIR NOT YET COMPLETE'
+        label = 'PAIR INCOMPLETE'
     else:
         label = 'BLOCKED' if frame['label'] else 'SAFE'
     probability = frame.get('probability')
