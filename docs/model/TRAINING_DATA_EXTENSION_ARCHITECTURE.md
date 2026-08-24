@@ -4,6 +4,11 @@
 - 更新日期：2026-08-10
 - 实现基础：5 层、`score_v1`、1-step Dueling Double DQN；最新训练谱系见模型评估比较矩阵
 
+> 2026-08-25补充：后来实现的水果对未来风险代理和当前堵塞代理已停止作为行为段主边界。
+> 原因不是单纯分类精度不足，而是堵塞显现点与真正可干预的历史投放经常错位。检测器仍可
+> 作为离线失败事实和分支结果验证；演化记录见
+> [`development_tracks/01_pair_risk_to_blockage`](../development_tracks/01_pair_risk_to_blockage/README.md)。
+
 ## 1. 目标与边界
 
 本架构让现有 GNN-DQN 训练以后能够接入辅助动作效果学习、反事实行为段归因、最优性能

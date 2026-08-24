@@ -309,6 +309,11 @@ bootstrap 95%区间`[+134.57,+380.87]`；新基线胜率55.35%。旧SAB-128的71
 当前只登记为离线堵塞代理基线，不进入下方真实游戏分数排序。完整证据见
 [`model-pair-blockage-geometry-50k-r1.md`](model-pair-blockage-geometry-50k-r1.md)。
 
+`【决策】` 已停止把`PB-GEO`或旧未来风险模型作为反事实行为段的主边界生成器：堵塞
+显现点与真正可干预的历史决策经常错位。模型、长期检测器和画廊继续作为诊断及分支结果
+验证资产保留；过程总结见
+[`development_tracks/01_pair_risk_to_blockage`](../development_tracks/01_pair_risk_to_blockage/README.md)。
+
 ## 2. 最终真实游戏效果
 
 | 指标 | `baseline-r1` | `reward-v2-r1` | `reward-v2.1-r1` | V2.1相对V2 | V2.1相对基线 |

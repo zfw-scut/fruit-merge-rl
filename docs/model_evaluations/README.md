@@ -34,7 +34,7 @@
 | `structured-128m-to-120fps-transfer-r1` | `score_v1`，128M结构化旁路 → 120 FPS weights-only物理域迁移 | `4dd76b4` | [`model-structured-128m-to-120fps-transfer-r1.md`](model-structured-128m-to-120fps-transfer-r1.md) | **零初速度新物理、120 FPS训练**；30/120 FPS局均分8006.41/7568.18，L11消除64.04%/59.52%，同seed显著高于来源，单独登记 |
 | `sab-full-fall-t120-16m-r1` / `sab-full-fall-t120-16m-b2m-r2` | `score_v1`，完整逐帧120 FPS迁移；8M后无旁路/2.097M旁路分叉 | `1b54284` / `106a73b` | [`model-sab-full-fall-t120-16m-b2m-r2.md`](model-sab-full-fall-t120-16m-b2m-r2.md) | **当前完整逐帧物理**；无旁路30/120 FPS为6745.23/6289.67，旁路版低131.98/100.43分，不升级旁路版 |
 | `sab-full-fall-edge18-128m-b16m-r1` | `score_v1`，当前V4完整逐帧30 FPS、18维边、从零128M和16.777216M旁路 | `41b9680` | [`model-sab-full-fall-edge18-128m-b16m-r1.md`](model-sab-full-fall-edge18-128m-b16m-r1.md) | **当前新基线**；4096局均分6688.94，同V4物理下高于SAB-128补零复评258.43分，成对95%区间`[+134.57,+380.87]` |
-| `pair-blockage-geometry-50k-r1` | 当前几何堵塞二分类；长期确认事件离线监督 | `6ae0f39` | [`model-pair-blockage-geometry-50k-r1.md`](model-pair-blockage-geometry-50k-r1.md) | **独立堵塞代理**；测试宏AP 0.7139，统一0.5阈值未校准，不进入Policy或反事实最终判断 |
+| `pair-blockage-geometry-50k-r1` | 当前几何堵塞二分类；长期确认事件离线监督 | `6ae0f39` | [`model-pair-blockage-geometry-50k-r1.md`](model-pair-blockage-geometry-50k-r1.md) | **独立堵塞代理**；测试宏AP 0.7139；已放弃作为反事实行为段主边界，保留作诊断和分支结果验证 |
 | `reward-v2-r1` | 纯可投放空间 | `model-reward-v2-r1` / `8235ef9` | [`model-reward-v2-r1.md`](model-reward-v2-r1.md) | 吞吐门禁通过，但游戏效果明显低于基线，不能直接替代 |
 | `reward-v2.1-r1` | 状态相关无合成参考空间 | `4c8ce18` | [`model-reward-v2-1-r1.md`](model-reward-v2-1-r1.md) | 奖励偏正已修复，但只小幅超过V2且仍低于基线；墙边投放增加属于常见策略，不能单独判为缺陷 |
 
