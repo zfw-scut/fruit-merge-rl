@@ -24,40 +24,99 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from daxigua.portal import PortalServer  # noqa: E402
+from daxigua.portal.telemetry_sources import write_telemetry_sources  # noqa: E402
 
 
 @dataclass(frozen=True)
 class CloudSshConfig:
+    instance_id: str
     port: int
     target: str
     password: str
+    role: str = '训练遥测'
+    telemetry_enabled: bool = True
 
 
-def _read_cloud_ssh_config(path=CLOUD_SERVER_LOCAL):
-    """只从本机忽略文件的“当前可用实例”区段读取SSH配置。"""
+def _read_cloud_ssh_configs(path=CLOUD_SERVER_LOCAL):
+    """读取当前实例表；只有明确启用的多实例才建立遥测隧道。"""
 
     text = Path(path).read_text(encoding='utf-8')
     current = text.partition('## 当前可用实例')[2].partition('\n## ')[0]
-    match = re.search(
-        r'\|[^\n|]+\|\s*`ssh\s+-p\s+(\d+)\s+([^`\s]+)`\s*'
-        r'\|\s*`([^`]+)`\s*\|',
-        current,
-    )
-    if match is None:
+    rows = [
+        [cell.strip() for cell in line.strip().strip('|').split('|')]
+        for line in current.splitlines()
+        if line.strip().startswith('|')
+    ]
+    if len(rows) < 3:
         raise ValueError('当前可用实例中没有可解析的SSH登记')
-    return CloudSshConfig(
-        port=int(match.group(1)),
-        target=match.group(2),
-        password=match.group(3),
+    headers = [re.sub(r'\s+', '', cell) for cell in rows[0]]
+    try:
+        instance_index = headers.index('实例')
+        ssh_index = next(
+            index for index, header in enumerate(headers)
+            if header in {'SSH连接', 'SSH连接指令'}
+        )
+        password_index = headers.index('密码')
+    except (ValueError, StopIteration) as error:
+        raise ValueError('当前实例表缺少实例、SSH连接或密码列') from error
+    role_index = next(
+        (index for index, header in enumerate(headers) if '用途' in header),
+        None,
     )
+    enabled_index = next(
+        (index for index, header in enumerate(headers) if header == '门户遥测'),
+        None,
+    )
+    configs = []
+    for row in rows[2:]:
+        if max(instance_index, ssh_index, password_index) >= len(row):
+            continue
+        ssh_value = row[ssh_index].strip('` ')
+        match = re.fullmatch(r'ssh\s+-p\s+(\d+)\s+([^\s]+)', ssh_value)
+        if match is None:
+            continue
+        enabled_value = (
+            row[enabled_index].strip('` ').lower()
+            if enabled_index is not None and enabled_index < len(row)
+            else ''
+        )
+        enabled = (
+            enabled_value in {'on', 'true', 'yes', '是', '启用', '开启'}
+            if enabled_index is not None else not configs
+        )
+        role = (
+            row[role_index].strip('` ')
+            if role_index is not None and role_index < len(row)
+            else '训练遥测'
+        )
+        role = re.sub(r'[*_]+', '', role).split('；', 1)[0].split(';', 1)[0]
+        configs.append(CloudSshConfig(
+            instance_id=row[instance_index].strip('` '),
+            port=int(match.group(1)),
+            target=match.group(2),
+            password=row[password_index].strip('` '),
+            role=role[:80],
+            telemetry_enabled=enabled,
+        ))
+    if not configs:
+        raise ValueError('当前可用实例中没有可解析的SSH登记')
+    return configs
 
 
-def _prepare_askpass(runtime: Path, password: str):
+def _read_cloud_ssh_config(path=CLOUD_SERVER_LOCAL):
+    """兼容旧调用：返回首个启用实例。"""
+
+    configs = _read_cloud_ssh_configs(path)
+    return next((item for item in configs if item.telemetry_enabled), configs[0])
+
+
+def _prepare_askpass(runtime: Path, password: str, source_id: str = 'cloud'):
+    safe_id = re.sub(r'[^a-zA-Z0-9_-]+', '-', source_id)
     if os.name == 'nt':
-        path = runtime / 'cloud_telemetry_askpass.cmd'
+        path = runtime / f'cloud_telemetry_askpass_{safe_id}.cmd'
         path.write_text(f'@echo off\necho {password}\n', encoding='utf-8')
     else:
-        path = runtime / 'cloud_telemetry_askpass.sh'
+        path = runtime / f'cloud_telemetry_askpass_{safe_id}.sh'
         path.write_text(f'#!/bin/sh\nprintf %s\\n {password!r}\n', encoding='utf-8')
         path.chmod(0o700)
     return path
@@ -176,7 +235,7 @@ def _write_frontend_pid(path: Path, *, pid: int, port: int):
 def _process_alive(pid: int) -> bool:
     try:
         os.kill(int(pid), 0)
-    except OSError:
+    except (OSError, SystemError):
         return False
     return True
 
@@ -184,8 +243,6 @@ def _process_alive(pid: int) -> bool:
 def _terminate_process_tree(pid: int):
     """终止启动器自己登记的前端进程树。"""
 
-    if not _process_alive(pid):
-        return
     if os.name == 'nt':
         subprocess.run(
             ['taskkill', '/PID', str(pid), '/T', '/F'],
@@ -194,6 +251,8 @@ def _terminate_process_tree(pid: int):
             stderr=subprocess.DEVNULL,
             check=False,
         )
+        return
+    if not _process_alive(pid):
         return
     os.kill(pid, 15)
 
@@ -212,6 +271,21 @@ def _remove_stale_frontend(*, state_path: Path, port: int):
     _terminate_process_tree(pid)
     _wait_port_closed(port)
     state_path.unlink(missing_ok=True)
+
+
+def _replace_registered_portal(*, state_path: Path, port: int) -> bool:
+    """Replace only a portal launcher that this workspace registered."""
+
+    if not _port_open(port):
+        state_path.unlink(missing_ok=True)
+        return False
+    pid = _read_frontend_pid(state_path)
+    if pid is None or pid == os.getpid():
+        return False
+    _terminate_process_tree(pid)
+    _wait_port_closed(port)
+    state_path.unlink(missing_ok=True)
+    return True
 
 
 def _start_frontend(
@@ -280,15 +354,20 @@ def main(argv=None):
     runtime = PROJECT_ROOT / 'runs' / 'portal_processes'
     runtime.mkdir(parents=True, exist_ok=True)
     web_url = f'http://127.0.0.1:{args.web_port}/'
+    launcher_state = runtime / 'launcher.json'
     if _port_open(args.api_port):
-        print(
-            f'项目门户已在运行（API 127.0.0.1:{args.api_port}），'
-            '不再启动重复后端。',
-            flush=True,
-        )
-        if not args.backend_only and not args.no_open:
-            webbrowser.open(web_url)
-        return
+        if _replace_registered_portal(
+                state_path=launcher_state, port=args.api_port):
+            print('已关闭本工作区登记的旧门户进程，正在载入当前代码。', flush=True)
+        else:
+            print(
+                f'项目门户已在运行（API 127.0.0.1:{args.api_port}），'
+                '但没有可安全替换的本工作区登记，未启动重复后端。',
+                flush=True,
+            )
+            if not args.backend_only and not args.no_open:
+                webbrowser.open(web_url)
+            return
 
     frontend_state = runtime / 'frontend.json'
     if not args.backend_only:
@@ -297,37 +376,70 @@ def main(argv=None):
             port=args.web_port,
         )
 
-    tunnel_config = None
-    tunnel = None
-    tunnel_log = None
-    askpass = None
-    tunnel_retry_at = 0.0
-    if args.cloud_telemetry and not _port_open(8765):
+    tunnels = []
+    telemetry_sources = []
+    if args.cloud_telemetry:
         try:
-            tunnel_config = _read_cloud_ssh_config()
-            askpass = _prepare_askpass(runtime, tunnel_config.password)
-            tunnel_log = (runtime / 'cloud_telemetry_tunnel.log').open(
-                'a', encoding='utf-8'
-            )
-            tunnel = _start_cloud_tunnel(
-                tunnel_config,
-                local_port=8765,
-                askpass=askpass,
-                log_handle=tunnel_log,
-            )
-            print(
-                f'云端训练遥测：正在连接 {tunnel_config.target} '
-                f'（本地127.0.0.1:8765）',
-                flush=True,
-            )
+            enabled_configs = [
+                config for config in _read_cloud_ssh_configs()
+                if config.telemetry_enabled
+            ]
+            for index, config in enumerate(enabled_configs):
+                local_port = 18765 + index
+                source_id = re.sub(
+                    r'[^a-zA-Z0-9_-]+', '-', config.instance_id
+                ).strip('-') or f'cloud-{index + 1}'
+                if source_id.isdigit():
+                    source_id = f'instance-{source_id}'
+                telemetry_sources.append({
+                    'id': source_id,
+                    'name': config.instance_id,
+                    'role': config.role,
+                    'url': f'http://127.0.0.1:{local_port}',
+                })
+                state = {
+                    'config': config,
+                    'local_port': local_port,
+                    'askpass': None,
+                    'log': None,
+                    'process': None,
+                    'retry_at': 0.0,
+                }
+                if _port_open(local_port):
+                    print(
+                        f'云端训练遥测：{config.instance_id} 已在本地'
+                        f'{local_port}提供数据',
+                        flush=True,
+                    )
+                else:
+                    state['askpass'] = _prepare_askpass(
+                        runtime, config.password, source_id
+                    )
+                    state['log'] = (
+                        runtime / f'cloud_telemetry_tunnel_{source_id}.log'
+                    ).open('a', encoding='utf-8')
+                    state['process'] = _start_cloud_tunnel(
+                        config,
+                        local_port=local_port,
+                        askpass=state['askpass'],
+                        log_handle=state['log'],
+                    )
+                    print(
+                        f'云端训练遥测：正在连接 {config.instance_id} '
+                        f'{config.target}（本地127.0.0.1:{local_port}）',
+                        flush=True,
+                    )
+                tunnels.append(state)
         except (OSError, ValueError, RuntimeError) as error:
             print(f'云端训练遥测未自动连接：{error}', flush=True)
-    elif args.cloud_telemetry:
-        print('云端训练遥测：本地8765端口已有数据源', flush=True)
+    write_telemetry_sources(telemetry_sources)
 
     portal = PortalServer(port=args.api_port)
     api_thread = threading.Thread(target=portal.serve_forever, daemon=True)
     api_thread.start()
+    _write_frontend_pid(
+        launcher_state, pid=os.getpid(), port=args.api_port
+    )
     print(f'门户控制API：{portal.url}', flush=True)
 
     frontend = None
@@ -425,24 +537,27 @@ def main(argv=None):
                         flush=True,
                     )
                     frontend_check_at = time.monotonic() + 5.0
-            if (
-                    tunnel_config is not None
-                    and askpass is not None
-                    and tunnel_log is not None
-                    and (tunnel is None or tunnel.poll() is not None)
-                    and time.monotonic() >= tunnel_retry_at):
-                tunnel = _start_cloud_tunnel(
-                    tunnel_config,
-                    local_port=8765,
-                    askpass=askpass,
-                    log_handle=tunnel_log,
-                )
-                tunnel_retry_at = time.monotonic() + 5.0
+            for state in tunnels:
+                process = state['process']
+                if (
+                        state['askpass'] is not None
+                        and state['log'] is not None
+                        and (process is None or process.poll() is not None)
+                        and time.monotonic() >= state['retry_at']):
+                    state['process'] = _start_cloud_tunnel(
+                        state['config'],
+                        local_port=state['local_port'],
+                        askpass=state['askpass'],
+                        log_handle=state['log'],
+                    )
+                    state['retry_at'] = time.monotonic() + 5.0
             time.sleep(0.5)
     except KeyboardInterrupt:
         print('正在关闭项目门户……', flush=True)
     finally:
         portal.shutdown()
+        if _read_frontend_pid(launcher_state) == os.getpid():
+            launcher_state.unlink(missing_ok=True)
         if frontend is not None:
             _stop_frontend(
                 frontend,
@@ -450,19 +565,21 @@ def main(argv=None):
                 port=args.web_port,
                 raise_on_timeout=False,
             )
-        if tunnel is not None and tunnel.poll() is None:
-            tunnel.terminate()
-            try:
-                tunnel.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                tunnel.kill()
-        if tunnel_log is not None:
-            tunnel_log.close()
-        if askpass is not None:
-            try:
-                askpass.unlink()
-            except OSError:
-                pass
+        for state in tunnels:
+            process = state['process']
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            if state['log'] is not None:
+                state['log'].close()
+            if state['askpass'] is not None:
+                try:
+                    state['askpass'].unlink()
+                except OSError:
+                    pass
         if frontend_log is not None:
             frontend_log.close()
 

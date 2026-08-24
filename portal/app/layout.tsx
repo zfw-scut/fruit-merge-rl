@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import "./workspace-modules.css";
 
 export const metadata: Metadata = {
   title: "Xigua Atlas · 模型知识与训练控制台",

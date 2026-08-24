@@ -14,12 +14,15 @@ import sys
 import threading
 import time
 from typing import Any
-from urllib.error import URLError
 from urllib.parse import parse_qs, unquote, urlparse
-from urllib.request import urlopen
 
 from daxigua.portal.analysis_data import scan_analysis_datasets
+from daxigua.portal.telemetry_sources import (
+    aggregate_telemetry_sources,
+    load_telemetry_sources,
+)
 from daxigua.rl.merge_potential_status import scan_merge_potential_runs
+from daxigua.rl.task_telemetry import scan_task_telemetry
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -488,36 +491,63 @@ class PortalServer:
                         self._send(200, scan_analysis_datasets(PROJECT_ROOT))
                     elif path == '/api/dashboard/status':
                         local_merge = scan_merge_potential_runs(PROJECT_ROOT)
-                        try:
-                            dashboard = registry.snapshots().get(
-                                'training_dashboard'
-                            )
-                            dashboard_url = (
-                                str(dashboard.get('url')).rstrip('/')
-                                if dashboard and dashboard.get('running')
-                                and dashboard.get('url')
-                                else 'http://127.0.0.1:8765'
-                            )
-                            with urlopen(
-                                    dashboard_url + '/api/status',
-                                    timeout=1.5) as response:
-                                payload = json.loads(response.read().decode('utf-8'))
-                            if not isinstance(payload, dict):
-                                payload = {}
-                            remote_merge = payload.get('merge_potential')
-                            if (
-                                    not isinstance(remote_merge, dict)
-                                    or not remote_merge.get('available')):
-                                payload['merge_potential'] = local_merge
-                            self._send(200, {'available': True, 'payload': payload})
-                        except (OSError, URLError, TimeoutError, json.JSONDecodeError):
-                            self._send(200, {
-                                'available': local_merge['available'],
-                                'payload': (
-                                    {'merge_potential': local_merge}
-                                    if local_merge['available'] else None
-                                ),
+                        local_tasks = scan_task_telemetry(PROJECT_ROOT)
+                        sources = load_telemetry_sources()
+                        dashboard = registry.snapshots().get(
+                            'training_dashboard'
+                        )
+                        if (
+                                dashboard and dashboard.get('running')
+                                and dashboard.get('url')):
+                            sources.insert(0, {
+                                'id': 'managed-history',
+                                'name': '本地历史训练',
+                                'role': '手动启动的数据源',
+                                'url': str(dashboard['url']).rstrip('/'),
                             })
+                        if not sources:
+                            sources.append({
+                                'id': 'legacy-local',
+                                'name': '默认训练遥测',
+                                'role': '兼容数据源',
+                                'url': 'http://127.0.0.1:8765',
+                            })
+                        result = aggregate_telemetry_sources(sources)
+                        local_payload = {}
+                        if local_merge['available']:
+                            local_payload['merge_potential'] = local_merge
+                        if local_tasks['available']:
+                            local_payload['tasks'] = local_tasks
+                        if local_payload:
+                            local_source = {
+                                'id': 'local-artifacts',
+                                'name': '本机任务产物',
+                                'role': '本地只读快照',
+                                'url': '',
+                                'available': True,
+                                'payload': local_payload,
+                                'error': None,
+                                'latency_ms': 0.0,
+                            }
+                            result['sources'].append(local_source)
+                            if not result['available']:
+                                result.update({
+                                    'available': True,
+                                    'payload': local_payload,
+                                    'selected_source_id': 'local-artifacts',
+                                })
+                        if result['available'] and isinstance(result['payload'], dict):
+                            # Preserve the historical top-level response while the
+                            # frontend migrates to explicit source selection.
+                            payload = dict(result['payload'])
+                            if (
+                                    local_merge['available']
+                                    and not payload.get('merge_potential')):
+                                payload['merge_potential'] = local_merge
+                            if local_tasks['available'] and not payload.get('tasks'):
+                                payload['tasks'] = local_tasks
+                            result['payload'] = payload
+                        self._send(200, result)
                     else:
                         self._send(404, {'error': '接口不存在'})
                 except Exception as exc:

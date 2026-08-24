@@ -6,7 +6,7 @@ Xigua Atlas把项目里频繁变化的Markdown、正式模型评估、训练遥�
 同一个本地页面中。它是阅读与操作入口，不替代原始文档、模型报告或训练产物：图表中的
 代表数据仍必须回到对应评估报告解释，不能把柱形高度直接当成因果结论。
 
-门户当前包括七个页面：
+门户当前包括八个页面：
 
 - **总览**：代表模型的120 FPS均分、参数量、transition和估算训练时长；
 - **模型图谱**：训练规模—120 FPS得分散点图、代表模型排序和报告跳转；
@@ -15,6 +15,7 @@ Xigua Atlas把项目里频繁变化的Markdown、正式模型评估、训练遥�
 - **工具中心**：场景实验室后端、历史训练数据源、模型观看器和CUDA训练门禁；
 - **实时训练**：原生展示云端/本地训练进度、训练队列、GPU资源、损失、评估曲线和
   Merge Potential大规模统计进度；
+- **场景查看**：不启动物理或模型服务，直接读取单个或成组JSON场景快照；
 - **场景实验室**：原生编辑实时物理场景，对照21动作模型预测与真实执行结果，并按需
   显示完整圆障碍加权 Voronoi / Free-Space Graph。
 
@@ -41,14 +42,16 @@ cd ..
 conda run -n python-torch python tools/open_project_portal.py
 ```
 
-启动器默认读取本机Git忽略的`docs/CLOUD_SERVER_LOCAL.md`当前实例登记；当本地8765端口尚无
-数据源时，会自动建立并维护到云端8765训练遥测的SSH隧道。实例更换后只需更新该本机登记，
-不再单独启动隧道脚本。只查看本地文档、不连接云端时可增加`--no-cloud-telemetry`。
+启动器默认读取本机Git忽略的`docs/CLOUD_SERVER_LOCAL.md`当前实例登记。表中的`门户遥测`
+列决定连接范围：标为`on`的每个实例会获得独立本地回环端口和SSH隧道，并写入
+`runs/portal_processes/telemetry_sources.json`；面板并行读取全部来源，实例增删不再要求
+修改前端。只查看本地文档、不连接云端时可增加`--no-cloud-telemetry`。
 
 门户运行期间会监测前端源码与生产构建身份。保存前端修改后，启动器会先构建
 新版本，再替换过时的 Node 进程；构建失败时保留当前可用页面。启动器直接管理
 实际监听3000端口的 Node PID，异常遗留的已登记进程会在下次启动时清理。
-如4312上已有门户API，新的启动命令不会再创建重复后端。前端被自动替换后，
+如4312上已有由本工作区登记的门户API，重新运行启动命令会先关闭整棵旧门户进程树，再用
+当前Python代码、来源登记和前端构建重启；未登记的占用进程仍不会被误杀。前端被自动替换后，
 已打开的页面需普通刷新一次以载入新资源。
 
 默认地址：
@@ -57,7 +60,7 @@ conda run -n python-torch python tools/open_project_portal.py
 | --- | --- | --- |
 | 门户页面 | `http://127.0.0.1:3000` | 自动打开浏览器 |
 | 本地控制API | `http://127.0.0.1:4312` | 仅允许回环地址 |
-| 训练数据API | `http://127.0.0.1:8765/api/status` | 已有本地数据源或SSH转发 |
+| 训练数据API | 云端仍为`127.0.0.1:8765/api/status` | 启动器映射到本地`18765`起的独立端口 |
 | 场景实验室API | `http://127.0.0.1:8769/api/health` | 从工具中心按需启动；实时物理使用Tensor/CUDA |
 
 常用选项：
@@ -74,7 +77,7 @@ conda run -n python-torch python tools/open_project_portal.py `
 关闭启动命令所在的终端或按`Ctrl+C`即可结束门户以及由该启动器创建的前端子进程。
 工具中心另行启动的进程应在各自卡片上点击“停止”。
 
-数据分析、实时训练和场景实验室可用`#analysis`、`#live`、`#lab`直接定位，例如
+数据分析、实时训练、场景查看和场景实验室可用`#analysis`、`#live`、`#scenes`、`#lab`直接定位，例如
 `http://127.0.0.1:3000/#analysis`。工具中心启动对应服务后会留在门户内并自动进入原生
 页面，不会再打开旧页面。
 
@@ -103,7 +106,9 @@ conda run -n python-torch python tools/open_project_portal.py `
 
 ## 4. 训练遥测与队列
 
-实时训练页直接消费`/api/status`中的聚合数据，不进入actor、learner或Replay热路径。
+实时训练页先从门户聚合接口选择数据源，再消费该来源的`/api/status`，不进入actor、
+learner或Replay热路径。来源条目含实例名称、用途、在线状态和响应延迟；某台离线不会让
+其它实例或本机任务产物消失。
 首屏只保留进度、吞吐、ETA、得分和GPU概览；学习细项、动作分布和事件使用按语义折叠的
 `details`区块，避免一次铺开大量训练字段。
 
@@ -138,7 +143,26 @@ Merge Potential采集使用同一个训练数据API同步到实时训练页。�
 写入间隔的3倍）未更新且仍标记为`running`时，面板显示“更新已停滞”，但不会干预采集
 进程。
 
-## 5. 频繁修改文档时的行为
+除历史RL训练和Merge Potential专用兼容视图外，新增任务统一发布小型
+`runs/task_telemetry/<task-id>.json`快照。格式版本1包含任务类型、阶段、状态、进度、
+指标描述、有限长度历史和身份；门户只扫描该固定目录，不遍历数据集或checkpoint目录。
+只要生产者使用`TaskTelemetryPublisher`，数据生成、监督训练或后续分析就可直接显示为
+通用任务卡片，不需要在Python代理和React页面分别增加一个专用分支。堵塞风险数据生成与
+轻量预测器训练已接入该契约。
+
+## 5. 轻量场景查看与画布边界
+
+`#scenes`是无后端依赖的快照查看入口，接受一个场景对象、场景数组，或包含`scenes`、
+`snapshots`、`frames`字段的JSON。场景至少包含`fruits`数组；可选分数、投放数、物理帧、
+队列和几何。它适合快速检查终局、检测前后帧和反事实分支结果，不承担实时推进、编辑、
+模型推理或CUDA调用。
+
+基础棋盘、水果、危险线、网格和墙体已经抽成只读`SceneCanvas`；场景实验室的双环境静态
+对照也复用同一画布。画布预留水果前后两层React叠加入口，未来检测器图层可独立实现，
+不必继续把所有诊断绘制逻辑塞进`ScenarioWorkspace`。实时编辑画布仍留在实验室内，避免
+本轮结构调整同时改写成熟的指针手势和权威物理同步逻辑。
+
+## 6. 频繁修改文档时的行为
 
 后端每次请求都重新扫描当前工作树中的Markdown，不维护需要手动重建的静态索引。前端
 每3秒只读取一个轻量revision；检测到文档数量或最新修改时间变化时，才重新获取正文。
@@ -149,7 +173,7 @@ Merge Potential采集使用同一个训练数据API同步到实时训练页。�
 是一组有意精选的正式对照，而不是自动把任意run当成有效模型；新增正式模型后应在更新
 评估报告与`COMPARISON_MATRIX.md`的同时更新`portal/app/model-data.ts`。
 
-## 6. 工具中心的安全边界
+## 7. 工具中心的安全边界
 
 网页不能提交任意命令。后端只接受代码中登记的工具ID和结构化参数，并进行以下校验：
 
@@ -163,7 +187,7 @@ Merge Potential采集使用同一个训练数据API同步到实时训练页。�
 CUDA训练门禁会占用GPU并写入`runs/preflight`，启动前有显式确认。门户当前不提供“直接
 开始正式长训”按钮，避免将一次普通页面点击扩大为高成本训练授权。
 
-## 7. 数据与物理身份
+## 8. 数据与物理身份
 
 首页代表模型数据来自`docs/model_evaluations/COMPARISON_MATRIX.md`。五层Fast 128M及更早
 模型使用历史“合成水果继承动量”物理；结构化辅助128M及其120 FPS迁移模型使用“新水果
@@ -177,7 +201,7 @@ CUDA训练门禁会占用GPU并写入`runs/preflight`，启动前有显式确认
 会话使用同一Kernel的单帧增量入口，关闭自由下落快进以保留可见下落动画；页面身份区会
 显示`Tensor / CUDA`和“训练物理同源”。旧Pymunk运行后端及其依赖已经从当前代码删除。
 
-## 8. 开发与验证
+## 9. 开发与验证
 
 ```powershell
 cd portal
@@ -187,8 +211,11 @@ cd ..
 
 $env:PYTHONPATH = 'src'
 conda run -n python-torch python -m unittest `
-    tests.test_portal_service tests.test_scenario_lab tests.test_rl_baseline -v
+    tests.test_portal_service tests.test_task_telemetry `
+    tests.test_telemetry_sources tests.test_scenario_lab tests.test_rl_baseline -v
 ```
 
-门户前端位于`portal/app`，本地API和工具白名单位于`src/daxigua/portal/service.py`，统一
-启动器位于`tools/open_project_portal.py`。
+门户前端位于`portal/app`；新增工作区样式位于`workspace-modules.css`，不再继续扩大旧的
+`globals.css`。大型分析、训练、场景查看和场景实验室组件按页面动态加载。本地API和工具
+白名单位于`src/daxigua/portal/service.py`，多来源聚合位于
+`src/daxigua/portal/telemetry_sources.py`，统一启动器位于`tools/open_project_portal.py`。

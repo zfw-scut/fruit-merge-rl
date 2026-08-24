@@ -17,6 +17,7 @@ import {
   FileText,
   FlaskConical,
   Gauge,
+  Images,
   Layers3,
   LayoutDashboard,
   Menu,
@@ -31,15 +32,18 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
-import { AnalysisWorkspace } from "./AnalysisWorkspace";
 import { EChart } from "./EChart";
 import { CURRENT_TRAINING, FEATURED_MODEL_IDS, MODELS, type ModelRecord } from "./model-data";
-import { ScenarioWorkspace } from "./ScenarioWorkspace";
-import { TrainingWorkspace, type DashboardStatus } from "./TrainingWorkspace";
+import type { DashboardStatus } from "./TrainingWorkspace";
+
+const AnalysisWorkspace = lazy(async () => ({ default: (await import("./AnalysisWorkspace")).AnalysisWorkspace }));
+const ScenarioWorkspace = lazy(async () => ({ default: (await import("./ScenarioWorkspace")).ScenarioWorkspace }));
+const SceneViewerWorkspace = lazy(async () => ({ default: (await import("./SceneViewerWorkspace")).SceneViewerWorkspace }));
+const TrainingWorkspace = lazy(async () => ({ default: (await import("./TrainingWorkspace")).TrainingWorkspace }));
 
 const API = (() => {
   if (typeof window === "undefined") return "http://127.0.0.1:4312";
@@ -48,7 +52,7 @@ const API = (() => {
   return `http://127.0.0.1:${port}`;
 })();
 
-type ViewId = "overview" | "models" | "analysis" | "documents" | "tools" | "live" | "lab";
+type ViewId = "overview" | "models" | "analysis" | "documents" | "tools" | "live" | "scenes" | "lab";
 type MetricId = "score30" | "score120" | "parameters" | "transitions" | "trainingHours";
 
 type DocumentRecord = {
@@ -116,6 +120,7 @@ const NAVIGATION: Array<{ id: ViewId; label: string; hint: string; icon: LucideI
   { id: "documents", label: "文档知识库", hint: "Knowledge", icon: BookOpenText },
   { id: "tools", label: "工具中心", hint: "Launchpad", icon: Wrench },
   { id: "live", label: "实时训练", hint: "Telemetry", icon: Activity },
+  { id: "scenes", label: "场景查看", hint: "Snapshots", icon: Images },
   { id: "lab", label: "场景实验室", hint: "Physics Lab", icon: FlaskConical },
 ];
 
@@ -812,7 +817,7 @@ export function PortalShell() {
           {activeView === "analysis" && (
             <motion.section key="analysis" className="page analysis-page" animate={pageEnter} exit={{ opacity: 0, y: -8 }} transition={pageTransition}>
               <PageHeader eyebrow="STATISTICAL ANALYSIS" title="让统计关系可以被直接探索。" description="从表格追溯到条件概率、时间尺度和双因素交互；当前默认读取 SAB-128 Merge Potential 正式数据，后续统计可沿用同一数据集契约。" />
-              <AnalysisWorkspace apiBase={API} />
+              <Suspense fallback={<WorkspaceLoading />}><AnalysisWorkspace apiBase={API} /></Suspense>
             </motion.section>
           )}
 
@@ -866,18 +871,23 @@ export function PortalShell() {
           {activeView === "live" && (
             <motion.section key="live" className="page live-page" animate={pageEnter} exit={{ opacity: 0 }} transition={pageTransition}>
               <PageHeader eyebrow="LIVE TRAINING TELEMETRY" title="训练发生时，证据也在生长。" description="云端遥测、训练队列、资源曲线和细分损失已经原生进入项目门户；所有高密度信息按诊断语义折叠。" />
-              <TrainingWorkspace dashboard={dashboard} onRefresh={() => void loadDashboard()} onOpenTools={() => navigate("tools")} />
+              <Suspense fallback={<WorkspaceLoading />}><TrainingWorkspace dashboard={dashboard} onRefresh={() => void loadDashboard()} onOpenTools={() => navigate("tools")} /></Suspense>
             </motion.section>
           )}
 
           {activeView === "lab" && (
             <motion.section key="lab" className="page lab-page" animate={pageEnter} exit={{ opacity: 0 }} transition={pageTransition}>
               <PageHeader eyebrow="INTERACTIVE PHYSICS LAB" title="让预测直接落在物理场景里。" description="实时场景编辑、21动作预测、辅助效果对照与可视化图层共用一套门户布局；低频设置集中在右侧抽屉。" />
-              <ScenarioWorkspace tool={tools.find((tool) => tool.id === "scenario_lab")} onConfigure={() => {
+              <Suspense fallback={<WorkspaceLoading />}><ScenarioWorkspace tool={tools.find((tool) => tool.id === "scenario_lab")} onConfigure={() => {
                 const tool = tools.find((item) => item.id === "scenario_lab");
                 if (tool) openToolSettings(tool);
                 else navigate("tools");
-              }} />
+              }} /></Suspense>
+            </motion.section>
+          )}
+          {activeView === "scenes" && (
+            <motion.section key="scenes" className="page scene-viewer-page" animate={pageEnter} exit={{ opacity: 0 }} transition={pageTransition}>
+              <Suspense fallback={<WorkspaceLoading />}><SceneViewerWorkspace /></Suspense>
             </motion.section>
           )}
         </AnimatePresence>
@@ -902,6 +912,10 @@ export function PortalShell() {
       </AnimatePresence>
     </div>
   );
+}
+
+function WorkspaceLoading() {
+  return <div className="workspace-loading"><RefreshCw size={18} /><span>正在加载工作区…</span></div>;
 }
 
 function StatCard({ icon: Icon, label, value, note, tone }: { icon: LucideIcon; label: string; value: string; note: string; tone: string }) {

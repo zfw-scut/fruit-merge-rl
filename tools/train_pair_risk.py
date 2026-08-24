@@ -31,6 +31,10 @@ from daxigua.rl.pair_risk import (  # noqa: E402
     checkpoint_payload,
     risk_metrics,
 )
+from daxigua.rl.task_telemetry import (  # noqa: E402
+    TaskTelemetryPublisher,
+    make_task_id,
+)
 
 
 SPLIT_NAMES = {
@@ -490,6 +494,29 @@ def train(args):
         ),
         'autocast_bfloat16': bool(args.autocast_bfloat16),
     }
+    telemetry = TaskTelemetryPublisher(
+        task_id=make_task_id('pair-risk-training', output_dir),
+        task_type='supervised_training',
+        name='堵塞风险预测器训练',
+        output_dir=output_dir,
+        identity={
+            'model': 'Pair-conditioned Deep Sets',
+            'device': str(device),
+            'dataset': Path(args.dataset_dir).name,
+        },
+        metric_schema=[
+            {'key': 'train_loss', 'label': '训练损失'},
+            {'key': 'validation_map', 'label': '验证 macro AP', 'format': 'percent'},
+            {'key': 'best_validation_map', 'label': '最佳 macro AP', 'format': 'percent'},
+        ],
+        series_schema=[
+            {'key': 'train_loss', 'label': '训练损失'},
+            {'key': 'validation_map', 'label': '验证 macro AP'},
+        ],
+    )
+    telemetry.update(
+        phase='训练', current=0, total=int(args.epochs), unit='epoch'
+    )
     for epoch in range(1, int(args.epochs) + 1):
         model.train()
         loss_sum = 0.0
@@ -583,6 +610,19 @@ def train(args):
             'latest': row,
         }
         _atomic_json(output_dir / 'training_progress.json', progress)
+        telemetry.update(
+            phase='训练',
+            current=epoch,
+            total=int(args.epochs),
+            unit='epoch',
+            metrics={
+                'train_loss': row['train_loss'],
+                'validation_map': validation.get('macro_average_precision'),
+                'best_validation_map': best_score,
+                'epoch_seconds': row['epoch_seconds'],
+            },
+            history_step=epoch,
+        )
         print(json.dumps(_json_safe(progress), ensure_ascii=False), flush=True)
         if stale_epochs >= int(args.early_stop_patience):
             break
@@ -610,6 +650,19 @@ def train(args):
     }
     _atomic_json(output_dir / 'training_progress.json', final)
     _atomic_json(output_dir / 'evaluation.json', final)
+    telemetry.complete(
+        phase='完成',
+        current=history[-1]['epoch'] if history else 0,
+        total=int(args.epochs),
+        unit='epoch',
+        metrics={
+            'best_validation_map': best_score,
+            'test_average_precision': test_result.get('average_precision'),
+            'test_macro_average_precision': test_result.get('macro_average_precision'),
+        },
+        history_step=best_epoch,
+        record_history=False,
+    )
     print(json.dumps(_json_safe(final), ensure_ascii=False, indent=2))
     return final
 

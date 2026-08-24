@@ -43,6 +43,10 @@ from daxigua.rl.pair_risk import (  # noqa: E402
     extract_pair_exposures,
     finalize_pair_risk_dataset,
 )
+from daxigua.rl.task_telemetry import (  # noqa: E402
+    TaskTelemetryPublisher,
+    make_task_id,
+)
 from daxigua.rl.viewer import (  # noqa: E402
     load_viewer_model,
     viewer_simulator_config,
@@ -338,6 +342,33 @@ def collect(args):
         },
     }
     _write_manifest(manifest_path, base_manifest)
+    telemetry = TaskTelemetryPublisher(
+        task_id=make_task_id('pair-risk-collection', output_dir),
+        task_type='dataset_collection',
+        name='堵塞风险数据生成',
+        output_dir=output_dir,
+        identity={
+            'policy': 'SAB-128',
+            'device': str(loaded.device),
+            'parallel_envs': batch_size,
+        },
+        metric_schema=[
+            {'key': 'transitions_per_second', 'label': '投放吞吐', 'unit': '/秒'},
+            {'key': 'confirmed_events', 'label': '确认事件'},
+            {'key': 'transitions', 'label': '累计投放'},
+        ],
+        series_schema=[
+            {'key': 'transitions_per_second', 'label': '投放吞吐'},
+            {'key': 'confirmed_events', 'label': '确认事件'},
+        ],
+    )
+    telemetry.update(
+        phase='真实轨迹采集',
+        current=0,
+        total=int(args.target_confirmed_events),
+        unit='事件',
+        metrics={'confirmed_events': 0, 'transitions': 0},
+    )
 
     completed = 0
     next_episode_id = batch_size
@@ -495,6 +526,19 @@ def collect(args):
                         for name, writer in writers.items()
                     },
                 )
+                telemetry.update(
+                    phase='真实轨迹采集',
+                    current=confirmed_total,
+                    total=int(args.target_confirmed_events),
+                    unit='事件',
+                    metrics={
+                        'confirmed_events': confirmed_total,
+                        'transitions': transitions,
+                        'transitions_per_second': transitions / max(elapsed, 1e-9),
+                        'completed_episodes': completed,
+                    },
+                    history_step=transitions,
+                )
                 print(json.dumps({
                     'completed_episodes': completed,
                     'transitions': transitions,
@@ -559,11 +603,43 @@ def collect(args):
             ),
             failure=failure or (str(close_error) if close_error else None),
         )
+        telemetry_status = (
+            'failed' if status == 'failed' or close_error is not None
+            else 'cancelled' if status == 'interrupted'
+            else 'completed'
+        )
+        telemetry.update(
+            status=telemetry_status,
+            phase='采集结束',
+            message=failure or (str(close_error) if close_error else ''),
+            current=confirmed_total,
+            total=int(args.target_confirmed_events),
+            unit='事件',
+            metrics={
+                'confirmed_events': confirmed_total,
+                'transitions': transitions,
+                'transitions_per_second': transitions / max(elapsed, 1e-9),
+                'completed_episodes': completed,
+            },
+            history_step=transitions,
+            record_history=False,
+        )
         if close_error is not None:
             raise close_error
 
     result = json.loads(manifest_path.read_text(encoding='utf-8'))
     if args.auto_finalize and result['status'] != 'failed':
+        telemetry.update(
+            phase='整理监督标签',
+            current=confirmed_total,
+            total=int(args.target_confirmed_events),
+            unit='事件',
+            metrics={
+                'confirmed_events': confirmed_total,
+                'transitions': transitions,
+            },
+            record_history=False,
+        )
         result['labeled'] = finalize_pair_risk_dataset(
             output_dir,
             forecast_horizon=args.forecast_horizon,
@@ -571,6 +647,17 @@ def collect(args):
             shard_rows=max(args.shard_rows, 65_536),
         )
         _atomic_json(manifest_path, result)
+        telemetry.complete(
+            phase='完成',
+            current=confirmed_total,
+            total=int(args.target_confirmed_events),
+            unit='事件',
+            metrics={
+                'confirmed_events': confirmed_total,
+                'transitions': transitions,
+            },
+            record_history=False,
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return result
 

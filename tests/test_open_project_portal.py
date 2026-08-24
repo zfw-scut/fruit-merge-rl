@@ -7,6 +7,7 @@ from tools.open_project_portal import (
     _frontend_build_revision,
     _read_frontend_pid,
     _remove_stale_frontend,
+    _replace_registered_portal,
     _start_frontend,
     _write_frontend_pid,
     main,
@@ -63,6 +64,32 @@ class ProjectPortalLauncherTests(unittest.TestCase):
             terminate.assert_called_once_with(1234)
             self.assertFalse(state_path.exists())
 
+    def test_registered_portal_is_replaced_but_unregistered_port_is_preserved(self):
+        with TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / 'launcher.json'
+            _write_frontend_pid(state_path, pid=4321, port=4312)
+            with (
+                patch('tools.open_project_portal._port_open', return_value=True),
+                patch('tools.open_project_portal._terminate_process_tree') as terminate,
+                patch('tools.open_project_portal._wait_port_closed'),
+            ):
+                replaced = _replace_registered_portal(
+                    state_path=state_path, port=4312
+                )
+            self.assertTrue(replaced)
+            terminate.assert_called_once_with(4321)
+            self.assertFalse(state_path.exists())
+
+            with (
+                patch('tools.open_project_portal._port_open', return_value=True),
+                patch('tools.open_project_portal._terminate_process_tree') as terminate,
+            ):
+                replaced = _replace_registered_portal(
+                    state_path=state_path, port=4312
+                )
+            self.assertFalse(replaced)
+            terminate.assert_not_called()
+
     def test_frontend_starts_direct_node_process(self):
         with TemporaryDirectory() as temporary:
             portal_root = Path(temporary)
@@ -94,6 +121,10 @@ class ProjectPortalLauncherTests(unittest.TestCase):
     def test_existing_api_prevents_duplicate_backend(self):
         with (
             patch('tools.open_project_portal._port_open', return_value=True),
+            patch(
+                'tools.open_project_portal._replace_registered_portal',
+                return_value=False,
+            ),
             patch('tools.open_project_portal.PortalServer') as portal_server,
         ):
             main(['--no-open', '--no-cloud-telemetry'])

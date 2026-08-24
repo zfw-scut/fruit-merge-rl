@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EChart } from "./EChart";
+import { SceneCanvas } from "./scene/SceneCanvas";
 
 type ProcessSnapshot = {
   running: boolean;
@@ -387,14 +388,7 @@ function ComparisonBoard({ state, geometry, textures, specs, label }: { state: L
   const profile = state.profile;
   return <article className="lab-comparison-lane">
     <header><div><span>{label}</span><h3>{profile?.role ?? "物理环境"}</h3></div><div className="lab-comparison-badges"><b>{profile?.backend === "tensor_cuda" ? "CUDA" : "Tensor / CPU"}</b><b>{profile?.physics_fps ?? state.physics_fps} FPS</b><b>完整逐帧</b></div></header>
-    <div className="lab-comparison-board-wrap"><svg className="lab-board lab-comparison-board" viewBox={`0 0 ${geometry.board_width} ${geometry.board_height}`} aria-label={`${label}物理场景`}>
-      <rect width={geometry.board_width} height={geometry.board_height} className="lab-board-bg" />
-      {Array.from({ length: 10 }, (_, index) => <line key={`v${index}`} x1={(index + 1) * geometry.board_width / 11} x2={(index + 1) * geometry.board_width / 11} y1="0" y2={geometry.board_height} className="lab-grid-line" />)}
-      {Array.from({ length: 11 }, (_, index) => <line key={`h${index}`} y1={(index + 1) * geometry.board_height / 12} y2={(index + 1) * geometry.board_height / 12} x1="0" x2={geometry.board_width} className="lab-grid-line" />)}
-      <line x1={geometry.wall_width} x2={geometry.board_width - geometry.wall_width} y1={geometry.spawn_y} y2={geometry.spawn_y} className="lab-danger-line" />
-      {state.fruits.map((fruit) => { const radius = specs.find((item) => item.level === fruit.level)?.radius ?? fruit.physics_radius; return <g key={fruit.id} transform={`translate(${fruit.x} ${fruit.y}) rotate(${fruit.angle * 180 / Math.PI})`} className="lab-fruit"><circle r={radius + 4} /><image href={textures[fruit.level]} x={-radius} y={-radius} width={radius * 2} height={radius * 2} /><text y={4}>L{fruit.level}</text></g>; })}
-      <rect x="0" y={geometry.board_height - geometry.wall_width} width={geometry.board_width} height={geometry.wall_width} className="lab-wall" /><rect x="0" y="0" width={geometry.wall_width} height={geometry.board_height} className="lab-wall" /><rect x={geometry.board_width - geometry.wall_width} y="0" width={geometry.wall_width} height={geometry.board_height} className="lab-wall" />
-    </svg></div>
+    <div className="lab-comparison-board-wrap"><SceneCanvas fruits={state.fruits} geometry={geometry} specs={specs} textures={textures} className="lab-comparison-board" ariaLabel={`${label}物理场景`} /></div>
     <footer><span>分数 <b>{state.score}</b></span><span>投放 <b>{state.step_count}</b></span><span>物理帧 <b>{state.physics_frame ?? 0}</b></span><span>水果 <b>{state.fruits.length}</b></span>{state.trace?.contains_fast_forward_gap && <span className="is-warning">快进缺口 · 语义帧 {state.trace.semantic_frame}</span>}</footer>
   </article>;
 }

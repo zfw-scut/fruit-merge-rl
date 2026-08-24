@@ -17,7 +17,10 @@ from daxigua.portal.service import (
 )
 from daxigua.portal.analysis_data import scan_analysis_datasets
 from daxigua.rl.merge_potential_status import scan_merge_potential_runs
-from tools.open_project_portal import _read_cloud_ssh_config
+from tools.open_project_portal import (
+    _read_cloud_ssh_config,
+    _read_cloud_ssh_configs,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -89,6 +92,26 @@ class PortalServiceTests(unittest.TestCase):
             self.assertEqual(config.port, 30021)
             self.assertEqual(config.target, 'root@current.example')
             self.assertEqual(config.password, 'new-pass')
+
+    def test_cloud_instance_registration_supports_explicit_multi_source_enablement(self):
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'cloud.md'
+            path.write_text(
+                '# 云服务器\n\n## 当前可用实例\n\n'
+                '| 实例 | SSH 连接 | 密码 | 门户遥测 | 用途 / 备注 |\n'
+                '| --- | --- | --- | --- | --- |\n'
+                '| 7号 | `ssh -p 50443 root@seven.example` | `pass-7` | on | 风险训练 |\n'
+                '| 8号 | `ssh -p 39071 root@eight.example` | `pass-8` | off | 已关闭 |\n',
+                encoding='utf-8',
+            )
+
+            configs = _read_cloud_ssh_configs(path)
+
+            self.assertEqual(len(configs), 2)
+            self.assertTrue(configs[0].telemetry_enabled)
+            self.assertFalse(configs[1].telemetry_enabled)
+            self.assertEqual(configs[0].instance_id, '7号')
+            self.assertEqual(configs[0].role, '风险训练')
 
     def test_merge_potential_manifest_is_normalized_for_dashboard(self):
         with TemporaryDirectory() as temporary:

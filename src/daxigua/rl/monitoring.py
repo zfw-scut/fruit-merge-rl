@@ -20,6 +20,7 @@ from .curves import (
 )
 from .event_analysis import EVENT_ANALYSIS_FILENAME
 from .merge_potential_status import scan_merge_potential_runs
+from .task_telemetry import scan_task_telemetry
 from .training_queue import load_training_queue
 
 
@@ -342,6 +343,7 @@ def _dashboard_process_main(
                     run_dir, training=snapshot.get('training')
                 )
                 snapshot['merge_potential'] = scan_merge_potential_runs()
+                snapshot['tasks'] = scan_task_telemetry()
                 body = json.dumps(snapshot, ensure_ascii=False).encode('utf-8')
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -586,6 +588,7 @@ def serve_completed_dashboard(run_dir, *, host='127.0.0.1', port=8765):
                     run_dir, training=snapshot.get('training')
                 )
                 snapshot['merge_potential'] = scan_merge_potential_runs()
+                snapshot['tasks'] = scan_task_telemetry()
                 body = json.dumps(snapshot, ensure_ascii=False).encode('utf-8')
                 status = 200
                 content_type = 'application/json; charset=utf-8'

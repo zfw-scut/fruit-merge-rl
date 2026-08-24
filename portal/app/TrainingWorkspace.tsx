@@ -16,7 +16,7 @@ import {
   Timer,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { EChart } from "./EChart";
 
 type Scalar = number | string | boolean | null | undefined;
@@ -55,6 +55,39 @@ type MergePotentialStatus = {
   runs?: MergePotentialRun[];
 };
 
+type TaskMetricDescriptor = {
+  key: string;
+  label?: string;
+  format?: string;
+  unit?: string;
+};
+
+type TaskTelemetry = {
+  id: string;
+  task_type: string;
+  name: string;
+  status: string;
+  phase?: string;
+  message?: string;
+  stale?: boolean;
+  progress?: {
+    current?: number | null;
+    total?: number | null;
+    unit?: string;
+    fraction?: number | null;
+  };
+  metrics?: Record<string, Scalar>;
+  metric_schema?: TaskMetricDescriptor[];
+  identity?: Record<string, Scalar>;
+  updated_at?: number;
+};
+
+type TaskTelemetryStatus = {
+  available: boolean;
+  current?: TaskTelemetry | null;
+  tasks?: TaskTelemetry[];
+};
+
 export type QueueItem = {
   id: string;
   name: string;
@@ -88,11 +121,25 @@ export type DashboardPayload = {
     counts?: Record<string, number>;
   };
   merge_potential?: MergePotentialStatus;
+  tasks?: TaskTelemetryStatus;
+};
+
+export type TelemetrySource = {
+  id: string;
+  name: string;
+  role?: string;
+  url?: string;
+  available: boolean;
+  payload?: DashboardPayload | null;
+  error?: string | null;
+  latency_ms?: number | null;
 };
 
 export type DashboardStatus = {
   available: boolean;
   payload?: DashboardPayload | null;
+  selected_source_id?: string | null;
+  sources?: TelemetrySource[];
 };
 
 type Props = {
@@ -104,6 +151,7 @@ type Props = {
 type ChartId = "score" | "loss" | "aux" | "throughput" | "events" | "resources";
 
 const SERIES_COLORS = ["#3478f6", "#7c5ce5", "#18a67e", "#e68a2e", "#db4f7d", "#65758b"];
+const NO_TELEMETRY_SOURCES: TelemetrySource[] = [];
 const PHASE_LABELS: Record<string, string> = {
   initializing: "初始化",
   warmup: "Replay预热",
@@ -406,16 +454,98 @@ function MergePotentialPanel({ status }: { status?: MergePotentialStatus }) {
   );
 }
 
+const TASK_STATUS_LABELS: Record<string, string> = {
+  pending: "等待开始",
+  running: "进行中",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+};
+
+function taskMetric(value: Scalar, descriptor?: TaskMetricDescriptor) {
+  if (descriptor?.format === "percent") return percent(value, true);
+  if (descriptor?.format === "count") return count(value);
+  const formatted = decimal(value, 4);
+  return descriptor?.unit && formatted !== "—" ? `${formatted} ${descriptor.unit}` : formatted;
+}
+
+function GenericTasksPanel({ status }: { status?: TaskTelemetryStatus }) {
+  const tasks = status?.tasks ?? [];
+  if (!status?.available || !tasks.length) return null;
+  return (
+    <section className="generic-task-section">
+      <div className="section-heading-inline">
+        <div>
+          <span>GENERIC TASK TELEMETRY</span>
+          <h2>计算任务</h2>
+          <p>数据生成、监督训练和后续分析使用同一只读描述协议，无需为每种任务重写面板。</p>
+        </div>
+        <span className="queue-count"><Activity size={15} /> {tasks.length} 项</span>
+      </div>
+      <div className="generic-task-grid">
+        {tasks.map((task) => {
+          const fraction = Math.max(0, Math.min(1, numeric(task.progress?.fraction) ?? (task.status === "completed" ? 1 : 0)));
+          const descriptors = task.metric_schema?.length
+            ? task.metric_schema
+            : Object.keys(task.metrics ?? {}).slice(0, 4).map((key) => ({ key, label: key }));
+          const identities = Object.entries(task.identity ?? {}).slice(0, 3);
+          return (
+            <article key={task.id} className={`generic-task-card task-${task.status} ${task.stale ? "is-stale" : ""}`}>
+              <header>
+                <div>
+                  <span>{task.task_type.replaceAll("_", " ")}</span>
+                  <h3>{task.name}</h3>
+                </div>
+                <b>{task.stale ? "更新停滞" : (TASK_STATUS_LABELS[task.status] ?? task.status)}</b>
+              </header>
+              <p>{task.message || task.phase || "任务正在写入通用遥测快照。"}</p>
+              <div className="generic-task-progress">
+                <span style={{ width: `${fraction * 100}%` }} />
+              </div>
+              <div className="generic-task-progress-label">
+                <strong>{(fraction * 100).toFixed(1)}%</strong>
+                <span>{count(task.progress?.current)} / {count(task.progress?.total)} {task.progress?.unit || ""}</span>
+              </div>
+              <div className="generic-task-metrics">
+                {descriptors.slice(0, 4).map((descriptor) => (
+                  <div key={descriptor.key}>
+                    <span>{descriptor.label || descriptor.key}</span>
+                    <strong>{taskMetric(task.metrics?.[descriptor.key], descriptor)}</strong>
+                  </div>
+                ))}
+              </div>
+              {!!identities.length && <footer>
+                {identities.map(([key, value]) => <span key={key}><b>{key}</b>{String(value ?? "—")}</span>)}
+              </footer>}
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) {
   const [chartId, setChartId] = useState<ChartId>("score");
-  const payload = dashboard.payload;
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+  const sources = dashboard.sources ?? NO_TELEMETRY_SOURCES;
+  const effectiveSourceId = (
+    sources.some((source) => source.id === selectedSourceId && source.available)
+      ? selectedSourceId
+      : dashboard.selected_source_id
+        ?? sources.find((source) => source.available)?.id
+        ?? null
+  );
+  const selectedSource = sources.find((source) => source.id === effectiveSourceId);
+  const payload = selectedSource?.payload ?? dashboard.payload;
+  const sourceAvailable = selectedSource ? selectedSource.available : dashboard.available;
   const training = payload?.training ?? {};
   const resources = payload?.resources ?? {};
   const all = { ...training, ...resources };
   const phase = String(training.phase ?? "offline");
   const progress = Math.max(0, Math.min(1, numeric(training.progress_fraction) ?? 0));
   const queue = queueItems(payload);
-  const chartOption = useMemo(() => buildChartOption(payload, chartId), [payload, chartId]);
+  const chartOption = buildChartOption(payload, chartId);
   const actionDistribution = Array.isArray(training.action_distribution)
     ? (training.action_distribution as unknown as number[])
     : [];
@@ -426,14 +556,28 @@ export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) 
     <section className="training-workspace">
       <div className="training-commandbar">
         <div>
-          <span className={`training-live-indicator ${dashboard.available ? "is-online" : ""}`} />
-          <span>{dashboard.available ? "运行遥测已连接" : "等待运行数据源"}</span>
+          <span className={`training-live-indicator ${sourceAvailable ? "is-online" : ""}`} />
+          <span>{sourceAvailable ? "运行遥测已连接" : "等待运行数据源"}</span>
           {numeric(training.training_physics_fps) !== null && <b>{count(training.training_physics_fps)} FPS训练</b>}
         </div>
         <button onClick={onRefresh}><RefreshCw size={15} /> 刷新</button>
       </div>
 
-      {!dashboard.available ? (
+      {!!sources.length && <div className="telemetry-source-strip" aria-label="训练遥测来源">
+        {sources.map((source) => (
+          <button
+            key={source.id}
+            className={source.id === effectiveSourceId ? "active" : ""}
+            onClick={() => setSelectedSourceId(source.id)}
+          >
+            <span className={source.available ? "is-online" : ""} />
+            <b>{source.name}</b>
+            <small>{source.role || (source.available ? "训练遥测" : "离线")}</small>
+          </button>
+        ))}
+      </div>}
+
+      {!sourceAvailable ? (
         <div className="training-offline-state">
           <Server size={38} />
           <h2>训练数据源尚未连接</h2>
@@ -519,6 +663,7 @@ export function TrainingWorkspace({ dashboard, onRefresh, onOpenTools }: Props) 
 
           </>}
 
+          <GenericTasksPanel status={payload?.tasks} />
           <MergePotentialPanel status={payload?.merge_potential} />
 
           <div className="training-data-note"><AlertCircle size={15} /><span>界面只读展示聚合数据，不向训练进程发送控制命令。图表缩放只改变本地视图，不修改训练产物。</span></div>
