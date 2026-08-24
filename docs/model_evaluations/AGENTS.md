@@ -2,7 +2,9 @@
 
 默认入口是 `COMPARISON_MATRIX.md` 的相关行，不是按文件名顺序阅读全部报告。
 
-- 当前完整逐帧谱系：先读`model-sab-full-fall-t120-16m-b2m-r2.md`。
+- 当前完整逐帧18维边从零128M基线：先读
+  `model-sab-full-fall-edge18-128m-b16m-r1.md`；需要120 FPS迁移分叉对照时再读
+  `model-sab-full-fall-t120-16m-b2m-r2.md`。
 - 禁用快进前的零初速度谱系：先读`model-structured-128m-to-120fps-transfer-r1.md`；需要来源对照时再读`model-auxiliary-action-structured-branch-128m-r5.md`。
 - 五层 Fast 128M 及更早报告属于继承动量旧物理，只在比较对应历史方案时读取。
 - Reward V2/V2.1 报告属于已结束奖励实验，不是当前默认训练方案。

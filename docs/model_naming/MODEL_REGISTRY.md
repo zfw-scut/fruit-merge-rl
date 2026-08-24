@@ -23,6 +23,7 @@
 | `SAB-T120` | `structured-128m-to-120fps-transfer-r1` | `SAB-128`权重迁移；120 FPS适应16M | 禁用快进前代表模型 | [`model-structured-128m-to-120fps-transfer-r1.md`](../model_evaluations/model-structured-128m-to-120fps-transfer-r1.md) |
 | `SAB-FF120` | `sab-full-fall-t120-16m-r1` | `SAB-T120`权重迁移；完整逐帧120 FPS适应16M，无旁路 | 当前完整逐帧对照 | [`model-sab-full-fall-t120-16m-b2m-r2.md`](../model_evaluations/model-sab-full-fall-t120-16m-b2m-r2.md) |
 | `SAB-FF120-B2` | `sab-full-fall-t120-16m-b2m-r2` | `SAB-FF120`精确8M恢复；续训至16M并加入2.097M旁路 | 已结束对照 | 同上 |
+| `SAB-FF30-E18` | `sab-full-fall-edge18-128m-b16m-r1` | 从零训练；当前完整逐帧30 FPS、18维水果边、128M父轨迹和16,777,216旁路 | 训练与30 FPS终评完成 | [`model-sab-full-fall-edge18-128m-b16m-r1.md`](../model_evaluations/model-sab-full-fall-edge18-128m-b16m-r1.md) |
 | `RV2` | `reward-v2-r1` | `spatial_v2`奖励实验 | 已结束实验 | [`model-reward-v2-r1.md`](../model_evaluations/model-reward-v2-r1.md) |
 | `RV21` | `reward-v2.1-r1` | `spatial_v2_1`奖励实验 | 已结束实验 | [`model-reward-v2-1-r1.md`](../model_evaluations/model-reward-v2-1-r1.md) |
 
@@ -33,7 +34,7 @@
 
 | 短称 | 正式ID | 关键区分 | 状态 | 配置 |
 | --- | --- | --- | --- | --- |
-| `SAB-FF30-E18` | `sab-full-fall-edge18-128m-b16m-r1` | 从零训练；30 FPS完整逐帧、18维水果边、128M父轨迹和16,777,216旁路；SAB-128仅作预热teacher | 6号实例正式训练中 | [`../../configs/sab-full-fall-edge18-128m-b16m-r1.toml`](../../configs/sab-full-fall-edge18-128m-b16m-r1.toml) |
+| — | — | 当前没有已启动但尚未归档的正式模型 | — | — |
 
 新训练方案只有在训练边界和来源checkpoint确认后才登记；尚处于讨论阶段的想法不占用
 短称。
