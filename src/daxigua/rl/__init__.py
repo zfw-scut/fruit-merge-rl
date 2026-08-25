@@ -36,6 +36,15 @@ from .pair_failure import (
 )
 from .pair_blockage import PairBlockageModel, PairBlockageModelConfig
 from .pair_risk import PairRiskModel, PairRiskModelConfig
+from .mergeability import (
+    MERGEABILITY_SOURCE_EXTERNAL,
+    MERGEABILITY_SOURCE_INTERNAL,
+    MERGEABILITY_SOURCE_NONE,
+    MergeabilityCalculator,
+    MergeabilityConfig,
+    MergeabilityResult,
+    VerticalCorridorExternalSupply,
+)
 
 __all__ = [
     'AnalysisExportConfig',
@@ -57,6 +66,12 @@ __all__ = [
     'GpuDecisionBuffer',
     'KeyDecisionCollector',
     'ModelConfig',
+    'MERGEABILITY_SOURCE_EXTERNAL',
+    'MERGEABILITY_SOURCE_INTERNAL',
+    'MERGEABILITY_SOURCE_NONE',
+    'MergeabilityCalculator',
+    'MergeabilityConfig',
+    'MergeabilityResult',
     'PairFailureConfig',
     'PairFailureTracker',
     'PairFailureUpdate',
@@ -68,5 +83,6 @@ __all__ = [
     'ReplayConfig',
     'TensorState',
     'TrainingConfig',
+    'VerticalCorridorExternalSupply',
     'build_action_effect_targets',
 ]
