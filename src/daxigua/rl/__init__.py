@@ -45,6 +45,11 @@ from .mergeability import (
     MergeabilityResult,
     VerticalCorridorExternalSupply,
 )
+from .mergeability_rollout import (
+    SCENE_VALUE_DTYPES,
+    scene_mergeability_delta,
+    scene_mergeability_values,
+)
 
 __all__ = [
     'AnalysisExportConfig',
@@ -72,6 +77,7 @@ __all__ = [
     'MergeabilityCalculator',
     'MergeabilityConfig',
     'MergeabilityResult',
+    'SCENE_VALUE_DTYPES',
     'PairFailureConfig',
     'PairFailureTracker',
     'PairFailureUpdate',
@@ -84,5 +90,7 @@ __all__ = [
     'TensorState',
     'TrainingConfig',
     'VerticalCorridorExternalSupply',
+    'scene_mergeability_delta',
+    'scene_mergeability_values',
     'build_action_effect_targets',
 ]
