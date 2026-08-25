@@ -1,6 +1,6 @@
 # 当前文档入口
 
-> 当前阶段：**S12 — 新基线、堵塞诊断与门户解耦（2026-08-24～25，`codex/93–99`）**。
+> 当前阶段：**S13 — 可合成性方案设计（2026-08-25，`codex/100`）**。
 > 默认只读当前阶段及目标模块最近一次发生变化的阶段；不要按编号回读全部历史。
 
 ## 当前事实
@@ -34,6 +34,10 @@
   显现点常由近期碰撞触发，但真正形成难恢复结构的投放可能早得多。长期检测器、监督数据、
   冻结模型和画廊继续作为离线失败检索、分支结果验证和研究对照保留；完整演化与弃用原因见
   `development_tracks/01_pair_risk_to_blockage/`。
+- 当前新方向是为稳定场景中的每颗水果计算“参与下一次合成的容易程度”，把内部升级链与
+  顶部外部供给分开推导，再用于行为段和反事实候选分支评价。完整生效方案位于
+  `design_specs/01_mergeability/`；目前只有设计文档，尚未实现，也未接入Policy、奖励或
+  Replay。
 - 旧配置中的 `drop_fast_forward` 仅为读取兼容保留，传入 `true` 也会归一化为 `false`；旧物理身份的 checkpoint 不允许直接恢复训练，只能 weights-only 迁移。
 - 正式训练默认不设置单局投放次数上限，并记录长局规模与水果槽占用；当前不按局长刷新或
   降权。固定64水果状态容量属于独立技术边界，命中时终止该局并单独累计监控。
@@ -71,7 +75,8 @@
 | 模型或训练实现 | `model/AGENTS.md`，再选一份专项文档 |
 | 模型效果或正式评估 | `model_evaluations/AGENTS.md`、比较矩阵的相关行、同谱系最新报告 |
 | Merge Potential 数据 | `MERGE_POTENTIAL_DATA.md` |
-| 阶段方案与开发经验 | `development_tracks/README.md` |
+| 当前方案与候选子技术 | `design_specs/AGENTS.md`，再读目标模块首页 |
+| 阶段复盘与开发经验 | `development_tracks/README.md` |
 | Git 操作 | `GIT_WORKFLOW.md` |
 | 云服务器 | 本机 `CLOUD_SERVER_LOCAL.md` |
 | 追溯修改原因 | `STAGE_INDEX.md`，再读命中的一份 `codex/` 记录 |

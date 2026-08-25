@@ -8,6 +8,7 @@
 | --- | --- |
 | 门户、场景实验室 | `PROJECT_PORTAL.md`、`SCENARIO_LAB.md` |
 | 云端正式训练部署、排队、自动接力 | `CLOUD_TRAINING_RUNBOOK.md`；普通云端小任务不读 |
+| 当前研究方案、候选子技术 | `design_specs/AGENTS.md` 后读目标模块 `README.md` |
 | 模型或训练设计 | `model/AGENTS.md` 后选一份专项文档 |
 | 模型命名或短称 | `model_naming/NAMING_CONVENTION.md`、`model_naming/MODEL_REGISTRY.md` |
 | 正式效果 | `model_evaluations/AGENTS.md` 后选比较矩阵相关行和一份报告 |
@@ -15,4 +16,6 @@
 | 旧分支 | `LEGACY_PROJECT_EXPERIENCE_INDEX.md` 中命中的条目 |
 | Git | `GIT_WORKFLOW.md` |
 
-小参数、bug、UI、工具和文案默认不读模型历史。新研究方案、正式训练或有决策价值的评估才扩展到同谱系报告和必要旧证据；结束后更新报告与比较矩阵，并区分事实、观察、假设和决策。
+小参数、bug、UI、工具和文案默认不读模型历史。新研究方案先更新 `design_specs/` 的当前
+选择；正式训练或有决策价值的评估才扩展到同谱系报告和必要旧证据。结束后更新报告与比较
+矩阵，并区分事实、观察、假设和决策。

@@ -5,6 +5,7 @@
 
 它和其他文档目录的分工如下：
 
+- `docs/design_specs/`保存正在讨论和准备实现的当前方案，回答“接下来按什么规格做”；
 - `docs/codex/`按日期记录一次实现改了什么，适合查事实和提交边界；
 - `docs/model_evaluations/`保存正式模型身份、指标和证据边界；
 - `docs/development_tracks/`按完整开发阶段讲清楚“为什么”，适合后续 Agent 和开发者接手；
