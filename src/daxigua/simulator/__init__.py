@@ -33,6 +33,11 @@ from .scenario_lab_server import ScenarioLabServer
 from .scenario_lab_comparison import ScenarioLabComparisonSession
 from .scenario_lab_live import ScenarioLabLiveSession
 from .scenario_lab_service import ScenarioLabEvaluator, validate_scenario
+from .static_scenes import (
+    StaticSceneDataset,
+    load_static_scene_dataset,
+    save_static_scene_dataset,
+)
 from .voronoi import (
     ScenarioVoronoiEvaluator,
     WeightedVoronoiGraph,
@@ -67,12 +72,14 @@ __all__ = [
     'DEFAULT_FRUIT_TEXTURE_DIR',
     'load_fruit_texture_data_urls',
     'load_trace_archive',
+    'load_static_scene_dataset',
     'RewardComputer',
     'ScenarioLabEvaluator',
     'ScenarioLabComparisonSession',
     'ScenarioLabLiveSession',
     'ScenarioLabServer',
     'ScenarioVoronoiEvaluator',
+    'StaticSceneDataset',
     'SimulatorConfig',
     'SingleEnvAdapter',
     'SpatialRewardComputer',
@@ -83,6 +90,7 @@ __all__ = [
     'diagnose_spatial_reward',
     'fruit_specs',
     'save_trace_archive',
+    'save_static_scene_dataset',
     'TensorVectorSimulator',
     'trace_to_payload',
     'VectorEnv',

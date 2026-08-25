@@ -47,6 +47,10 @@
 - CPU/CUDA一致性与语义测试：`tests/test_mergeability.py`；
 - 纯计算吞吐入口：`tools/benchmark_mergeability.py`；
 - SAB-128真实对局画廊：`tools/visualize_mergeability_gallery.py`。
+- 策略/随机混合复杂场景采集：`tools/collect_complex_scene_dataset.py`；默认在CUDA上同时
+  生成2000个环境，运行到300次投放或自然终局，并保存可重复计算的完整稳定状态。
+- 画廊工具可以直接读取上述静态场景数据集；更换可合成性子方案时无需重新运行物理对局，
+  只需要针对同一批状态重新计算和绘图。
 
 计算器目前只接受稳定场景状态并返回诊断表，没有修改observation、Replay、Policy、奖励或
 反事实训练入口。外部供给通过独立策略接口注入，可以在不修改内部递推和调用方的情况下替换。
