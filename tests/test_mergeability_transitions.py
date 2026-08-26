@@ -8,6 +8,7 @@ import torch
 from daxigua.rl.mergeability_transitions import (
     DEFAULT_NEGATIVE_SEVERITY_BANDS,
     PriorityReservoir,
+    SPATIAL_NEGATIVE_SEVERITY_BANDS,
     clone_compact_scene_batch,
     compact_scene_row,
     negative_severity_codes,
@@ -47,6 +48,23 @@ class MergeabilityTransitionTest(unittest.TestCase):
         self.assertEqual(reservoir.samples(0), ['high', 'middle'])
         self.assertAlmostEqual(reservoir.minimum_priority(0), 0.4)
         self.assertEqual(reservoir.selected_counts(), (2, 0))
+
+    def test_spatial_negative_severity_boundaries(self):
+        delta = torch.tensor([
+            -0.001,
+            -0.01918909,
+            -0.0191891,
+            -0.09908729,
+            -0.0990873,
+            -0.25479979,
+            -0.2547998,
+            0.0,
+        ], dtype=torch.float64)
+        valid = torch.ones_like(delta, dtype=torch.bool)
+        codes = negative_severity_codes(
+            delta, valid, SPATIAL_NEGATIVE_SEVERITY_BANDS
+        )
+        self.assertEqual(codes.tolist(), [0, 0, 1, 1, 2, 2, 3, -1])
 
     def test_compact_snapshot_and_renderer(self):
         config = SimulatorConfig.training_fast(
@@ -120,7 +138,37 @@ class MergeabilityTransitionTest(unittest.TestCase):
             self.assertEqual(report['image_count'], 4)
             self.assertTrue((output / 'overview.png').is_file())
             self.assertTrue((output / 'index.csv').is_file())
+            self.assertTrue((output / 'severity_summary.csv').is_file())
             self.assertTrue((output / 'report.json').is_file())
+
+            spatial_deltas = (-0.01, -0.05, -0.15, -0.30)
+            for sample, delta in zip(samples, spatial_deltas):
+                sample['metric_kind'] = 'spatial'
+                sample['delta'] = delta
+                sample['spatial_delta'] = delta
+                sample['spatial_delta_valid'] = True
+                sample['lineage_coverage'] = 1.0
+                sample['before_scene_value'] = 0.8
+                sample['after_scene_value'] = 0.8 + delta
+                sample['before_current_spatial_score'] = 0.8
+                sample['after_current_spatial_score'] = 0.8 + delta
+            payload['manifest']['metric_kind'] = 'spatial'
+            payload['manifest']['scene_value_definition'] = (
+                'lineage-aligned material-mass-weighted spatial score'
+            )
+            payload['severity_bands'] = severity_band_manifest(
+                SPATIAL_NEGATIVE_SEVERITY_BANDS
+            )
+            spatial_dataset = Path(temporary) / 'spatial_samples.pt'
+            spatial_output = Path(temporary) / 'spatial_gallery'
+            torch.save(payload, spatial_dataset)
+            spatial_report = render(
+                spatial_dataset, spatial_output, dpi=50, progress_interval=4
+            )
+            self.assertEqual(spatial_report['metric_kind'], 'spatial')
+            self.assertEqual(spatial_report['image_count'], 4)
+            self.assertEqual(len(spatial_report['severity_summary']), 4)
+            self.assertTrue((spatial_output / 'overview.png').is_file())
 
 
 if __name__ == '__main__':

@@ -42,6 +42,28 @@ DEFAULT_NEGATIVE_SEVERITY_BANDS = (
 )
 
 
+# 来自2026-08-26本地SAB-128自然分布中，空间负变化幅度的P50/P75/P95。
+# 与旧面积指标分开登记，避免两套完全不同量纲的阈值被误用。
+SPATIAL_NEGATIVE_SEVERITY_BANDS = (
+    NegativeSeverityBand(
+        0, 'slight', '轻微', 0.0, 0.0191891,
+        'spatial negative magnitude below P50',
+    ),
+    NegativeSeverityBand(
+        1, 'moderate', '一般', 0.0191891, 0.0990873,
+        'spatial negative magnitude P50-P75',
+    ),
+    NegativeSeverityBand(
+        2, 'severe', '严重', 0.0990873, 0.2547998,
+        'spatial negative magnitude P75-P95',
+    ),
+    NegativeSeverityBand(
+        3, 'extreme', '极端', 0.2547998, None,
+        'spatial negative magnitude at or above P95',
+    ),
+)
+
+
 COMPACT_SCENE_FIELDS = (
     'positions',
     'levels',
@@ -209,6 +231,7 @@ __all__ = [
     'DEFAULT_NEGATIVE_SEVERITY_BANDS',
     'NegativeSeverityBand',
     'PriorityReservoir',
+    'SPATIAL_NEGATIVE_SEVERITY_BANDS',
     'capture_compact_scene_rows',
     'clone_compact_scene_batch',
     'compact_scene_row',

@@ -7,6 +7,7 @@ import csv
 import json
 import math
 from pathlib import Path
+import statistics
 import sys
 
 
@@ -87,7 +88,7 @@ def _contribution_map(scene):
     }
 
 
-def _transition_analysis(sample):
+def _raw_transition_analysis(sample):
     before = _contribution_map(sample['before'])
     after = _contribution_map(sample['after'])
     before_ids = set(before)
@@ -110,12 +111,73 @@ def _transition_analysis(sample):
         'after_ids': after_ids,
         'disappeared_ids': disappeared,
         'created_ids': created,
-        'top_loss_ids': {key for _, key in common_losses[:5]},
+        'before_loss_ids': {key for _, key in common_losses[:5]},
+        'after_loss_ids': {key for _, key in common_losses[:5]},
         'persisted_delta': persisted_delta,
         'disappeared_delta': disappeared_delta,
         'created_delta': created_delta,
         'common_losses': common_losses,
+        'lineage_rows': [],
     }
+
+
+def _spatial_transition_analysis(sample):
+    before_fruits = {fruit['id']: fruit for fruit in _active_fruits(sample['before'])}
+    after_fruits = {fruit['id']: fruit for fruit in _active_fruits(sample['after'])}
+    lineage = {fruit_id: fruit_id for fruit_id in before_fruits}
+    events = sample['merge_events']
+    for index in range(int(sample['merge_count'])):
+        sources = {
+            int(events['source_ids'][index, 0].item()),
+            int(events['source_ids'][index, 1].item()),
+        }
+        replacement = int(events['new_fruit_ids'][index].item())
+        for original, current in tuple(lineage.items()):
+            if current in sources:
+                lineage[original] = replacement if replacement > 0 else None
+
+    rows = []
+    total_mass = sum(
+        2 ** max(0, fruit['level'] - 1) for fruit in before_fruits.values()
+    )
+    for original, final in lineage.items():
+        before = before_fruits[original]
+        after = after_fruits.get(final) if final is not None else None
+        if after is None:
+            continue
+        delta = after['mergeability'] - before['mergeability']
+        mass = 2 ** max(0, before['level'] - 1)
+        rows.append({
+            'before_id': original,
+            'after_id': final,
+            'before_score': before['mergeability'],
+            'after_score': after['mergeability'],
+            'delta': delta,
+            'weighted_delta': delta * mass / max(total_mass, 1),
+        })
+    rows.sort(key=lambda row: row['weighted_delta'])
+    top_losses = [row for row in rows if row['weighted_delta'] < 0.0][:5]
+    before_ids = set(before_fruits)
+    after_ids = set(after_fruits)
+    return {
+        'before_ids': before_ids,
+        'after_ids': after_ids,
+        'disappeared_ids': before_ids - after_ids,
+        'created_ids': after_ids - before_ids,
+        'before_loss_ids': {row['before_id'] for row in top_losses},
+        'after_loss_ids': {row['after_id'] for row in top_losses},
+        'persisted_delta': math.nan,
+        'disappeared_delta': math.nan,
+        'created_delta': math.nan,
+        'common_losses': [],
+        'lineage_rows': rows,
+    }
+
+
+def _transition_analysis(sample):
+    if sample.get('metric_kind') == 'spatial':
+        return _spatial_transition_analysis(sample)
+    return _raw_transition_analysis(sample)
 
 
 def _draw_board(
@@ -126,6 +188,7 @@ def _draw_board(
         title,
         role,
         analysis,
+        metric_kind='raw',
         drop_x=None,
         dropped_level=None,
         dropped_id=None):
@@ -166,7 +229,13 @@ def _draw_board(
         elif role == 'after' and fruit_id in analysis['created_ids']:
             edge = '#16a34a'
             linewidth = 3.0
-        elif fruit_id in analysis['top_loss_ids']:
+        elif (
+                role == 'before'
+                and fruit_id in analysis['before_loss_ids']
+        ) or (
+                role == 'after'
+                and fruit_id in analysis['after_loss_ids']
+        ):
             edge = '#f97316'
             linewidth = 2.6
         else:
@@ -180,7 +249,9 @@ def _draw_board(
         ))
         axis.text(
             fruit['x'], fruit['y'],
-            f"L{fruit['level']} #{fruit_id}\nM {fruit['mergeability']:.2f}",
+            f"L{fruit['level']} #{fruit_id}\n"
+            f"{'S' if metric_kind == 'spatial' else 'M'} "
+            f"{fruit['mergeability']:.2f}",
             ha='center', va='center', fontsize=5.8,
             color='#172033', weight='bold', zorder=4,
         )
@@ -211,19 +282,31 @@ def _merge_lines(sample):
     return ', '.join(rows[:5]) + (f', +{len(rows) - 5}' if len(rows) > 5 else '')
 
 
+def _lineage_loss_lines(analysis, limit=4):
+    rows = [row for row in analysis['lineage_rows'] if row['weighted_delta'] < 0.0]
+    return [
+        f"  #{row['before_id']} -> #{row['after_id']}: "
+        f"{row['before_score']:.2f} -> {row['after_score']:.2f} "
+        f"(weighted {row['weighted_delta']:+.4f})"
+        for row in rows[:limit]
+    ] or ['  -']
+
+
 def _draw_info(axis, sample, band, analysis):
     axis.axis('off')
     accent = SEVERITY_COLORS.get(band['key'], '#991b1b')
+    spatial = sample.get('metric_kind') == 'spatial'
     axis.text(
         0.0, 0.99,
         f"{band['key'].upper()} NEGATIVE CHANGE\n"
-        f"scene delta = {float(sample['delta']):,.2f}",
+        f"{'spatial' if spatial else 'scene'} delta = "
+        f"{float(sample['delta']):{'.4f' if spatial else ',.2f'}}",
         ha='left', va='top', transform=axis.transAxes,
         fontsize=15, color=accent, weight='bold', linespacing=1.35,
     )
     before = sample['before']
     after = sample['after']
-    lines = [
+    common_lines = [
         f"Episode: {int(sample['episode_id'])}",
         f"Environment: {int(sample['environment_id'])}",
         f"Episode drop: {int(sample['episode_drop'])}",
@@ -237,21 +320,43 @@ def _draw_info(axis, sample, band, analysis):
         f"Merges: {int(sample['merge_count'])}",
         f"Terminal after drop: {bool(sample['terminal'])}",
         '',
-        'Scene mergeability',
-        f"  {float(sample['before_scene_value']):,.2f}",
-        f"→ {float(sample['after_scene_value']):,.2f}",
-        f"  Δ {float(sample['delta']):+,.2f}",
-        '',
-        'Contribution decomposition',
-        f"  persisted {analysis['persisted_delta']:+,.2f}",
-        f"  disappeared {analysis['disappeared_delta']:+,.2f}",
-        f"  created {analysis['created_delta']:+,.2f}",
-        '',
-        f"Fruits: {int(before['fruit_count'])} → {int(after['fruit_count'])}",
-        f"Disappeared IDs: {_short_ids(analysis['disappeared_ids'])}",
-        f"Created IDs: {_short_ids(analysis['created_ids'])}",
-        f"Merge chain: {_merge_lines(sample) or '-'}",
     ]
+    if spatial:
+        lines = common_lines + [
+            'Old-material aligned spatial score',
+            f"  {float(sample['before_scene_value']):.4f}",
+            f"→ {float(sample['after_scene_value']):.4f}",
+            f"  Δ {float(sample['delta']):+.4f}",
+            f"  lineage coverage {float(sample['lineage_coverage']):.3f}",
+            '',
+            'Whole-scene spatial score',
+            f"  {float(sample['before_current_spatial_score']):.4f}",
+            f"→ {float(sample['after_current_spatial_score']):.4f}",
+            '',
+            'Largest old-material losses',
+            *_lineage_loss_lines(analysis),
+            '',
+            f"Fruits: {int(before['fruit_count'])} → {int(after['fruit_count'])}",
+            f"Created IDs: {_short_ids(analysis['created_ids'])}",
+            f"Merge chain: {_merge_lines(sample) or '-'}",
+        ]
+    else:
+        lines = common_lines + [
+            'Scene mergeability',
+            f"  {float(sample['before_scene_value']):,.2f}",
+            f"→ {float(sample['after_scene_value']):,.2f}",
+            f"  Δ {float(sample['delta']):+,.2f}",
+            '',
+            'Contribution decomposition',
+            f"  persisted {analysis['persisted_delta']:+,.2f}",
+            f"  disappeared {analysis['disappeared_delta']:+,.2f}",
+            f"  created {analysis['created_delta']:+,.2f}",
+            '',
+            f"Fruits: {int(before['fruit_count'])} → {int(after['fruit_count'])}",
+            f"Disappeared IDs: {_short_ids(analysis['disappeared_ids'])}",
+            f"Created IDs: {_short_ids(analysis['created_ids'])}",
+            f"Merge chain: {_merge_lines(sample) or '-'}",
+        ]
     axis.text(
         0.0, 0.78, '\n'.join(lines),
         ha='left', va='top', transform=axis.transAxes,
@@ -260,10 +365,10 @@ def _draw_info(axis, sample, band, analysis):
     )
     axis.text(
         0.0, 0.015,
-        'fill: raw mergeability\n'
+        f"fill: {'spatial score' if spatial else 'raw mergeability'}\n"
         'red before edge: disappeared ID\n'
         'green after edge: created ID\n'
-        'orange edge: largest persisted losses',
+        'orange edge: largest old-material losses',
         ha='left', va='bottom', transform=axis.transAxes,
         fontsize=8.2, color='#64748b', linespacing=1.35,
     )
@@ -271,6 +376,8 @@ def _draw_info(axis, sample, band, analysis):
 
 def render_sample(sample, band, config, output_path, *, dpi):
     analysis = _transition_analysis(sample)
+    spatial = sample.get('metric_kind') == 'spatial'
+    value_format = '.3f' if spatial else ',.0f'
     figure, axes = plt.subplots(
         1, 3, figsize=(11.2, 8.6), squeeze=False,
         gridspec_kw={'width_ratios': (1.0, 1.0, 0.86)},
@@ -278,10 +385,10 @@ def render_sample(sample, band, config, output_path, *, dpi):
     _draw_board(
         axes[0][0], sample['before'], config,
         title=(
-            f"Before · total={float(sample['before_scene_value']):,.0f} · "
+            f"Before · value={float(sample['before_scene_value']):{value_format}} · "
             f"fruits={int(sample['before']['fruit_count'])}"
         ),
-        role='before', analysis=analysis,
+        role='before', analysis=analysis, metric_kind=sample.get('metric_kind', 'raw'),
         drop_x=float(sample['drop_x']),
         dropped_level=int(sample['dropped_level']),
         dropped_id=int(sample['dropped_fruit_id']),
@@ -289,10 +396,10 @@ def render_sample(sample, band, config, output_path, *, dpi):
     _draw_board(
         axes[0][1], sample['after'], config,
         title=(
-            f"After stable · total={float(sample['after_scene_value']):,.0f} · "
+            f"After stable · value={float(sample['after_scene_value']):{value_format}} · "
             f"fruits={int(sample['after']['fruit_count'])}"
         ),
-        role='after', analysis=analysis,
+        role='after', analysis=analysis, metric_kind=sample.get('metric_kind', 'raw'),
     )
     _draw_info(axes[0][2], sample, band, analysis)
     color_bar = figure.colorbar(
@@ -300,8 +407,12 @@ def render_sample(sample, band, config, output_path, *, dpi):
         ax=axes[0][:2].tolist(), orientation='horizontal',
         fraction=0.025, pad=0.025,
     )
-    color_bar.set_label('raw mergeability: low → high', fontsize=8)
+    color_bar.set_label(
+        ('spatial score' if spatial else 'raw mergeability') + ': low → high',
+        fontsize=8,
+    )
     figure.suptitle(
+        'One-drop negative spatial transition' if spatial else
         'One-drop negative mergeability transition',
         fontsize=13, weight='bold', y=0.995,
     )
@@ -321,13 +432,19 @@ def _draw_overview(payload, samples_by_band, output_path):
         samples = samples_by_band[int(band['code'])]
         sample = samples[len(samples) // 2]
         analysis = _transition_analysis(sample)
+        spatial = sample.get('metric_kind') == 'spatial'
+        delta_text = (
+            f"{float(sample['delta']):.4f}"
+            if spatial else f"{float(sample['delta']):,.0f}"
+        )
         _draw_board(
             axes[row][0], sample['before'], config,
             title=(
                 f"{band['key'].upper()} before · "
-                f"Δ={float(sample['delta']):,.0f}"
+                f"Δ={delta_text}"
             ),
             role='before', analysis=analysis,
+            metric_kind=sample.get('metric_kind', 'raw'),
             drop_x=float(sample['drop_x']),
             dropped_level=int(sample['dropped_level']),
             dropped_id=int(sample['dropped_fruit_id']),
@@ -336,14 +453,43 @@ def _draw_overview(payload, samples_by_band, output_path):
             axes[row][1], sample['after'], config,
             title=f"{band['key'].upper()} after stable",
             role='after', analysis=analysis,
+            metric_kind=sample.get('metric_kind', 'raw'),
         )
     figure.suptitle(
-        'Negative mergeability transition severity overview',
+        'Negative transition severity overview',
         fontsize=15, weight='bold', y=0.998,
     )
     figure.tight_layout(rect=(0, 0, 1, 0.992))
     figure.savefig(output_path, dpi=130, bbox_inches='tight')
     plt.close(figure)
+
+
+def _severity_summary(samples_by_band, band_by_code):
+    rows = []
+    for code in sorted(samples_by_band):
+        samples = samples_by_band[code]
+        deltas = [float(sample['delta']) for sample in samples]
+        drops = [int(sample['episode_drop']) for sample in samples]
+        merge_counts = [int(sample['merge_count']) for sample in samples]
+        merge_scores = [int(sample['score_delta']) for sample in samples]
+        rows.append({
+            'severity_code': code,
+            'severity_key': band_by_code[code]['key'],
+            'count': len(samples),
+            'delta_min': min(deltas),
+            'delta_median': statistics.median(deltas),
+            'delta_max': max(deltas),
+            'episode_drop_median': statistics.median(drops),
+            'no_merge_count': sum(value == 0 for value in merge_counts),
+            'single_merge_count': sum(value == 1 for value in merge_counts),
+            'two_to_three_merge_count': sum(
+                2 <= value <= 3 for value in merge_counts
+            ),
+            'four_plus_merge_count': sum(value >= 4 for value in merge_counts),
+            'merge_score_mean': statistics.fmean(merge_scores),
+            'terminal_count': sum(bool(sample['terminal']) for sample in samples),
+        })
+    return rows
 
 
 def render(dataset_path, output_dir, *, dpi=145, progress_interval=16):
@@ -371,11 +517,16 @@ def render(dataset_path, output_dir, *, dpi=145, progress_interval=16):
         directory = output_dir / f"{code + 1:02d}_{band['key']}"
         directory.mkdir(parents=True, exist_ok=True)
         for index, sample in enumerate(samples_by_band[code], 1):
-            magnitude = round(abs(float(sample['delta'])))
-            filename = f'sample_{index:03d}_neg_{magnitude:07d}.png'
+            if sample.get('metric_kind') == 'spatial':
+                magnitude = f"{abs(float(sample['delta'])):.4f}".replace('.', 'p')
+                filename = f'sample_{index:03d}_neg_{magnitude}.png'
+            else:
+                magnitude = round(abs(float(sample['delta'])))
+                filename = f'sample_{index:03d}_neg_{magnitude:07d}.png'
             path = directory / filename
             analysis = render_sample(sample, band, config, path, dpi=dpi)
             relative = path.relative_to(output_dir).as_posix()
+            spatial = sample.get('metric_kind') == 'spatial'
             rows.append({
                 'file': relative,
                 'severity_code': code,
@@ -394,9 +545,23 @@ def render(dataset_path, output_dir, *, dpi=145, progress_interval=16):
                 'merge_count': int(sample['merge_count']),
                 'score_delta': int(sample['score_delta']),
                 'terminal': bool(sample['terminal']),
-                'persisted_delta': float(analysis['persisted_delta']),
-                'disappeared_delta': float(analysis['disappeared_delta']),
-                'created_delta': float(analysis['created_delta']),
+                'metric_kind': sample.get('metric_kind', 'raw'),
+                'lineage_coverage': float(sample.get('lineage_coverage', 1.0)),
+                'before_current_spatial_score': float(
+                    sample.get('before_current_spatial_score', math.nan)
+                ),
+                'after_current_spatial_score': float(
+                    sample.get('after_current_spatial_score', math.nan)
+                ),
+                'persisted_delta': (
+                    None if spatial else float(analysis['persisted_delta'])
+                ),
+                'disappeared_delta': (
+                    None if spatial else float(analysis['disappeared_delta'])
+                ),
+                'created_delta': (
+                    None if spatial else float(analysis['created_delta'])
+                ),
                 'disappeared_count': len(analysis['disappeared_ids']),
                 'created_count': len(analysis['created_ids']),
             })
@@ -409,12 +574,18 @@ def render(dataset_path, output_dir, *, dpi=145, progress_interval=16):
 
     overview_path = output_dir / 'overview.png'
     _draw_overview(payload, samples_by_band, overview_path)
+    severity_rows = _severity_summary(samples_by_band, band_by_code)
     fieldnames = list(rows[0]) if rows else []
     with (output_dir / 'index.csv').open(
             'w', encoding='utf-8-sig', newline='') as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+    with (output_dir / 'severity_summary.csv').open(
+            'w', encoding='utf-8-sig', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(severity_rows[0]))
+        writer.writeheader()
+        writer.writerows(severity_rows)
     report = {
         'format_version': 1,
         'purpose': 'mergeability_negative_transition_human_gallery',
@@ -422,6 +593,7 @@ def render(dataset_path, output_dir, *, dpi=145, progress_interval=16):
         'scene_value_definition': payload['manifest'].get(
             'scene_value_definition'
         ),
+        'metric_kind': payload['manifest'].get('metric_kind', 'raw'),
         'comparison_semantics': 'one real drop: stable before -> stable after',
         'severity_bands': bands,
         'image_count': len(rows),
@@ -429,6 +601,7 @@ def render(dataset_path, output_dir, *, dpi=145, progress_interval=16):
             band_by_code[code]['key']: len(samples_by_band[code])
             for code in sorted(samples_by_band)
         },
+        'severity_summary': severity_rows,
         'overview': overview_path.name,
         'images': rows,
     }
