@@ -82,6 +82,9 @@ class ExternalSupplyEstimate(NamedTuple):
 class MergeabilityResult(NamedTuple):
     score: torch.Tensor
     difficulty: torch.Tensor
+    material_score: torch.Tensor
+    material_difficulty: torch.Tensor
+    spatial_score: torch.Tensor
     internal_score: torch.Tensor
     internal_difficulty: torch.Tensor
     external_score: torch.Tensor
@@ -314,6 +317,80 @@ class MergeabilityCalculator(nn.Module):
         )
         return output_slots, selected_valid
 
+    def _material_dependency_candidates(self, positions, levels, active):
+        """只按等级选择候选，不读取距离或接触关系。"""
+
+        _, fruits, _ = positions.shape
+        indices = torch.arange(fruits, device=positions.device)
+        pair_valid = (
+            active.unsqueeze(2)
+            & active.unsqueeze(1)
+            & (indices[:, None] != indices[None, :]).unsqueeze(0)
+        )
+        target_level = levels.to(torch.long).unsqueeze(2)
+        candidate_level = levels.to(torch.long).unsqueeze(1)
+        same = pair_valid & (candidate_level == target_level)
+        lower = pair_valid & (candidate_level < target_level)
+        eligible = torch.where(same.any(dim=2, keepdim=True), same, lower)
+        level_gap = (target_level - candidate_level).clamp_min(0)
+        # 同等级候选之间只用槽位做稳定打破，不让几何位置进入材料分。
+        slot_tie_break = indices.to(positions.dtype).view(1, 1, -1) * 1e-6
+        priority = -2.0 * level_gap.to(positions.dtype) - slot_tie_break
+        priority = priority.masked_fill(~eligible, float('-inf'))
+        selected_count = min(self.config.top_k, fruits)
+        selected_priority, selected_slots = priority.topk(
+            selected_count, dim=2, largest=True
+        )
+        selected_valid = torch.isfinite(selected_priority)
+        if selected_count < self.config.top_k:
+            padding = self.config.top_k - selected_count
+            selected_slots = torch.cat((
+                selected_slots,
+                torch.zeros(
+                    (*selected_slots.shape[:2], padding),
+                    dtype=selected_slots.dtype,
+                    device=selected_slots.device,
+                ),
+            ), dim=2)
+            selected_valid = torch.cat((
+                selected_valid,
+                torch.zeros(
+                    (*selected_valid.shape[:2], padding),
+                    dtype=torch.bool,
+                    device=selected_valid.device,
+                ),
+            ), dim=2)
+        output_slots = torch.where(
+            selected_valid, selected_slots, torch.full_like(selected_slots, -1)
+        )
+        return output_slots, selected_valid
+
+    def _material_external(self, positions, radii, levels, active):
+        """保留合法投放等级成本，但假设顶部材料不受空间通道限制。"""
+
+        target_level = levels.to(torch.long).clamp(
+            MIN_FRUIT_LEVEL, MAX_FRUIT_LEVEL
+        )
+        entry_level = torch.minimum(
+            target_level,
+            torch.full_like(target_level, SPAWN_FRUIT_MAX_LEVEL),
+        )
+        level_gap = (target_level - entry_level).clamp_min(0)
+        difficulty = torch.pow(
+            torch.full_like(radii, 2.0), level_gap.to(positions.dtype)
+        )
+        difficulty = torch.where(
+            active,
+            difficulty,
+            torch.full_like(difficulty, float('inf')),
+        )
+        return ExternalSupplyEstimate(
+            difficulty=difficulty,
+            capacity_radius=torch.zeros_like(radii),
+            capacity_level=target_level * active.to(target_level.dtype),
+            entry_level=entry_level * active.to(entry_level.dtype),
+        )
+
     def _score(self, difficulty):
         score = 1.0 / (
             1.0 + difficulty / float(self.config.score_cost_scale)
@@ -322,12 +399,9 @@ class MergeabilityCalculator(nn.Module):
             torch.isfinite(difficulty), score, torch.zeros_like(score)
         )
 
-    def compute(self, positions, radii, levels, active):
-        self._validate(positions, radii, levels, active)
+    def _solve(self, positions, levels, active, dependency_slots,
+               dependency_valid, external):
         batch, fruits = levels.shape
-        dependency_slots, dependency_valid = self._dependency_candidates(
-            positions, radii, levels, active
-        )
         safe_slots = dependency_slots.clamp_min(0)
         expanded_levels = levels.to(torch.long).unsqueeze(1).expand(
             batch, fruits, fruits
@@ -338,9 +412,6 @@ class MergeabilityCalculator(nn.Module):
         same_dependency = dependency_valid & (level_gap == 0)
         lower_dependency = dependency_valid & (level_gap > 0)
 
-        external = self.external_supply.estimate(
-            positions, radii, levels, active
-        )
         overall_difficulty = external.difficulty.clone()
         internal_difficulty = torch.full_like(
             overall_difficulty, float('inf')
@@ -432,10 +503,62 @@ class MergeabilityCalculator(nn.Module):
             primary_dependency,
             torch.full_like(primary_dependency, -1),
         )
-        score = self._score(overall_difficulty) * active.to(positions.dtype)
+        return (
+            overall_difficulty,
+            internal_difficulty,
+            source,
+            primary_dependency,
+        )
+
+    def compute(self, positions, radii, levels, active):
+        self._validate(positions, radii, levels, active)
+        dependency_slots, dependency_valid = self._dependency_candidates(
+            positions, radii, levels, active
+        )
+        external = self.external_supply.estimate(
+            positions, radii, levels, active
+        )
+        (
+            overall_difficulty,
+            internal_difficulty,
+            source,
+            primary_dependency,
+        ) = self._solve(
+            positions,
+            levels,
+            active,
+            dependency_slots,
+            dependency_valid,
+            external,
+        )
+        material_slots, material_valid = (
+            self._material_dependency_candidates(positions, levels, active)
+        )
+        material_external = self._material_external(
+            positions, radii, levels, active
+        )
+        material_difficulty, _, _, _ = self._solve(
+            positions,
+            levels,
+            active,
+            material_slots,
+            material_valid,
+            material_external,
+        )
+        active_float = active.to(positions.dtype)
+        score = self._score(overall_difficulty) * active_float
+        material_score = self._score(material_difficulty) * active_float
+        spatial_score = torch.where(
+            material_score > 0.0,
+            score / material_score.clamp_min(1e-12),
+            torch.zeros_like(score),
+        ).clamp_(0.0, 1.0) * active_float
         return MergeabilityResult(
             score=score,
             difficulty=overall_difficulty,
+            material_score=material_score,
+            material_difficulty=material_difficulty,
+            spatial_score=spatial_score,
             internal_score=self._score(internal_difficulty),
             internal_difficulty=internal_difficulty,
             external_score=self._score(external.difficulty),

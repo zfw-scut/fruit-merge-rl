@@ -32,7 +32,7 @@ SIGNED_QUANTILES = (
     0.50, 0.75, 0.90, 0.95, 0.975, 0.99, 0.995, 0.999, 1.0,
 )
 MAGNITUDE_QUANTILES = (0.50, 0.75, 0.90, 0.95, 0.975, 0.99, 0.995, 0.999)
-LOAD_COLUMNS = (
+BASE_LOAD_COLUMNS = (
     'episode_id',
     'episode_drop',
     'fruit_count',
@@ -42,6 +42,15 @@ LOAD_COLUMNS = (
     'delta',
     'delta_valid',
     'done',
+)
+STRUCTURAL_COLUMNS = (
+    'spatial_scene_score',
+    'material_mass',
+    'spatial_delta',
+    'spatial_delta_valid',
+    'lineage_coverage',
+    'merge_count',
+    'merge_score',
 )
 
 
@@ -83,6 +92,15 @@ def _distribution(values):
         'max': float(values.max().item()),
         'quantiles': _quantiles(values, SIGNED_QUANTILES),
     }
+
+
+def _correlation(x, y):
+    valid = torch.isfinite(x) & torch.isfinite(y)
+    x = x[valid].to(torch.float64)
+    y = y[valid].to(torch.float64)
+    if x.numel() < 2 or float(x.std()) == 0.0 or float(y.std()) == 0.0:
+        return math.nan
+    return float(torch.corrcoef(torch.stack((x, y)))[0, 1].item())
 
 
 def _stage_edges(max_drop):
@@ -337,6 +355,149 @@ def _plot_threshold_reference(delta, positive, negative_magnitude, output):
     plt.close(figure)
 
 
+def _merge_group_codes(merge_count):
+    return torch.where(
+        merge_count == 0,
+        torch.zeros_like(merge_count),
+        torch.where(
+            merge_count == 1,
+            torch.ones_like(merge_count),
+            torch.where(
+                merge_count <= 3,
+                torch.full_like(merge_count, 2),
+                torch.full_like(merge_count, 3),
+            ),
+        ),
+    )
+
+
+MERGE_GROUP_LABELS = ('no merge', 'single merge', '2-3 merges', '4+ merges')
+MERGE_GROUP_COLORS = ('#64748b', '#2563eb', '#f59e0b', '#dc2626')
+
+
+def _spatial_group_rows(columns, valid):
+    groups = _merge_group_codes(columns['merge_count'].to(torch.int64))
+    rows = []
+    for code, label in enumerate(MERGE_GROUP_LABELS):
+        mask = valid & (groups == code)
+        values = columns['spatial_delta'][mask].to(torch.float32)
+        merge_score = columns['merge_score'][mask].to(torch.float32)
+        raw_delta = columns['delta'][mask].to(torch.float32)
+        distribution = _distribution(values)
+        quantiles = distribution.get('quantiles', {})
+        raw_distribution = _distribution(raw_delta)
+        rows.append({
+            'merge_group': label,
+            'count': int(values.numel()),
+            'spatial_delta_mean': distribution.get('mean', math.nan),
+            'spatial_delta_p05': quantiles.get('0.05', math.nan),
+            'spatial_delta_median': quantiles.get('0.5', math.nan),
+            'spatial_delta_p95': quantiles.get('0.95', math.nan),
+            'negative_fraction': (
+                float((values < 0.0).float().mean().item())
+                if values.numel() else math.nan
+            ),
+            'raw_delta_mean': raw_distribution.get('mean', math.nan),
+            'raw_delta_median': raw_distribution.get(
+                'quantiles', {}
+            ).get('0.5', math.nan),
+            'merge_score_mean': (
+                float(merge_score.mean().item())
+                if merge_score.numel() else math.nan
+            ),
+        })
+    return rows
+
+
+def _plot_spatial_distribution(columns, valid, group_rows, output):
+    delta = columns['spatial_delta'][valid].to(torch.float32)
+    groups = _merge_group_codes(columns['merge_count'].to(torch.int64))[valid]
+    figure, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes[0, 0].hist(delta.numpy(), bins=140, range=(-1.0, 1.0), color='#7c3aed')
+    axes[0, 0].axvline(0.0, color='#111827', linewidth=1)
+    axes[0, 0].set_title('Lineage-aligned spatial delta')
+    axes[0, 0].set_xlabel('spatial delta')
+    axes[0, 0].set_ylabel('samples')
+
+    values_by_group = [
+        delta[groups == code].numpy() for code in range(len(MERGE_GROUP_LABELS))
+    ]
+    axes[0, 1].boxplot(
+        values_by_group, tick_labels=MERGE_GROUP_LABELS, showfliers=False
+    )
+    axes[0, 1].axhline(0.0, color='#111827', linewidth=1)
+    axes[0, 1].tick_params(axis='x', rotation=20)
+    axes[0, 1].set_title('Spatial delta by merge class')
+
+    scene = columns['spatial_scene_score'].to(torch.float32)
+    axes[1, 0].hist(scene.numpy(), bins=100, range=(0.0, 1.0), color='#059669')
+    axes[1, 0].set_xlabel('current scene spatial score')
+    axes[1, 0].set_ylabel('samples')
+    axes[1, 0].set_title('Current structural score')
+
+    coverage = columns['lineage_coverage'].to(torch.float32)
+    axes[1, 1].hist(coverage.numpy(), bins=100, range=(0.0, 1.0), color='#0284c7')
+    axes[1, 1].set_xlabel('lineage coverage')
+    axes[1, 1].set_ylabel('samples')
+    axes[1, 1].set_title('Comparable old-material coverage')
+    figure.suptitle('Spatial mergeability rollout distribution', fontsize=16)
+    figure.tight_layout()
+    figure.savefig(output, dpi=150, bbox_inches='tight')
+    plt.close(figure)
+
+
+def _plot_merge_relationship(columns, valid, group_rows, sample_rows, output):
+    valid_rows = torch.nonzero(valid, as_tuple=False).flatten()
+    selected = valid_rows.index_select(
+        0, _sample_indices(valid_rows.numel(), sample_rows)
+    )
+    spatial = columns['spatial_delta'][selected].to(torch.float32).numpy()
+    merge_score = columns['merge_score'][selected].to(torch.float32).numpy()
+    merge_count = columns['merge_count'][selected].to(torch.float32).numpy()
+    raw_delta = columns['delta'][selected].to(torch.float32).numpy()
+    figure, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes[0, 0].scatter(merge_score, spatial, s=8, alpha=0.35, color='#dc2626')
+    axes[0, 0].axhline(0.0, color='#111827', linewidth=1)
+    axes[0, 0].set_xlabel('merge score gained by drop')
+    axes[0, 0].set_ylabel('spatial delta')
+    axes[0, 0].set_title('Merge score vs spatial structure')
+
+    axes[0, 1].scatter(merge_count, spatial, s=8, alpha=0.35, color='#ea580c')
+    axes[0, 1].axhline(0.0, color='#111827', linewidth=1)
+    axes[0, 1].set_xlabel('merge count')
+    axes[0, 1].set_ylabel('spatial delta')
+    axes[0, 1].set_title('Merge-chain length vs spatial structure')
+
+    axes[1, 0].scatter(raw_delta, spatial, s=8, alpha=0.3, color='#7c3aed')
+    axes[1, 0].axhline(0.0, color='#111827', linewidth=1)
+    axes[1, 0].set_xlabel('old area-weighted delta')
+    axes[1, 0].set_ylabel('spatial delta')
+    axes[1, 0].set_title('Old metric vs corrected metric')
+
+    x = np.arange(len(group_rows))
+    axes[1, 1].bar(
+        x, [row['spatial_delta_median'] for row in group_rows],
+        color=MERGE_GROUP_COLORS,
+    )
+    axes[1, 1].axhline(0.0, color='#111827', linewidth=1)
+    axes[1, 1].set_xticks(x, MERGE_GROUP_LABELS, rotation=20, ha='right')
+    axes[1, 1].set_ylabel('median spatial delta')
+    axes[1, 1].set_title('Median effect by merge class')
+    figure.suptitle('Merge score and spatial change', fontsize=16)
+    figure.tight_layout()
+    figure.savefig(output, dpi=150, bbox_inches='tight')
+    plt.close(figure)
+
+
+def _available_table_columns(dataset_dir):
+    raw_dir = Path(dataset_dir) / 'raw'
+    first = next(iter(sorted(raw_dir.glob('scene_values-*.pt'))), None)
+    if first is None:
+        return set()
+    payload = torch.load(first, map_location='cpu', weights_only=False)
+    return set(payload.get('columns', {}))
+
+
 def analyze(dataset_dir, *, output_dir=None, sample_rows=250_000):
     dataset_dir = Path(dataset_dir).resolve()
     output_dir = (
@@ -347,8 +508,14 @@ def analyze(dataset_dir, *, output_dir=None, sample_rows=250_000):
         raise FileExistsError(f'output directory is not empty: {output_dir}')
     output_dir.mkdir(parents=True, exist_ok=True)
     columns = load_table_columns(
-        dataset_dir, 'scene_values', LOAD_COLUMNS, area='raw'
+        dataset_dir, 'scene_values', BASE_LOAD_COLUMNS, area='raw'
     )
+    available = _available_table_columns(dataset_dir)
+    has_structural = set(STRUCTURAL_COLUMNS).issubset(available)
+    if has_structural:
+        columns.update(load_table_columns(
+            dataset_dir, 'scene_values', STRUCTURAL_COLUMNS, area='raw'
+        ))
     if columns['delta'].numel() == 0:
         raise ValueError('dataset has no scene value rows')
     valid = columns['delta_valid'] & torch.isfinite(columns['delta'])
@@ -389,6 +556,45 @@ def analyze(dataset_dir, *, output_dir=None, sample_rows=250_000):
         },
         'stage_rows': stage_rows,
     }
+    spatial_valid = None
+    spatial_group_rows = None
+    if has_structural:
+        spatial_valid = (
+            columns['spatial_delta_valid']
+            & torch.isfinite(columns['spatial_delta'])
+        )
+        spatial_values = columns['spatial_delta'][spatial_valid].to(torch.float32)
+        spatial_group_rows = _spatial_group_rows(columns, spatial_valid)
+        summary['spatial'] = {
+            'definition': (
+                'lineage-aligned material-mass-weighted change over material '
+                'existing before each drop'
+            ),
+            'valid_rows': int(spatial_values.numel()),
+            'invalid_rows': int((~spatial_valid).sum().item()),
+            'full_lineage_fraction': float(
+                columns['spatial_delta_valid'].float().mean().item()
+            ),
+            'delta': _distribution(spatial_values),
+            'zero_fraction': float(
+                (spatial_values == 0.0).float().mean().item()
+            ),
+            'positive_fraction': float(
+                (spatial_values > 0.0).float().mean().item()
+            ),
+            'negative_fraction': float(
+                (spatial_values < 0.0).float().mean().item()
+            ),
+            'correlation_merge_score_vs_spatial_delta': _correlation(
+                columns['merge_score'][spatial_valid].to(torch.float32),
+                spatial_values,
+            ),
+            'correlation_merge_score_vs_old_delta': _correlation(
+                columns['merge_score'][spatial_valid].to(torch.float32),
+                columns['delta'][spatial_valid].to(torch.float32),
+            ),
+            'merge_groups': spatial_group_rows,
+        }
     (output_dir / 'summary.json').write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8'
     )
@@ -398,6 +604,8 @@ def analyze(dataset_dir, *, output_dir=None, sample_rows=250_000):
     ]
     _write_csv(output_dir / 'delta_quantiles.csv', quantile_rows)
     _write_csv(output_dir / 'stage_summary.csv', stage_rows)
+    if spatial_group_rows is not None:
+        _write_csv(output_dir / 'spatial_merge_groups.csv', spatial_group_rows)
     _plot_distribution(
         delta, positive, negative_magnitude, summary,
         output_dir / '01_delta_distribution.png',
@@ -411,6 +619,15 @@ def analyze(dataset_dir, *, output_dir=None, sample_rows=250_000):
         delta, positive, negative_magnitude,
         output_dir / '04_threshold_reference.png',
     )
+    if spatial_valid is not None:
+        _plot_spatial_distribution(
+            columns, spatial_valid, spatial_group_rows,
+            output_dir / '05_spatial_distribution.png',
+        )
+        _plot_merge_relationship(
+            columns, spatial_valid, spatial_group_rows, sample_rows,
+            output_dir / '06_merge_score_relationship.png',
+        )
     print(json.dumps({
         'output_dir': str(output_dir),
         'summary': str(output_dir / 'summary.json'),

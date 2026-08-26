@@ -30,8 +30,10 @@ from daxigua.rl.mergeability import (  # noqa: E402
 )
 from daxigua.rl.mergeability_rollout import (  # noqa: E402
     SCENE_VALUE_DTYPES,
+    lineage_aligned_spatial_change,
     scene_mergeability_delta,
     scene_mergeability_values,
+    scene_spatial_values,
 )
 from daxigua.rl.observations import TensorState  # noqa: E402
 from daxigua.rl.viewer import (  # noqa: E402
@@ -199,7 +201,7 @@ def collect(args):
         writer, transfer_interval=args.transfer_interval
     )
     base_manifest = {
-        'format_version': 1,
+        'format_version': 2,
         'purpose': 'mergeability_scene_value_rollout',
         'created_at_utc': _utc_now(),
         'status': 'running',
@@ -211,6 +213,12 @@ def collect(args):
         'checkpoint_progress': loaded.progress,
         'policy': 'SAB-128 greedy',
         'scene_value_definition': 'sum(mergeability * pi * physics_radius^2)',
+        'spatial_scene_definition': (
+            'material-mass-weighted mean(actual/material mergeability)'
+        ),
+        'spatial_delta_definition': (
+            'lineage-aligned change over material existing before the drop'
+        ),
         'device': str(loaded.device),
         'cuda_device_name': (
             torch.cuda.get_device_name(loaded.device)
@@ -236,12 +244,6 @@ def collect(args):
     }
     _write_manifest(manifest_path, base_manifest)
 
-    previous_value = torch.zeros(
-        args.num_envs, dtype=torch.float32, device=loaded.device
-    )
-    previous_valid = torch.zeros(
-        args.num_envs, dtype=torch.bool, device=loaded.device
-    )
     next_episode_id = args.num_envs
     completed_episodes = 0
     started = time.perf_counter()
@@ -253,6 +255,14 @@ def collect(args):
             state = TensorState.from_observation(
                 observation, physics_fps=config.physics_fps
             )
+            before_result = calculator(state)
+            before_scene_value, _, _ = scene_mergeability_values(
+                state, before_result
+            )
+            # BatchObservation默认是模拟器内部视图；step前只保留谱系对齐必需字段。
+            before_fruit_ids = observation.fruit_ids.clone()
+            before_levels = observation.levels.clone()
+            before_active = observation.active.clone()
             actions = loaded.model(state).argmax(dim=1)
             step = simulator.step(actions)
             current = step.observation
@@ -264,7 +274,25 @@ def collect(args):
                 scene_mergeability_values(current_state, result)
             )
             delta, delta_valid = scene_mergeability_delta(
-                scene_value, previous_value, previous_valid
+                scene_value,
+                before_scene_value,
+                torch.ones_like(scene_value, dtype=torch.bool),
+            )
+            spatial_scene_score, material_mass = scene_spatial_values(
+                current_state, result
+            )
+            merge_events = step.physics.merge_events
+            spatial_change = lineage_aligned_spatial_change(
+                before_fruit_ids,
+                before_levels,
+                before_active,
+                before_result.spatial_score,
+                current.fruit_ids,
+                current.active,
+                result.spatial_score,
+                merge_events.count,
+                merge_events.source_ids,
+                merge_events.new_fruit_ids,
             )
             finished = step.physics.done | step.physics.truncated
             accumulator.append({
@@ -281,11 +309,16 @@ def collect(args):
                 'area_weighted_mean': weighted_mean,
                 'delta': delta,
                 'delta_valid': delta_valid,
+                'spatial_scene_score': spatial_scene_score,
+                'material_mass': material_mass,
+                'spatial_delta': spatial_change.delta,
+                'spatial_delta_valid': spatial_change.valid,
+                'lineage_coverage': spatial_change.coverage,
+                'merge_count': merge_events.count,
+                'merge_score': step.physics.score_delta,
                 'done': finished,
             })
             accumulator.advance()
-            previous_value.copy_(scene_value)
-            previous_valid.fill_(True)
 
             finished_count = int(finished.sum().item())
             if finished_count:
@@ -298,7 +331,6 @@ def collect(args):
                     next_episode_id=next_episode_id,
                     seed_base=args.seed_base,
                 )
-                previous_valid[finished] = False
 
             if (
                     decision_step % args.progress_interval == 0
@@ -314,6 +346,13 @@ def collect(args):
                     'valid_delta_mean': float(
                         delta[delta_valid].mean().item()
                         if bool(delta_valid.any().item()) else 0.0
+                    ),
+                    'valid_spatial_delta_mean': float(
+                        spatial_change.delta[spatial_change.valid].mean().item()
+                        if bool(spatial_change.valid.any().item()) else 0.0
+                    ),
+                    'merge_score_mean': float(
+                        step.physics.score_delta.to(torch.float32).mean().item()
                     ),
                     'elapsed_seconds': elapsed,
                     'env_steps_per_second': (

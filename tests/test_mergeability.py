@@ -56,6 +56,33 @@ class MergeabilityCalculatorTest(unittest.TestCase):
         self.assertEqual(int(result.primary_dependency_slot[0, 0]), 1)
         self.assertEqual(float(result.internal_difficulty[0, 0]), 0.0)
         self.assertEqual(float(result.score[0, 0]), 1.0)
+        self.assertEqual(float(result.material_score[0, 0]), 1.0)
+        self.assertEqual(float(result.spatial_score[0, 0]), 1.0)
+
+    def test_material_score_ignores_geometry_but_spatial_score_does_not(self):
+        calculator = MergeabilityCalculator(
+            self.config, external_supply=_UnavailableExternalSupply()
+        )
+        tensors = _scene((
+            (0, 7, 80.0, 900.0),
+            (1, 7, 480.0, 900.0),
+        ))
+        result = calculator.compute(*tensors)
+        self.assertEqual(float(result.material_score[0, 0]), 1.0)
+        self.assertEqual(float(result.score[0, 0]), 0.0)
+        self.assertEqual(float(result.spatial_score[0, 0]), 0.0)
+
+    def test_actual_score_never_exceeds_material_score(self):
+        tensors = _scene((
+            (0, 9, 90.0, 900.0),
+            (1, 8, 240.0, 900.0),
+            (2, 7, 390.0, 760.0),
+            (3, 5, 470.0, 540.0),
+        ), batch=3)
+        result = self.calculator.compute(*tensors)
+        self.assertTrue(bool((result.score <= result.material_score + 1e-6).all()))
+        self.assertTrue(bool((result.spatial_score >= 0.0).all()))
+        self.assertTrue(bool((result.spatial_score <= 1.0).all()))
 
     def test_lower_level_candidate_propagates_without_same_level_cycle(self):
         tensors = _scene((
